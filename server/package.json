@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
-    "check": "biome ci .",
+    "check": "biome ci --colors=off .",
     "format": "biome check --write .",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "vitest run",

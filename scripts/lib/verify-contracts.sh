@@ -35,6 +35,7 @@ mashkif_node_run() {
   docker run --rm --init "${net_args[@]}" \
     --user "$(id -u):$(id -g)" \
     -e CI=true \
+    -e NO_COLOR=1 \
     -e HOME=/tmp/home \
     -e COREPACK_HOME=/cache/corepack \
     -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
