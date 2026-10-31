@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Mashkif.Common/Mashkif.Common.csproj" />
+    <Project Path="src/Mashkif.Service/Mashkif.Service.csproj" />
+    <Project Path="src/Mashkif.Tray/Mashkif.Tray.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Mashkif.Agent.Tests/Mashkif.Agent.Tests.csproj" />
+  </Folder>
+</Solution>

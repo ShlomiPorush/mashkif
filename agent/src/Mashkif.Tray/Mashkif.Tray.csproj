@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>Mashkif.Tray</RootNamespace>
+    <AssemblyName>Mashkif.Tray</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- Lets the installer publish a self-contained win-x64 build with the committed lock file. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <!-- Published by the installer as one self-contained file. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Mashkif.Common\Mashkif.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Mashkif.Agent.Tests" />
+  </ItemGroup>
+</Project>
