@@ -1,2 +1,31 @@
 # Local project status map (machine-local, never committed)
 .project-map/
+
+# Real environment files and the machine-local development Compose file.
+# Only the placeholder template .env.example is tracked.
+.env
+.env.*
+!.env.example
+docker-compose-dev.yml
+
+# MaxMind GeoLite2 databases. The license forbids redistribution.
+*.mmdb
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# .NET build output
+agent/**/bin/
+agent/**/obj/
+agent/artifacts/
+TestResults/
+
+# Editors and operating systems
+.vs/
+.idea/
+*.user
+.DS_Store
+Thumbs.db
