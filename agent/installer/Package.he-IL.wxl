@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="he-IL" Codepage="1255" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+  <String Id="Language" Value="1037" />
+  <String Id="ProductName" Value="משקיף ל-Windows" />
+  <String Id="Manufacturer" Value="משקיף" />
+  <String Id="DowngradeError" Value="גרסה חדשה יותר של משקיף ל-Windows כבר מותקנת." />
+</WixLocalization>
