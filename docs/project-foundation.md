@@ -1,0 +1,169 @@
+# Mashkif Project Foundation
+
+Status: Preparation, approved by Shlomi on 2026-11-01. Nothing described as planned in this document is implemented.
+
+This document separates the repository's current state from the approved foundation that a later implementation task must build. A planned item does not exist until its status and verification evidence say otherwise. Product features (heartbeats, outage detection, reputation, maps with real data) are out of scope for the foundation task.
+
+## Current truth
+
+Inspected on 2026-10-31:
+
+- The repository is a fresh `git init` on branch `main` with no commits and no remote.
+- Tracked content: none. Files added by the preparation step, uncommitted: `README.md`, `AGENTS.md`, `CLAUDE.md`, `.gitignore`, `docs/project-foundation.md`.
+- `.gitignore` currently ignores only `.project-map/`, a machine-local status map.
+- No code, scripts, CI workflows, container definitions, lockfiles, or license files exist.
+- No checks have been run, because there is nothing to check.
+- The domain `mashkif.co.il` is registered. Hosting is an existing Linux server with Docker and Traefik that Shlomi operates; its details are not recorded in the repository.
+- A related project, geoip-extractor (outside this repository), downloads MaxMind GeoLite2 data and writes per-country CIDR and ASN lists. Its CIDR output is collapsed without per-range ASN, so it cannot map an IP address to a provider. Its Israeli ASN list is a useful seed for the curated provider table.
+
+## Product intent and boundaries
+
+Mashkif is a community internet outage map for Israel. It answers one question: is the problem on my side, or is everyone affected?
+
+- **Users:** first, IT staff who install the agent on managed Windows endpoints; later, home users. The public website serves anyone.
+- **How it works:** a small Windows agent sends a heartbeat and latency measurements every few minutes. The server identifies the internet provider from the public IP address (ASN). When many sites of the same provider or the same access infrastructure in the same area go silent together, the server declares an outage. The agent also runs a local diagnosis (gateway, provider first hop, DNS, external host) to tell its own user whether the fault is at home or at the provider.
+- **Privacy invariant:** the agent never sends an exact location. It sends only a coarse regional cell (H3), derived on the machine from the Windows Location API (with consent) or from an area the user picks.
+- **Abuse resistance:** agent registration keys, rate limits, outage thresholds counted by distinct sites (public IP addresses) rather than agents, more weight for long-standing agents, and admin-managed trust tiers (trusted, normal, suspicious or blocked) for agents, IP addresses, and ranges.
+- **Rollout stages:** (1) Shlomi's own computers, unsigned agent; (2) endpoints of the company Shlomi works with, with customer consent, signed agent; (3) public. The MVP ends at stage 2. The public website starts after enough agents report data.
+- **Scope:** Israel only. Windows only for the agent.
+- **Non-goals for the MVP:** macOS or Linux agents, mobile apps, active probing of IP blocks, BGP monitoring, and the public website.
+- **Deployment shape:** one Linux host running Docker Compose behind an existing Traefik reverse proxy, serving `mashkif.co.il`. The agent ships as an MSI suitable for GPO and Intune deployment.
+
+## Preparation decisions
+
+| Decision | Status | Choice | Rationale or blocker |
+|---|---|---|---|
+| Publication posture | Approved | Public-ready | The repository will be public so people can audit the agent before installing it. |
+| Repository structure | Approved | One public repository for agent, contract, server, and web | Mashkif is a non-commercial community project. A split with a private server was considered and rejected: public repositories keep GitHub code scanning, secret scanning, rulesets, and unlimited Actions minutes free. If abuse appears, the mechanism can change and future versions can move private. |
+| Detection engine boundary | Approved | Outage detection and reputation scoring sit behind one server module interface (`DetectionEngine`) with no other code depending on their internals | Keeps everything public now while allowing a private implementation to replace the public one later, without a rewrite, if abuse appears. |
+| External contributions | Approved | Contributors sign a Contributor License Agreement once, collected by CLA Assistant on the pull request. The CLA grants a license, including the right to relicense; it does not transfer ownership. | Keeps Shlomi able to move future server versions private or combine the server with a private detection engine. Enabled with the GitHub configuration, before any external pull request is merged. The CLA text starts from an established template and Shlomi approves it. |
+| Detection parameters | Approved | Outage thresholds, reputation weights, and trust lists live in the database, managed from the admin panel, never in the repository | Public code must not hand attackers the exact values to game. |
+| GitHub visibility | Approved | Public from the first push | CI and GitHub security features run free on public repositories. Creating the repository still needs separate authorization, and nothing secret may ever be committed, because the full history is public. |
+| Repository language | Approved | English, except Hebrew locale files | Follows from the public-ready posture. |
+| Licensing | Approved | `MIT` for the agent and the protocol contract; `AGPL-3.0` for the server and web | MIT lets anyone audit and reuse the agent; AGPL keeps hosted forks of the service open. The contract is MIT because the MIT agent consumes it. |
+| License file layout | Approved | One `LICENSE` file per component directory, no root `LICENSE`; the root README states the map | A single root license would misstate the split. |
+| Agent technology | Approved | .NET 10, Windows Service plus a tray app, MSI installer | Native access to Location API, power and sleep events, and managed deployment. .NET is confined to `agent/`. |
+| Server technology | Approved | TypeScript on Node.js 24 LTS, PostgreSQL | Shlomi excluded .NET from everything server-side. One language with the web app allows shared API types. |
+| Web technology | Approved | React, Vite, MapLibre GL JS | Strong map, RTL, and localization ecosystem; no map API key needed. Hosts the admin panel and internal map now, the public site later. |
+| Server framework, DB access, migrations | Approved | Hono, Drizzle ORM with forward-only migrations, postgres.js, Biome for format and lint | Matches Shlomi's n8n-ops project, whose Better Auth setup (Drizzle adapter) Mashkif reuses for admin sign-in. |
+| JS package manager | Approved | pnpm workspace with a committed lockfile | Standard workspace support and a single lockfile for server, web, and contract types. |
+| Protocol contract | Approved | OpenAPI document in `contracts/` is the source of truth | The agent (C#) and server (TypeScript) are in different languages; generated or checked types prevent drift. |
+| Runtime shape | Approved | Docker Compose on Shlomi's Linux server behind Traefik | Shlomi's existing hosting. |
+| Workflow scripts | Approved | WSL Bash `.sh` files under `scripts/`, with an agent exception | Agent build and tests need Windows. Locally, scripts call the Windows `dotnet.exe` through WSL interop for the agent area; CI runs the agent area on a Windows runner. |
+| Root layout | Approved | Minimal root with every file justified | See the planned root table. |
+| Agent distribution | Approved | MSI only in the MVP, for manual install and GPO or Intune deployment; no winget package or EXE installer yet | IT staff are the first audience. |
+| User interface language | Approved | Hebrew (RTL) by default, English (LTR) as the second language, in the web app and the agent | Israeli audience; English for non-Hebrew readers. |
+| Release artifacts | Approved | Agent: MSI published as a GitHub Release asset and downloaded from the website. Server and web: one container image in GitHub Container Registry (GHCR). | GHCR sits next to the repository and its CI and needs no extra account. |
+| Versioning | Approved | Independent SemVer for agent and server, tags `agent-vX.Y.Z` and `server-vX.Y.Z`, one changelog per component | Agent releases need signing and are rare; server releases are frequent. |
+| Code signing | Deferred | Decided before stage 2 | Stage 1 runs unsigned on Shlomi's computers. Agent release to customers is blocked until then. |
+| Admin authentication | Approved | Reuse the n8n-ops model: Better Auth, one local admin, username and password with mandatory TOTP, rate-limited sign-in, audited logins, session time limits, first-run setup wizard. Add passkey sign-in through Better Auth's passkey support; password plus TOTP stays as the fallback. | Proven in Shlomi's n8n-ops; passkeys resist phishing. Security review required when the feature is built. Not part of the foundation task. |
+| Public IP storage | Approved | Store the full public IP address of each site, visible only to the admin, never exposed by the public site or any public API, and disclosed on the "what the agent sends" page | Site counting and trust tiers for IP addresses and ranges need the real address; a hash cannot match ranges. A retention period is set before the public stage. |
+| ASN data source | Approved | Mashkif does not download MaxMind data. The operator mounts an existing GeoLite2-ASN directory read-only (for example the one geoip-extractor maintains). The app reports the database build date and warns in the admin panel when it is stale. | Reuses Shlomi's existing MaxMind download and license key. The GeoLite2 license forbids redistribution, so the file is never committed or baked into an image. |
+
+## Publication and language policy
+
+- All repository text is English: documentation, `AGENTS.md`, code, comments, tests, fixtures, commit messages, issues, pull requests, and reviews.
+- Hebrew is allowed only in exact locale files. Planned paths: `web/src/locales/he.json`, the agent's Hebrew resource files, and the installer's Hebrew localization file. The foundation task fixes their exact paths and lists them in the guard.
+- A CI guard scans tracked text for Hebrew characters and excludes only those exact paths. Tests load Hebrew samples from the locale files.
+- The product name in repository text is `Mashkif`. The Hebrew name and taglines live only in locale files.
+- Secrets never enter the repository: no MaxMind license key, signing material, database passwords, or registration keys. Only `.env.example` with placeholders is tracked.
+
+## Planned architecture
+
+| Component | Responsibility | Expected path | License | Status | Dependencies or blockers |
+|---|---|---|---|---|---|
+| Protocol contract | OpenAPI definition of the agent-to-server API; source for TypeScript types and C# client code | `contracts/` | MIT | Planned | None |
+| Windows agent | Background service: heartbeat, latency, local diagnosis, outage journal with retroactive reports, sleep and shutdown notices, H3 cell computed locally | `agent/` | MIT | Planned | Contract |
+| Agent tray app | User-facing status ("home or provider"), consent for location, area selection; Hebrew and English | `agent/` | MIT | Planned | Agent service |
+| Agent installer | MSI with silent install properties for GPO and Intune | `agent/` | MIT | Planned | Signing decision before stage 2 |
+| Server | Ingest API for agents, ASN lookup, site grouping, outage detection, reputation, admin API | `server/` | AGPL-3.0 | Planned | Contract, PostgreSQL, ASN data |
+| Web | Admin panel with reputation controls and internal map now; public site later | `web/` | AGPL-3.0 | Planned | Server API |
+| Database | Agents, sites, heartbeats, outages, trust tiers, detection parameters, curated provider and infrastructure table | Container | Third-party | Planned | None |
+| ASN data | GeoLite2-ASN file maintained outside Mashkif and mounted read-only | Host directory | MaxMind GeoLite2 license | Planned | Operator provides the directory |
+
+Load-bearing boundaries:
+
+- The agent talks to the server only through the versioned contract. The server must accept the previous agent protocol version, because agents update slowly on managed endpoints.
+- The server and web ship as one container image. The server serves the built web assets on the same origin, so the admin panel needs no cross-origin configuration. Traefik routes `mashkif.co.il` to that container.
+- Coordinates never leave the endpoint. The server stores only H3 cells.
+
+## Planned containers
+
+| Service | Image | Runtime user | Health check | Persistent state | Host bind directory | Named-volume exception | Backup lifecycle |
+|---|---|---|---|---|---|---|---|
+| `app` | Project image (server plus built web), Node.js 24 | Dedicated unprivileged user declared in the image | HTTP readiness endpoint that also checks database connectivity and that the GeoLite2-ASN file is readable | None | `${MASHKIF_GEOIP_DIR}`, read-only, owned by the external updater | None | Not applicable; the external updater owns it |
+| `db` | Official PostgreSQL image | Non-root UID set in Compose that owns the data directory; verified at startup | `pg_isready` against the application database | Database files | `${MASHKIF_DATA_DIR}/postgres` | None | Scheduled logical dump to a host backup directory; documented restore; kept on ordinary stop; removed only by confirmed nuke |
+
+Compose interpolation is limited to values Compose itself resolves: the image tag, `MASHKIF_DATA_DIR`, `MASHKIF_GEOIP_DIR`, and the external Traefik network name. Application settings come from `.env` through `env_file`.
+
+## Planned repository root
+
+| Root file | Git tracking policy | Why this exact root location is required | Status |
+|---|---|---|---|
+| `README.md` | Tracked | GitHub and contributor discovery | Exists, uncommitted |
+| `AGENTS.md` | Tracked | Agent instruction discovery | Exists, uncommitted |
+| `CLAUDE.md` | Tracked | Claude Code discovery; contains only an import of `AGENTS.md` | Exists, uncommitted |
+| `.gitignore` | Tracked | Git reads root ignore rules | Exists, uncommitted; ignores only `.project-map/` so far |
+| `.gitattributes` | Tracked | Enforces LF for `.sh` and text files from the root | Planned |
+| `.editorconfig` | Tracked | Editors resolve it from the root | Planned |
+| `package.json` | Tracked | pnpm workspace root | Planned |
+| `pnpm-workspace.yaml` | Tracked | pnpm requires it at the workspace root | Planned |
+| `pnpm-lock.yaml` | Tracked | pnpm writes the single workspace lockfile at the root | Planned |
+| `docker-compose.yml` | Tracked | Production deployment contract | Planned |
+| `docker-compose-dev.yml` | Ignored, machine-local | Docker contract requires this exact root path; created per machine from `config/docker-compose-dev.example.yml` | Planned |
+| `.env.example` | Tracked | Environment contract next to the Compose file, placeholders only | Planned |
+| `.env` | Ignored, machine-local | Real values read by Compose `env_file` | Planned |
+
+Everything else lives in purpose-specific directories: `agent/` (including its `global.json`, solution, central package management, and NuGet lock files), `server/`, `web/`, `contracts/`, `scripts/`, `config/`, `docs/`, and `.github/` (workflows, Dependabot, `SECURITY.md`, `CONTRIBUTING.md`). Changelogs live at `agent/CHANGELOG.md` and `server/CHANGELOG.md`.
+
+## Foundation implementation plan
+
+| Order | Deliverable | Status | Acceptance criteria | Required verification |
+|---|---|---|---|---|
+| 1 | Repository baseline | Planned | Root files from the table exist; per-component `LICENSE` files; `.gitignore` covers `.env`, `docker-compose-dev.yml`, build output, and GeoLite2 files while keeping `.env.example` tracked | `git check-ignore` confirms each ignore rule; `.env.example` is not ignored |
+| 2 | Protocol contract | Planned | OpenAPI document with only a health endpoint and the protocol version header; lint passes; TypeScript types generated or checked | Contract lint in `verify.sh` |
+| 3 | Server and web toolchain | Planned | pnpm workspace; TypeScript strict; format, lint, unit test, and build for `server/` and `web/`; server exposes only health and readiness; web shows an empty shell | `verify.sh` area runs pass |
+| 4 | Web localization and themes | Planned | Hebrew (default, RTL) and English (LTR) locale files; language switch; complete light and dark themes; responsive layout; no hard-coded user-facing strings | Screenshots of both languages and both themes at mobile and desktop widths |
+| 5 | Agent toolchain | Planned | .NET 10 solution with a service and a tray project that start and log only; tests; central package versions with lock files; MSI builds unsigned | Agent area of `verify.sh` on Windows; MSI installs and uninstalls cleanly on a test machine |
+| 6 | Production Docker definition | Planned | Image for `app` with non-root user and health check; `docker-compose.yml` with `app`, `db`, the read-only GeoLite2 mount, Traefik labels, `env_file`, bind mounts, no `build:` | Guard rejects `build:`; effective UID is not 0 for every application process |
+| 7 | Development Docker definition | Planned | `config/docker-compose-dev.example.yml` documents how to create the machine-local file; dev images use `mashkif-app:dev` | `local.sh` fails clearly when the file is missing |
+| 8 | Local workflow | Planned | `scripts/local.sh` build, up, detached up, down, status, confirmed nuke | Health, runtime identity, and running image identity verified after startup; data survives down and up |
+| 9 | Verify workflow | Planned | `scripts/verify.sh` full sweep and changed-area mode; guards for Hebrew text, Compose `build:`, and shell lint | Same commands run locally and in CI |
+| 10 | Try PR workflow | Planned | `scripts/try-pr.sh` with start, status, and restore | Disposable worktree; running `app` uses the freshly built image; database container not replaced |
+| 11 | Release workflow | Planned | `scripts/release.sh` with preview mode, explicit target (`agent` or `server`), version and changelog update, immutable tag | Preview run produces no changes |
+| 12 | Path-filtered CI | Planned | Change detection, server and web on Linux, agent on Windows, guards, final summary job; least-privilege permissions; pinned actions; manual and weekly full runs | Green run on a pull request that touches each area |
+| 13 | Dependency management | Planned | Dependabot weekly for npm, NuGet, Docker, and GitHub Actions; grouped minor and patch updates; no auto-merge | Configuration validated by GitHub |
+| 14 | GitHub configuration | Blocked | Repository, labels, templates, branch rules, security settings, CLA Assistant with the approved CLA text | Requires separate authorization |
+
+## Required workflow contracts
+
+All scripts are Bash run inside WSL, start with `#!/usr/bin/env bash`, use LF line endings and executable modes, and resolve the repository root from their own location. Shell lint and syntax checks run in `verify.sh`.
+
+- **`scripts/local.sh`:** builds `mashkif-app:dev` explicitly before changing the running environment and stops on the first failure. Runs `docker-compose-dev.yml` only, removes orphans, and keeps `${MASHKIF_DATA_DIR}` contents across `down` and `up`. Nuke asks for confirmation and removes only a validated project-owned data path. The agent is not part of the local Compose environment.
+- **`scripts/verify.sh`:** areas are `contracts`, `server`, `web`, `agent`, `docker`, and `guards`. The agent area calls the Windows .NET SDK through WSL interop (approved exception). Integration checks use the real PostgreSQL image and clean up afterwards.
+- **`scripts/try-pr.sh`:** takes a pull request number. For server or web changes it rebuilds and restarts only `app`. For agent changes it builds the MSI inside the worktree and prints its path; installation stays manual. Migrations are forward-only; restore refuses to start older code against a newer schema and explains how to proceed.
+- **`scripts/release.sh`:** separate targets. `agent` produces a signed MSI once signing exists and a GitHub Release asset. `server` builds and pushes the container image. Never deploys. Never uses `git add .`, force-pushes a tag, or overwrites a published version.
+
+## Known unknowns and blockers
+
+| Question or blocker | Why it matters | Evidence or decision needed | Owner |
+|---|---|---|---|
+| Traefik network name and certificate resolver | Compose labels must match the existing Traefik | Values from the server | Shlomi |
+| Host data directory and GeoLite2 directory | Bind mounts and backup location | Paths on the server, and confirmation that the GeoLite2-ASN file there is kept current | Shlomi |
+| Code-signing provider | Blocks agent release for stage 2 | Choose a provider available to an individual in Israel | Shlomi, before stage 2 |
+| Public IP retention period | The privacy page must state how long full addresses are kept | Choose a period | Shlomi, before the public stage |
+| GitHub repository creation | Remote, CI, and Dependabot need it | Explicit authorization with owner, name, and visibility | Shlomi |
+
+## Ready-for-implementation criteria
+
+- Shlomi approved this document on 2026-11-01.
+- Authorization is given for the first commit. CI deliverables also need the GitHub repository; without it, the task stops after local verification.
+- The Traefik network name, host data directory, and GeoLite2 directory are known before deliverable 6 is verified on the server. Local development does not need them.
+
+## Handoff to foundation implementation
+
+The first implementation task builds deliverables 1 through 13 in order on a topic branch. Permitted scope: repository baseline, contract skeleton, toolchains, empty server and web shells with health endpoints and localization and theme infrastructure, an agent that starts and logs only, container definitions, the four workflow scripts, CI, and Dependabot configuration.
+
+Out of scope: heartbeats, diagnosis, outage detection, reputation, admin features, real map data, signing, deployment to the server, and any release.
+
+Stopping point: `scripts/verify.sh` passes a full sweep locally, `scripts/local.sh` brings up a healthy non-root development environment, the unsigned MSI installs and uninstalls on a test machine, and, if the repository exists, CI is green on the pull request. Then update this document's statuses with evidence and stop for review.
