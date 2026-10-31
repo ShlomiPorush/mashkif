@@ -46,7 +46,11 @@ expect "empty base" "$ALL" "$(select_areas "")"
 expect "all-zero base" "$ALL" "$(select_areas 0000000000000000000000000000000000000000)"
 expect "unknown base" "$ALL" "$(select_areas refs/heads/does-not-exist-mashkif-test)"
 
-# Git behaviour against a scratch repository.
+# Git behaviour against a scratch repository. Clear every variable that would
+# redirect Git to another repository, so `git init` and the commits below can
+# only touch the scratch repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_NAMESPACE
 scratch="$(mashkif_mktemp select-areas-test)"
 trap 'rm -rf -- "$scratch"' EXIT
 repo="$scratch/repo"
