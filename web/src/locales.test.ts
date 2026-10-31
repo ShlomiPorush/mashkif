@@ -18,10 +18,16 @@ describe("locale files", () => {
   });
 
   it("write Hebrew in the Hebrew file and no Hebrew in the English file", () => {
-    const hebrewLetter = /[֐-׿]/;
-    expect(hebrewLetter.test(he.home.heading)).toBe(true);
+    // Code points, not a regex literal: formatters may turn \u escapes into
+    // literal Hebrew letters, which the repository's Hebrew guard rejects here.
+    const hasHebrew = (text: string) =>
+      [...text].some((char) => {
+        const code = char.codePointAt(0) ?? 0;
+        return code >= 0x0590 && code <= 0x05ff;
+      });
+    expect(hasHebrew(he.home.heading)).toBe(true);
     for (const [key, value] of english) {
-      expect(hebrewLetter.test(value), key).toBe(false);
+      expect(hasHebrew(value), key).toBe(false);
     }
   });
 });
