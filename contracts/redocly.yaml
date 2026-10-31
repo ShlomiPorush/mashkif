@@ -1,0 +1,4 @@
+# Lint rules for contracts/openapi.yaml. recommended-strict turns every
+# recommended warning into an error, so lint fails on any finding.
+extends:
+  - recommended-strict

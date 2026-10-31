@@ -1,0 +1,114 @@
+openapi: 3.1.1
+info:
+  title: Mashkif agent protocol
+  version: "1"
+  summary: Protocol between the Mashkif Windows agent and the Mashkif server.
+  description: |
+    The Mashkif agent talks to the server only through the operations in this
+    document. Every agent request carries the `Mashkif-Protocol-Version`
+    header. The server answers with the protocol version it used in the same
+    header, and it keeps accepting the previous protocol version so that
+    agents on managed endpoints can update slowly.
+
+    `info.version` is the current protocol version.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: https://mashkif.co.il
+    description: Production server.
+tags:
+  - name: agent
+    description: Operations called by the Mashkif Windows agent.
+paths:
+  /api/agent/health:
+    get:
+      tags:
+        - agent
+      operationId: getAgentHealth
+      summary: Check that the server accepts the agent's protocol version.
+      description: |
+        Returns 200 when the server is up and supports the protocol version
+        that the agent sent. This operation does not check the server's
+        dependencies; operators use `/readyz` for that.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ProtocolVersion"
+      responses:
+        "200":
+          description: The server supports the requested protocol version.
+          headers:
+            Mashkif-Protocol-Version:
+              $ref: "#/components/headers/ProtocolVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHealth"
+        "400":
+          description: |
+            The protocol version header is missing, malformed, or names a
+            version that the server does not support.
+          headers:
+            Mashkif-Protocol-Version:
+              $ref: "#/components/headers/ProtocolVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolError"
+components:
+  parameters:
+    ProtocolVersion:
+      name: Mashkif-Protocol-Version
+      in: header
+      required: true
+      description: Protocol version the agent speaks, a positive integer.
+      schema:
+        $ref: "#/components/schemas/ProtocolVersionValue"
+  headers:
+    ProtocolVersion:
+      description: |
+        Protocol version the server used for this response. On a 400
+        response it is the server's current protocol version.
+      required: true
+      schema:
+        $ref: "#/components/schemas/ProtocolVersionValue"
+  schemas:
+    ProtocolVersionValue:
+      type: string
+      pattern: "^[1-9][0-9]{0,8}$"
+      examples:
+        - "1"
+    AgentHealth:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - protocolVersion
+      properties:
+        status:
+          type: string
+          const: ok
+        protocolVersion:
+          type: integer
+          minimum: 1
+          description: Protocol version the server used for this response.
+    ProtocolError:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+        - supportedVersions
+      properties:
+        error:
+          type: string
+          enum:
+            - protocol_version_missing
+            - protocol_version_invalid
+            - protocol_version_unsupported
+          description: Stable error code.
+        supportedVersions:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+          description: Protocol versions the server accepts, oldest first.
