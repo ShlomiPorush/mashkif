@@ -1,0 +1,354 @@
+/*
+ * Admin panel. Loaded only with the admin chunk. Builds on the shell's colors
+ * (styles.css) and uses logical properties, so Hebrew and English mirror.
+ */
+
+:root {
+  --danger: light-dark(#b42318, #ff8f85);
+  --danger-ground: light-dark(#fdecea, #3a1513);
+  --card: light-dark(#ffffff, #0d1f2a);
+  --field: light-dark(#ffffff, #071219);
+  --accent: light-dark(#0b6e69, #3cc4b4);
+  --accent-ink: light-dark(#ffffff, #04211e);
+}
+
+.admin-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.admin-badge {
+  padding-block: 0.25rem;
+  padding-inline: 0.625rem;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--ground);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.admin-main {
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  padding-block: clamp(2rem, 6vh, 5rem);
+  padding-inline: var(--gutter);
+}
+
+.admin-loading {
+  color: var(--muted);
+  font-size: 1.125rem;
+}
+
+/* Sign-in, setup, and TOTP steps */
+
+.auth-panel {
+  display: grid;
+  gap: 1.25rem;
+  inline-size: 100%;
+  max-inline-size: 30rem;
+}
+
+.auth-heading,
+.admin-heading {
+  margin: 0;
+  font-size: clamp(2.25rem, 1.5rem + 3vw, 3.5rem);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.auth-intro {
+  margin: 0;
+  color: var(--muted);
+  font-size: 1.125rem;
+}
+
+.form {
+  display: grid;
+  gap: 1.125rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.375rem;
+}
+
+.field-label {
+  font-weight: 600;
+}
+
+.field-input {
+  min-block-size: 3rem;
+  padding-inline: 0.875rem;
+  border: 2px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--field);
+  color: var(--ink);
+  font: inherit;
+  font-size: 1.0625rem;
+}
+
+.field-input:focus-visible {
+  border-color: var(--focus);
+  outline-offset: 1px;
+}
+
+.field-input[readonly] {
+  color: var(--muted);
+}
+
+.field-code {
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.field-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+.command {
+  display: block;
+  padding-block: 0.625rem;
+  padding-inline: 0.875rem;
+  overflow-wrap: anywhere;
+  border-radius: 0.625rem;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.875rem;
+  text-align: start;
+  user-select: all;
+}
+
+.notice {
+  margin: 0;
+  padding-block: 0.75rem;
+  padding-inline: 1rem;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--online) 14%, transparent);
+  font-weight: 500;
+}
+
+.notice-error {
+  background: var(--danger-ground);
+  color: var(--danger);
+}
+
+.button {
+  min-block-size: 3rem;
+  padding-inline: 1.375rem;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 1.0625rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.button-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, var(--ink));
+}
+
+.button-secondary {
+  border-color: var(--ink);
+  background: transparent;
+  color: var(--ink);
+}
+
+.button-secondary:hover:not(:disabled) {
+  background: var(--ink);
+  color: var(--ground);
+}
+
+.button-quiet {
+  min-block-size: 2.75rem;
+  padding-inline: 0.875rem;
+  background: transparent;
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--muted);
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  border-block-start: 1px solid var(--line);
+}
+
+.help-block {
+  display: grid;
+  gap: 0.5rem;
+  padding-block-start: 0.5rem;
+}
+
+.totp-setup {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.totp-qr {
+  padding: 0.5rem;
+  border-radius: 0.75rem;
+  background: #ffffff;
+}
+
+.totp-manual {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.totp-key {
+  font-size: 1rem;
+  letter-spacing: 0.06em;
+}
+
+/* Signed-in admin page */
+
+.admin-home {
+  display: grid;
+  gap: 2rem;
+  inline-size: 100%;
+  max-inline-size: 72rem;
+}
+
+.admin-intro {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.admin-card {
+  display: grid;
+  gap: 1rem;
+  padding: clamp(1.25rem, 2.5vw, 2rem);
+  border: 1px solid var(--line);
+  border-radius: 1.25rem;
+  background: var(--card);
+}
+
+.admin-card-wide {
+  grid-column: 1 / -1;
+}
+
+.card-heading {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 800;
+}
+
+.card-intro,
+.card-empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+.passkey-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.passkey-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: 0.75rem;
+  border-block-end: 1px solid var(--line);
+}
+
+.passkey-name {
+  margin: 0;
+  font-weight: 600;
+}
+
+.form-inline {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.activity-table {
+  inline-size: 100%;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+}
+
+.activity-table th,
+.activity-table td {
+  padding-block: 0.625rem;
+  padding-inline: 0.5rem;
+  border-block-end: 1px solid var(--line);
+  text-align: start;
+  vertical-align: top;
+}
+
+.activity-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.activity-address {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (max-width: 52rem) {
+  .admin-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 40rem) {
+  .totp-setup {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+  }
+
+  .form-inline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .controls {
+    flex-wrap: wrap;
+  }
+}
