@@ -2,7 +2,9 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import postgres from "postgres";
 import { createApp } from "./app.js";
+import { createAuth } from "./auth/auth.js";
 import { ConfigError, loadConfig, type ServerConfig } from "./config.js";
+import { createDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
 import { databaseCheck, readableFileCheck } from "./readiness.js";
 import { hasWebAssets } from "./static.js";
@@ -49,11 +51,15 @@ async function main(): Promise<void> {
     console.warn(`web assets not found at ${WEB_ROOT}; serving the API only`);
   }
 
+  const db = createDb(sql);
+  const auth = createAuth({ db, appKey: config.appKey, publicOrigin: config.publicOrigin });
+
   const app = createApp({
     readiness: {
       database: databaseCheck(sql),
       geoip: readableFileCheck(config.geoipAsnPath),
     },
+    admin: { db, auth, publicOrigin: config.publicOrigin },
     ...(webRoot === undefined ? {} : { webRoot }),
     onReadinessFailure: (name, reason) => console.warn(`readiness check ${name} failed: ${reason}`),
   });

@@ -1,5 +1,9 @@
 import { Hono } from "hono";
 import { secureHeaders } from "hono/secure-headers";
+import type { AdminDeps } from "./admin/context.js";
+import { adminRoutes } from "./admin/routes.js";
+import { AUTH_BASE_PATH } from "./auth/auth.js";
+import { authRoutes } from "./auth/routes.js";
 import { agentRoutes } from "./protocol.js";
 import {
   DEFAULT_READINESS_TIMEOUT_MS,
@@ -16,6 +20,8 @@ export interface AppOptions {
   webRoot?: string;
   /** Called when a readiness check fails. The reason must not contain secrets. */
   onReadinessFailure?: (name: ReadinessCheckName, reason: string) => void;
+  /** Admin sign-in and the admin API. When undefined, those routes are 404. */
+  admin?: AdminDeps;
 }
 
 export function createApp(options: AppOptions): Hono {
@@ -57,6 +63,10 @@ export function createApp(options: AppOptions): Hono {
   });
 
   app.route("/api/agent", agentRoutes());
+  if (options.admin !== undefined) {
+    app.route(AUTH_BASE_PATH, authRoutes(options.admin));
+    app.route("/api/admin", adminRoutes(options.admin));
+  }
   app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));
 
   if (options.webRoot !== undefined) {
