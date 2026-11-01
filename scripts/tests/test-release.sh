@@ -1155,7 +1155,7 @@ case_prepare_recovery_later_date() {
 # G10: a remote release branch with other content is never reused or replaced.
 case_prepare_foreign_branch() {
   local variant tip
-  for variant in extra-file other-notes two-commits; do
+  for variant in extra-file other-notes two-commits parent-off-main; do
     world "prepare-foreign-$variant"
     clone b
     g b checkout -q -b "$BRANCH"
@@ -1177,6 +1177,13 @@ case_prepare_foreign_branch() {
         g b commit -q -am "Version"
         sed -i "s/^## \[Unreleased\]\$/## [Unreleased]\n\n## [1.0.0] - $TODAY/" "$W/b/server/CHANGELOG.md"
         g b commit -q -am "Changelog"
+        ;;
+      parent-off-main)
+        # Exactly the expected change, but on a parent that is not on main.
+        commit_on b "Never merged"
+        sed -i 's/"version": "0.1.0"/"version": "1.0.0"/' "$W/b/server/package.json"
+        sed -i "s/^## \[Unreleased\]\$/## [Unreleased]\n\n## [1.0.0] - $TODAY/" "$W/b/server/CHANGELOG.md"
+        g b commit -q -am "Release server 1.0.0"
         ;;
     esac
     g b push -q origin "$BRANCH"
@@ -1317,11 +1324,15 @@ case_publish_source_rules() {
         pr_add closed "${TODAY}T13:00:00Z" "$ORIG" "$BRANCH" "$ORIG" "$REPO"
         ;;
       not-on-main)
+        # A commit with the right content and CI, present locally, but on a
+        # side branch instead of main.
         clone b
         commit_on b "Side work"
         g b push -q origin "HEAD:refs/heads/side"
         sha="$(g b rev-parse HEAD)"
+        g a fetch -q origin side
         pr_set "\$5 == \"$BRANCH\"" "\$4 = \"$sha\""
+        ci_green "$sha"
         ;;
       other-version)
         # A merged release pull request whose merge commit still says 0.1.0.
@@ -1359,17 +1370,33 @@ case_publish_source_rules() {
 }
 
 # G13: a release pull request merged and then fully reverted refuses.
+# The partial variants exercise each half of the rule on its own.
 case_publish_reverted() {
-  world publish-reverted merged
-  clone b
-  g b revert --no-edit -m 1 "$MERGE" >/dev/null
-  g b push -q origin main
-  ci_green "$(g b rev-parse HEAD)"
-  publish a publish
-  expect_rc_nonzero "publish after the release was reverted"
-  expect_out "the revert is explained" "the release looks reverted"
-  expect_eq "no tag" "" "$(remote_ref "refs/tags/$TAG")"
-  expect "nothing built" no_builds
+  local variant
+  for variant in full section-only version-only; do
+    world "publish-reverted-$variant" merged
+    clone b
+    case "$variant" in
+      full)
+        g b revert --no-edit -m 1 "$MERGE" >/dev/null
+        ;;
+      section-only)
+        sed -i '/^## \[1\.0\.0\]/d' "$W/b/server/CHANGELOG.md"
+        g b commit -q -am "Drop the 1.0.0 section"
+        ;;
+      version-only)
+        sed -i 's/"version": "1.0.0"/"version": "0.1.0"/' "$W/b/server/package.json"
+        g b commit -q -am "Lower the version"
+        ;;
+    esac
+    g b push -q origin main
+    ci_green "$(g b rev-parse HEAD)"
+    publish a publish
+    expect_rc_nonzero "$variant: publish after the release was reverted"
+    expect_out "$variant: the revert is explained" "the release looks reverted"
+    expect_eq "$variant: no tag" "" "$(remote_ref "refs/tags/$TAG")"
+    expect "$variant: nothing built" no_builds
+  done
 }
 
 # G14: a merged fork pull request with the same branch name is not a release.
