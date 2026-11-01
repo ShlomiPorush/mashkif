@@ -13,6 +13,8 @@ export interface AdminDeps {
   auth: Auth;
   /** Origin of the web app, for example https://mashkif.co.il. */
   publicOrigin: string;
+  /** Time a client has to send a request body; defaults to ADMIN_BODY_TIMEOUT_MS. */
+  bodyTimeoutMs?: number;
   /** Defaults to the TCP peer address. */
   clientAddress?: ClientAddressResolver;
 }

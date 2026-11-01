@@ -28,6 +28,14 @@ export function describeSafely(error: unknown): string {
   if (!fromQuery) {
     return `${error.name}: ${error.message}`;
   }
+  return describeWithoutMessage(error);
+}
+
+/** An error's name and PostgreSQL SQLSTATE code, never its message. */
+export function describeWithoutMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return typeof error;
+  }
   const code = sqlState(error);
   // DrizzleQueryError keeps the name "Error"; its class names it.
   const name = error.name === "Error" ? error.constructor.name : error.name;

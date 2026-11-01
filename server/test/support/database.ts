@@ -20,6 +20,8 @@ export function testDatabaseUrl(): string {
 
 export interface TestDatabase {
   sql: Sql;
+  /** Connection URL of this database. */
+  url: string;
   db: Db;
   /** Drops the database. Call it in afterAll. */
   drop(): Promise<void>;
@@ -41,6 +43,7 @@ export async function createTestDatabase(): Promise<TestDatabase> {
   return {
     sql,
     db: createDb(sql),
+    url: url.toString(),
     drop: async () => {
       await sql.end({ timeout: 5 });
       await admin.unsafe(`drop database if exists ${name} with (force)`);

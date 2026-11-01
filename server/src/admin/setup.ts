@@ -99,11 +99,15 @@ export async function completeSetup(
   input: SetupInput,
   request: RequestInfo = {},
   now = new Date(),
+  // True when the caller holds the admin lock already (withAdminLock).
+  lockHeld = false,
 ): Promise<SetupResult> {
   // Hash outside the transaction: scrypt is slow and the lock is shared.
   const passwordHash = await hashPassword(input.password);
   return db.transaction(async (tx) => {
-    await lockAdminInTransaction(tx);
+    if (!lockHeld) {
+      await lockAdminInTransaction(tx);
+    }
     if (await adminExists(tx)) {
       return { ok: false, error: "already_set_up" };
     }

@@ -10,7 +10,7 @@ import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { SessionAssurance } from "../db/schema.js";
 import * as schema from "../db/schema.js";
-import { describeSafely } from "../errors.js";
+import { describeWithoutMessage } from "../errors.js";
 import { MemoryRateLimitStore } from "./rate-limit.js";
 
 /** Better Auth routes live under this path on the public origin. */
@@ -59,15 +59,38 @@ export function deriveAuthSecret(appKey: Buffer): string {
 }
 
 /**
- * Better Auth's log lines. Database errors carry SQL parameters such as
- * session tokens and password hashes, and Better Auth logs some of them as a
- * plain message ("Failed query: ... params: ..."). Such a message is replaced
- * by a fixed text, and errors passed along are reduced by describeSafely.
+ * Fixed Better Auth log messages that are written as they are. Any other
+ * message can hold request data (a callback URL) or SQL parameters (session
+ * tokens, password hashes) and is replaced by a fixed text.
+ */
+const SAFE_AUTH_LOG_MESSAGES = new Set([
+  "Invalid password",
+  "User not found",
+  "Password not found",
+  "Username or password not found",
+  "Username too short",
+  "Username too long",
+  "Password is too short",
+  "Password is too long",
+  "Failed to create session",
+  "Failed to read session from database",
+  "Failed to delete session from database",
+  "Failed to verify authentication",
+  "Failed to verify registration",
+  "Blocked cross-site navigation login attempt (CSRF protection)",
+  "INTERNAL_SERVER_ERROR",
+  "Error pruning rate limit rows",
+  "Failed to run background task:",
+]);
+
+/**
+ * Better Auth's log lines: only allowlisted messages verbatim, and errors
+ * passed along named, never quoted (their messages can hold request data).
  */
 export function logAuthEvent(level: string, message: unknown, ...args: unknown[]): void {
   const text = String(message);
-  const safe = /failed query|params:|column|relation|table/i.test(text) ? "database error" : text;
-  const errors = args.filter((arg) => arg instanceof Error).map(describeSafely);
+  const safe = SAFE_AUTH_LOG_MESSAGES.has(text) ? text : "message withheld";
+  const errors = args.filter((arg) => arg instanceof Error).map(describeWithoutMessage);
   const line = `[Better Auth] ${level.toUpperCase()}: ${safe}${errors.length > 0 ? ` (${errors.join("; ")})` : ""}`;
   if (level === "error") {
     console.error(line);

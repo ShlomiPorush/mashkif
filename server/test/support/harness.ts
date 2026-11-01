@@ -25,6 +25,7 @@ export interface Harness {
 export function createHarness(
   database: TestDatabase,
   testHooks?: AuthOptions["testHooks"],
+  bodyTimeoutMs?: number,
 ): Harness {
   const rateLimits = new MemoryRateLimitStore();
   const auth = createAuth({
@@ -42,7 +43,14 @@ export function createHarness(
   };
   harness.app = createApp({
     readiness: { database: ok, geoip: ok },
-    admin: { db: database.db, auth, publicOrigin: ORIGIN, clientAddress: () => harness.address },
+    admin: {
+      db: database.db,
+      auth,
+      publicOrigin: ORIGIN,
+      // A test may give a request its own address with this header.
+      clientAddress: (c) => c.req.header("x-test-client") ?? harness.address,
+      ...(bodyTimeoutMs === undefined ? {} : { bodyTimeoutMs }),
+    },
   });
   return harness;
 }
@@ -194,7 +202,8 @@ export function pauseOnce() {
 export async function untilLockWaiter(sql: TestDatabase["sql"]): Promise<boolean> {
   for (let i = 0; i < 40; i++) {
     const [row] = await sql`select count(*)::int as n from pg_locks
-      where locktype = 'advisory' and not granted`;
+      where locktype = 'advisory' and not granted
+        and database = (select oid from pg_database where datname = current_database())`;
     if ((row?.n ?? 0) > 0) {
       return true;
     }

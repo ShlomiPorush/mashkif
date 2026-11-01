@@ -1,11 +1,12 @@
 import { Hono } from "hono";
-import { bodyLimit } from "hono/body-limit";
+
 import { secureHeaders } from "hono/secure-headers";
 import type { AdminDeps } from "./admin/context.js";
 import { adminRoutes } from "./admin/routes.js";
 import { AUTH_BASE_PATH } from "./auth/auth.js";
 import { authRoutes } from "./auth/routes.js";
 import { describeSafely } from "./errors.js";
+import { ADMIN_BODY_LIMIT_BYTES, boundedBody } from "./http/bounded-body.js";
 import { agentRoutes } from "./protocol.js";
 import {
   DEFAULT_READINESS_TIMEOUT_MS,
@@ -25,9 +26,6 @@ export interface AppOptions {
   /** Admin sign-in and the admin API. When undefined, those routes are 404. */
   admin?: AdminDeps;
 }
-
-/** Largest request body the admin and auth routes accept. */
-export const ADMIN_BODY_LIMIT_BYTES = 16 * 1024;
 
 export function createApp(options: AppOptions): Hono {
   const app = new Hono();
@@ -69,13 +67,9 @@ export function createApp(options: AppOptions): Hono {
 
   app.route("/api/agent", agentRoutes());
   if (options.admin !== undefined) {
-    // Read with a byte limit before anything parses the body, also without a
-    // Content-Length. The largest legitimate body, a passkey registration,
-    // is about 2 KB.
-    const limit = bodyLimit({
-      maxSize: ADMIN_BODY_LIMIT_BYTES,
-      onError: (c) => c.json({ error: "payload_too_large" }, 413),
-    });
+    // Whole body first, bounded by size and time, before any route parses it
+    // or takes the admin lock.
+    const limit = boundedBody(ADMIN_BODY_LIMIT_BYTES, options.admin.bodyTimeoutMs);
     app.use(`${AUTH_BASE_PATH}/*`, limit);
     app.use("/api/admin/*", limit);
     app.route(AUTH_BASE_PATH, authRoutes(options.admin));

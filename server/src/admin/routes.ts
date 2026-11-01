@@ -5,6 +5,7 @@ import { checkSession, sessionDeadlines, touchSession } from "../auth/session-po
 import { user } from "../db/schema.js";
 import { fromOwnOrigin, isMutation } from "../http/request-guards.js";
 import { type AdminDeps, requestMeta } from "./context.js";
+import { AdminLockBusyError, withAdminLock } from "./lock.js";
 import { completeSetup, validateSetupInput } from "./setup.js";
 
 /**
@@ -53,7 +54,22 @@ export function adminRoutes(deps: AdminDeps): Hono {
     if (problems.length > 0) {
       return c.json({ error: problems[0], problems }, 400);
     }
-    const result = await completeSetup(deps.db, input, meta);
+    // Refused without queuing once the admin exists; completeSetup checks again under the lock.
+    const [existing] = await deps.db.select({ n: count() }).from(user);
+    if ((existing?.n ?? 0) > 0) {
+      return c.json({ error: "already_set_up" }, 409);
+    }
+    let result: Awaited<ReturnType<typeof completeSetup>>;
+    try {
+      result = await withAdminLock(deps.db, () =>
+        completeSetup(deps.db, input, meta, new Date(), true),
+      );
+    } catch (error) {
+      if (error instanceof AdminLockBusyError) {
+        return c.json({ error: "busy" }, 503);
+      }
+      throw error;
+    }
     if (!result.ok) {
       return c.json({ error: result.error }, result.error === "already_set_up" ? 409 : 403);
     }

@@ -1,7 +1,10 @@
+import { sql } from "drizzle-orm";
+import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AdminLockBusyError, withAdminLock } from "../src/admin/lock.js";
 import { resetAdmin } from "../src/admin/reset.js";
 import type { AuthOptions } from "../src/auth/auth.js";
+import { createDb } from "../src/db/client.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import {
   Browser,
@@ -139,13 +142,19 @@ describe("the admin lock", () => {
 
   it("gives up after a bounded wait and keeps the queue working", async () => {
     let finish = () => {};
+    let entered = () => {};
+    const inside = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     const holder = withAdminLock(
       database.db,
       () =>
         new Promise<void>((resolve) => {
           finish = resolve;
+          entered();
         }),
     );
+    await inside;
     await expect(withAdminLock(database.db, async () => "late", 200)).rejects.toBeInstanceOf(
       AdminLockBusyError,
     );
@@ -166,5 +175,124 @@ describe("the admin lock", () => {
       other.release();
     }
     await expect(withAdminLock(database.db, async () => "next")).resolves.toBe("next");
+  });
+});
+
+describe("setup and the admin lock", () => {
+  it("setup requests above the pool size do not starve a lock holder", async () => {
+    await truncateAll(database.sql);
+    // A holder that needs another pool connection once the setups have queued.
+    let release = () => {};
+    let entered = () => {};
+    const inside = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const holder = withAdminLock(database.db, async () => {
+      entered();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await database.db.execute(sql`select 1`);
+      return "done";
+    });
+    await inside;
+    const setups = Array.from({ length: 12 }, (_, i) =>
+      new Browser(harness).request("POST", "/api/admin/setup", {
+        json: { token: "wrong", username: USERNAME, password: PASSWORD },
+        headers: { "x-test-client": `198.51.100.${i + 20}` },
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    release();
+    const outcome = await Promise.race([
+      Promise.all([holder, ...setups]),
+      new Promise<"stuck">((resolve) => setTimeout(() => resolve("stuck"), 20_000)),
+    ]);
+    expect(outcome).not.toBe("stuck");
+    const [done, ...replies] = outcome as [string, ...{ status: number }[]];
+    expect(done).toBe("done");
+    expect(replies.map((reply) => reply.status)).toEqual(Array(12).fill(403));
+  }, 30_000);
+
+  it("refuses setup without queuing once the admin exists", async () => {
+    let release = () => {};
+    let entered = () => {};
+    const inside = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const holder = withAdminLock(
+      database.db,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+          entered();
+        }),
+    );
+    await inside;
+    // The lock is held, so a setup that queued would wait; this one does not.
+    const reply = await new Browser(harness).post("/api/admin/setup", {
+      token: "any",
+      username: USERNAME,
+      password: PASSWORD,
+    });
+    expect(reply).toMatchObject({ status: 409, body: { error: "already_set_up" } });
+    release();
+    await holder;
+  });
+
+  it("gives up when no pool connection becomes free in time", async () => {
+    const single = postgres(database.url, { max: 1, onnotice: () => {} });
+    try {
+      const db = createDb(single);
+      const taken = await single.reserve();
+      await expect(withAdminLock(db, async () => "late", 200)).rejects.toBeInstanceOf(
+        AdminLockBusyError,
+      );
+      taken.release();
+      await expect(withAdminLock(db, async () => "next")).resolves.toBe("next");
+    } finally {
+      await single.end({ timeout: 5 });
+    }
+  });
+});
+
+describe("slow request bodies", () => {
+  const partial = '{"username":"shlomi","password":"cor';
+  function slowBody(end: "stall" | "disconnect") {
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(partial));
+        if (end === "disconnect") {
+          setTimeout(() => controller.error(new Error("client went away")), 50);
+        }
+      },
+    });
+  }
+  const send = (app: Harness["app"], end: "stall" | "disconnect") =>
+    app.request(`${ORIGIN}/api/auth/sign-in/username`, {
+      method: "POST",
+      headers: { origin: ORIGIN, "content-type": "application/json", "content-length": "60" },
+      body: slowBody(end),
+      duplex: "half",
+    } as RequestInit);
+
+  it("a stalled body is refused within the time bound and never takes the lock", async () => {
+    const quick = createHarness(database, undefined, 300);
+    const started = Date.now();
+    const pending = send(quick.app, "stall");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // While the body stalls, the lock is free.
+    await expect(withAdminLock(database.db, async () => "free", 100)).resolves.toBe("free");
+    const reply = await pending;
+    expect(reply.status).toBe(408);
+    expect(await reply.json()).toEqual({ error: "request_timeout" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("a client that disconnects mid-body is refused and leaves the lock free", async () => {
+    const reply = await send(harness.app, "disconnect");
+    expect(reply.status).toBe(400);
+    expect(await reply.json()).toEqual({ error: "request_aborted" });
+    await expect(withAdminLock(database.db, async () => "free", 100)).resolves.toBe("free");
   });
 });

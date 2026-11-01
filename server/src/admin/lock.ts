@@ -55,7 +55,23 @@ export async function withAdminLock<T>(
     throw new AdminLockBusyError("the admin lock is busy");
   }
   try {
-    const connection = await db.$client.reserve();
+    // Bounded too: a connection that arrives after the wait is handed back.
+    const reserving = db.$client.reserve();
+    let reserveTimer: NodeJS.Timeout | undefined;
+    const connection = await Promise.race([
+      reserving,
+      new Promise<undefined>((resolve) => {
+        reserveTimer = setTimeout(() => resolve(undefined), waitMs);
+      }),
+    ]);
+    clearTimeout(reserveTimer);
+    if (connection === undefined) {
+      void reserving.then(
+        (late) => late.release(),
+        () => {},
+      );
+      throw new AdminLockBusyError("no database connection for the admin lock");
+    }
     try {
       await connection`select set_config('lock_timeout', ${`${waitMs}ms`}, false)`;
       try {

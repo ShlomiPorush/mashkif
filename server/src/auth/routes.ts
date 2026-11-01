@@ -53,6 +53,8 @@ const REFUSED_BODY_FIELDS: Readonly<Record<string, string>> = {
   "/two-factor/verify-totp": "trustDevice",
   // A new session from a passkey registration, outside the policy.
   "/passkey/verify-registration": "createSession",
+  // Better Auth echoes it as a redirect target without checking it.
+  "/sign-in/username": "callbackURL",
 };
 
 /** A refusal in the shape the Better Auth client reads (code, message) plus Mashkif's error. */
@@ -240,7 +242,7 @@ export function authRoutes(deps: AdminDeps): Hono {
         return refuse(
           c,
           400,
-          `${refusedField.replace(/[A-Z]/g, (l) => `_${l.toLowerCase()}`)}_unsupported`,
+          `${refusedField.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase()}_unsupported`,
         );
       }
     }
