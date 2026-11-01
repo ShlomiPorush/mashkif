@@ -22,6 +22,7 @@ export const ERROR_KEYS = {
   passkeyRegistered: "errors.passkeyRegistered",
   sessionEnded: "errors.sessionEnded",
   originRejected: "errors.originRejected",
+  busy: "errors.busy",
   network: "errors.network",
   unexpected: "errors.unexpected",
 } as const;
@@ -53,6 +54,7 @@ const BY_CODE: Record<string, ErrorKey> = {
   session_ended: ERROR_KEYS.sessionEnded,
   totp_required: ERROR_KEYS.sessionEnded,
   origin_rejected: ERROR_KEYS.originRejected,
+  busy: ERROR_KEYS.busy,
   network: ERROR_KEYS.network,
 };
 

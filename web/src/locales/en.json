@@ -101,6 +101,7 @@
     "passkeyRegistered": "This passkey is already added.",
     "sessionEnded": "Your session ended. Sign in again.",
     "originRejected": "The request was blocked because it didn't come from this site. Reload the page.",
+    "busy": "The server is busy with another sign-in or change. Try again in a moment.",
     "network": "Can't reach the server. Check your connection and try again.",
     "unexpected": "Something went wrong. Try again."
   }
