@@ -1,5 +1,6 @@
 import type { components } from "@mashkif/contracts";
 import { Hono } from "hono";
+import { type AgentDeps, mountIngestRoutes } from "./agent/routes.js";
 
 type AgentHealth = components["schemas"]["AgentHealth"];
 type ProtocolError = components["schemas"]["ProtocolError"];
@@ -41,8 +42,11 @@ export function negotiateProtocolVersion(header: string | undefined): ProtocolNe
 
 type AgentEnv = { Variables: { protocolVersion: number } };
 
-/** Routes under /api/agent: the agent protocol defined in contracts/openapi.yaml. */
-export function agentRoutes(): Hono<AgentEnv> {
+/**
+ * Routes under /api/agent: the agent protocol defined in
+ * contracts/openapi.yaml. Without deps only the health operation exists.
+ */
+export function agentRoutes(deps?: AgentDeps): Hono<AgentEnv> {
   const agent = new Hono<AgentEnv>();
 
   agent.use("*", async (c, next) => {
@@ -65,6 +69,10 @@ export function agentRoutes(): Hono<AgentEnv> {
     const body: AgentHealth = { status: "ok", protocolVersion: c.get("protocolVersion") };
     return c.json(body, 200);
   });
+
+  if (deps !== undefined) {
+    mountIngestRoutes(agent, deps);
+  }
 
   return agent;
 }

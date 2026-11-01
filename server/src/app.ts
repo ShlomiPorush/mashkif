@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import type { AdminDeps } from "./admin/context.js";
 import { adminRoutes } from "./admin/routes.js";
+import type { AgentDeps } from "./agent/routes.js";
 import { AUTH_BASE_PATH } from "./auth/auth.js";
 import { authRoutes } from "./auth/routes.js";
 import { describeSafely } from "./errors.js";
@@ -25,6 +26,8 @@ export interface AppOptions {
   onReadinessFailure?: (name: ReadinessCheckName, reason: string) => void;
   /** Admin sign-in and the admin API. When undefined, those routes are 404. */
   admin?: AdminDeps;
+  /** Agent registration, heartbeats, and events. When undefined, only agent health exists. */
+  agent?: AgentDeps;
 }
 
 export function createApp(options: AppOptions): Hono {
@@ -65,7 +68,7 @@ export function createApp(options: AppOptions): Hono {
     return c.json(report, report.status === "ready" ? 200 : 503);
   });
 
-  app.route("/api/agent", agentRoutes());
+  app.route("/api/agent", agentRoutes(options.agent));
   if (options.admin !== undefined) {
     // Whole body first, bounded by size and time, before any route parses it
     // or takes the admin lock.

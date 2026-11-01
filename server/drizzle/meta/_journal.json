@@ -15,6 +15,13 @@
       "when": 1793549484519,
       "tag": "0001_admin_reset_token",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793552504376,
+      "tag": "0002_agent_ingest",
+      "breakpoints": true
     }
   ]
 }

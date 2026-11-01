@@ -55,5 +55,6 @@ export async function createTestDatabase(): Promise<TestDatabase> {
 /** Empties every table, keeping the schema. */
 export async function truncateAll(sql: Sql): Promise<void> {
   await sql`truncate auth_user, auth_session, auth_account, auth_verification, auth_two_factor,
-    auth_passkey, admin_setup_token, admin_reset_token, audit_log restart identity cascade`;
+    auth_passkey, admin_setup_token, admin_reset_token, audit_log, enrollment_key, agent, heartbeat,
+    agent_event, blocked_range, provider, provider_asn, setting restart identity cascade`;
 }

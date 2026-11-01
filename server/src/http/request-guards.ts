@@ -5,10 +5,9 @@ import type { Context } from "hono";
 export type ClientAddressResolver = (c: Context) => string | undefined;
 
 /**
- * The TCP peer address. Forwarded headers are not trusted yet: behind a
- * reverse proxy every client shares the proxy's address, which makes the
- * sign-in rate limit stricter, never weaker. Trusted proxies come with the
- * agent API (MVP stage 1, step 2a).
+ * The TCP peer address. The server resolves the client address through
+ * clientAddressResolver (client-address.ts), which reads X-Forwarded-For only
+ * from trusted proxies; this is its fallback and the default in tests.
  */
 export const peerAddress: ClientAddressResolver = (c) => {
   try {
