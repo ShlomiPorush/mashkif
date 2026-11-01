@@ -118,6 +118,15 @@ describe("session states", () => {
     const enable = await browser.post("/api/auth/two-factor/enable", { password: PASSWORD });
     expect(enable.status).toBe(200);
     expect(String(enable.body.totpURI)).toMatch(/^otpauth:\/\/totp\/Mashkif:/);
+    // Audited like every credential change, and the secret is never logged.
+    const rows = await database.sql`select action, details from audit_log order by id`;
+    expect(rows.slice(-2).map((row) => row.action)).toEqual([
+      "credential_change.started",
+      "totp.secret_created",
+    ]);
+    const secret = new URL(String(enable.body.totpURI)).searchParams.get("secret") ?? "";
+    expect(secret.length).toBeGreaterThan(10);
+    expect(JSON.stringify(rows)).not.toContain(secret);
     // Still enrollment until a code is verified.
     expect(await browser.sessionState()).toBe("enrollment");
   });

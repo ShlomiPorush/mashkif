@@ -1,10 +1,10 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { type AdminDeps, requestMeta } from "../admin/context.js";
-import { withAdminLock } from "../admin/lock.js";
+import { AdminLockBusyError, withAdminLock } from "../admin/lock.js";
 import { type AuditEntry, writeAudit } from "../audit.js";
 import { fromOwnOrigin, isMutation } from "../http/request-guards.js";
-import { AUTH_BASE_PATH, CLIENT_ADDRESS_HEADER, priorSession } from "./auth.js";
+import { AUTH_BASE_PATH, CLIENT_ADDRESS_HEADER, priorSession, SIGN_IN_RATE_LIMIT } from "./auth.js";
 import {
   type AdminSession,
   checkSession,
@@ -56,7 +56,7 @@ const REFUSED_BODY_FIELDS: Readonly<Record<string, string>> = {
 };
 
 /** A refusal in the shape the Better Auth client reads (code, message) plus Mashkif's error. */
-function refuse(c: Context, status: 400 | 401 | 403 | 404, error: string) {
+function refuse(c: Context, status: 400 | 401 | 403 | 404 | 429 | 503, error: string) {
   return c.json({ error, code: error.toUpperCase(), message: error }, status);
 }
 
@@ -161,6 +161,9 @@ async function auditFor(
         details: { method: "passkey" },
       };
     }
+    case "/two-factor/enable":
+      // A new, still unverified TOTP secret. The secret itself is never logged.
+      return ok ? { actor, action: "totp.secret_created" } : changeFailed();
     case "/passkey/verify-registration":
       return ok ? { actor, action: "passkey.added" } : changeFailed();
     case "/passkey/delete-passkey":
@@ -191,6 +194,17 @@ async function requireUserVerification(response: Response): Promise<Response> {
  * the admin lock, with their session checked again inside it, so reset-admin
  * and setup cannot interleave with them.
  */
+/**
+ * Sign-in steps that create a session. They run under the admin lock too, so
+ * a sign-in that read the old password or passkey cannot finish after a
+ * reset.
+ */
+const SESSION_CREATING = new Set([
+  "/sign-in/username",
+  "/two-factor/verify-totp",
+  "/passkey/verify-authentication",
+]);
+
 function changesCredentials(path: string, before: SessionCheck): boolean {
   return (
     path === "/two-factor/enable" ||
@@ -230,10 +244,6 @@ export function authRoutes(deps: AdminDeps): Hono {
         );
       }
     }
-    if (path === "/sign-in/username") {
-      // Otherwise Better Auth would ask for a TOTP code that cannot be verified.
-      await repairInterruptedEnrollment(deps.db);
-    }
 
     // Signing in starts over; any old session is left to its own limits.
     const before: SessionCheck =
@@ -256,10 +266,39 @@ export function authRoutes(deps: AdminDeps): Hono {
         ? undefined
         : { assurance: before.assurance, authenticatedAt: before.authenticatedAt };
     const run = () => priorSession.run(prior, () => deps.auth.handler(request));
+    const underLock = async (fn: () => Promise<Response | undefined>) => {
+      try {
+        return await withAdminLock(deps.db, fn);
+      } catch (error) {
+        if (error instanceof AdminLockBusyError) {
+          return refuse(c, 503, "busy");
+        }
+        throw error;
+      }
+    };
 
     let response: Response;
-    if (before.state !== "none" && changesCredentials(path, before)) {
-      const locked = await withAdminLock(deps.db, async () => {
+    if (before.state === "none" && SESSION_CREATING.has(path)) {
+      // Public: the attempt is counted before it queues for the lock, so a
+      // flood cannot hold the queue.
+      const limit = await deps.auth.rateLimitStore.consume(
+        `lock:${path}:${meta.ipAddress ?? "unknown"}`,
+        SIGN_IN_RATE_LIMIT,
+      );
+      if (!limit.allowed) {
+        c.header("Retry-After", String(limit.retryAfter ?? SIGN_IN_RATE_LIMIT.window));
+        response = refuse(c, 429, "too_many_attempts");
+      } else {
+        response = (await underLock(async () => {
+          if (path === "/sign-in/username") {
+            // Otherwise Better Auth would ask for a TOTP code that cannot be verified.
+            await repairInterruptedEnrollment(deps.db, true);
+          }
+          return run();
+        })) as Response;
+      }
+    } else if (before.state !== "none" && changesCredentials(path, before)) {
+      const locked = await underLock(async () => {
         // The session may have ended while this request waited, for example
         // by reset-admin.
         const again = await checkSession(deps.auth, deps.db, c.req.raw.headers);
@@ -272,15 +311,14 @@ export function authRoutes(deps: AdminDeps): Hono {
         }
         if (path === "/two-factor/enable") {
           await repairInterruptedEnrollment(deps.db, true);
-        } else {
-          // Committed before the change, so an interrupted change stays visible.
-          await writeAudit(deps.db, {
-            actor: before.username,
-            action: "credential_change.started",
-            details: { route: path },
-            ...meta,
-          });
         }
+        // Committed before the change, so an interrupted change stays visible.
+        await writeAudit(deps.db, {
+          actor: before.username,
+          action: "credential_change.started",
+          details: { route: path },
+          ...meta,
+        });
         return run();
       });
       if (locked === undefined) {

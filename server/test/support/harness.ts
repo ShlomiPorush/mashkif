@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 import { expect } from "vitest";
 import { createSetupToken } from "../../src/admin/setup.js";
 import { createApp } from "../../src/app.js";
-import { type Auth, createAuth } from "../../src/auth/auth.js";
+import { type Auth, type AuthOptions, createAuth } from "../../src/auth/auth.js";
 import { MemoryRateLimitStore } from "../../src/auth/rate-limit.js";
 import type { TestDatabase } from "./database.js";
 import { secretFromUri, totpCode } from "./totp.js";
@@ -22,13 +22,17 @@ export interface Harness {
   address: string;
 }
 
-export function createHarness(database: TestDatabase): Harness {
+export function createHarness(
+  database: TestDatabase,
+  testHooks?: AuthOptions["testHooks"],
+): Harness {
   const rateLimits = new MemoryRateLimitStore();
   const auth = createAuth({
     db: database.db,
     appKey: randomBytes(32),
     publicOrigin: ORIGIN,
     rateLimitStore: rateLimits,
+    ...(testHooks === undefined ? {} : { testHooks }),
   });
   const harness: Harness = {
     app: undefined as unknown as Hono,
@@ -160,4 +164,41 @@ export async function signInWithTotp(browser: Browser, secret: Buffer): Promise<
   expect(signIn.status).toBe(200);
   expect(signIn.body.twoFactorRedirect).toBe(true);
   return browser.post("/api/auth/two-factor/verify-totp", { code: totpCode(secret) });
+}
+
+/** A test seam that stops the first call until resume() and reports when it was reached. */
+export function pauseOnce() {
+  let armed = true;
+  let reached = () => {};
+  let resume = () => {};
+  const atPause = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  return {
+    hook: async () => {
+      if (armed) {
+        armed = false;
+        reached();
+        await released;
+      }
+    },
+    atPause,
+    resume: () => resume(),
+  };
+}
+
+/** Waits up to 2 seconds until a request waits for the admin lock in PostgreSQL. */
+export async function untilLockWaiter(sql: TestDatabase["sql"]): Promise<boolean> {
+  for (let i = 0; i < 40; i++) {
+    const [row] = await sql`select count(*)::int as n from pg_locks
+      where locktype = 'advisory' and not granted`;
+    if ((row?.n ?? 0) > 0) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
 }

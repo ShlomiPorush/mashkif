@@ -4,7 +4,14 @@ import { type Auth, logAuthEvent } from "../src/auth/auth.js";
 import { session } from "../src/db/schema.js";
 import { describeSafely } from "../src/errors.js";
 import { createTestDatabase, type TestDatabase } from "./support/database.js";
-import { ORIGIN } from "./support/harness.js";
+import {
+  Browser,
+  createHarness,
+  ORIGIN,
+  PASSWORD,
+  setUpAdmin,
+  USERNAME,
+} from "./support/harness.js";
 
 // Database errors carry SQL parameters (password hashes, session tokens) in
 // their message. None of them may reach a log line.
@@ -87,5 +94,27 @@ describe("error logging", () => {
     expect(response.status).toBe(500);
     expect(lines.join("\n")).not.toContain(SECRET);
     expect(lines.join("\n")).toContain("DrizzleQueryError (SQLSTATE 23503)");
+  });
+
+  it("a sign-in whose session insert fails logs no query parameters (real Better Auth path)", async () => {
+    const harness = createHarness(database);
+    await setUpAdmin(database, harness);
+    // Break the session insert. The User-Agent goes into its parameters.
+    await database.sql`alter table auth_session rename column user_agent to user_agent_moved`;
+    try {
+      const lines = captureConsole();
+      const reply = await new Browser(harness).request("POST", "/api/auth/sign-in/username", {
+        json: { username: USERNAME, password: PASSWORD },
+        headers: { "user-agent": SECRET },
+      });
+      vi.restoreAllMocks();
+      const output = lines.join("\n");
+      expect(reply.status).toBeGreaterThanOrEqual(400);
+      expect(output).toContain("DrizzleQueryError (SQLSTATE 42703)");
+      expect(output).not.toContain(SECRET);
+      expect(output).not.toMatch(/params:|failed query/i);
+    } finally {
+      await database.sql`alter table auth_session rename column user_agent_moved to user_agent`;
+    }
   });
 });

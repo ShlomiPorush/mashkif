@@ -4,6 +4,7 @@ import { passkey } from "@better-auth/passkey";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
+import { verifyPassword } from "better-auth/crypto";
 import { twoFactor, username } from "better-auth/plugins";
 import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
@@ -47,6 +48,8 @@ export interface AuthOptions {
   appKey: Buffer;
   /** Origin of the web app, for example https://mashkif.co.il. */
   publicOrigin: string;
+  /** Test seams: run inside a sign-in after its check passed, before the session exists. */
+  testHooks?: { afterPasswordCheck?: () => Promise<void>; afterPasskeyCheck?: () => Promise<void> };
   rateLimitStore?: MemoryRateLimitStore;
 }
 
@@ -56,12 +59,16 @@ export function deriveAuthSecret(appKey: Buffer): string {
 }
 
 /**
- * Better Auth's log lines. Errors passed along are reduced by describeSafely,
- * because database errors carry SQL parameters such as session tokens.
+ * Better Auth's log lines. Database errors carry SQL parameters such as
+ * session tokens and password hashes, and Better Auth logs some of them as a
+ * plain message ("Failed query: ... params: ..."). Such a message is replaced
+ * by a fixed text, and errors passed along are reduced by describeSafely.
  */
-export function logAuthEvent(level: string, message: string, ...args: unknown[]): void {
+export function logAuthEvent(level: string, message: unknown, ...args: unknown[]): void {
+  const text = String(message);
+  const safe = /failed query|params:|column|relation|table/i.test(text) ? "database error" : text;
   const errors = args.filter((arg) => arg instanceof Error).map(describeSafely);
-  const line = `[Better Auth] ${level.toUpperCase()}: ${message}${errors.length > 0 ? ` (${errors.join("; ")})` : ""}`;
+  const line = `[Better Auth] ${level.toUpperCase()}: ${safe}${errors.length > 0 ? ` (${errors.join("; ")})` : ""}`;
   if (level === "error") {
     console.error(line);
   } else if (level === "warn") {
@@ -89,8 +96,8 @@ export function createAuth(options: AuthOptions) {
 
   /**
    * Records how a new session was established. TOTP and passkey sign-ins are
-   * full sessions. A session that replaces another one (TOTP enrollment, a
-   * password change) keeps the sign-in time, so the absolute limit is not
+   * full sessions. A session that replaces another one (TOTP enrollment)
+   * keeps the sign-in time, so the absolute limit is not
    * reset, and keeps its assurance unless the request itself verified TOTP.
    */
   const recordAssurance = createAuthMiddleware(async (ctx) => {
@@ -112,15 +119,14 @@ export function createAuth(options: AuthOptions) {
         ...(prior === undefined ? {} : { authenticatedAt: prior.authenticatedAt }),
       })
       .where(eq(schema.session.id, created.session.id));
-    if (assurance !== "password") {
-      // Password-only sessions opened before TOTP was enrolled must not
-      // survive it.
+    if (ctx.path === "/two-factor/verify-totp" && prior !== undefined) {
+      // TOTP was just enrolled. Every other session of the admin ends, also a
+      // strong one that a sign-in under way before a reset might have left.
       await db
         .delete(schema.session)
         .where(
           and(
             eq(schema.session.userId, created.user.id),
-            eq(schema.session.assurance, "password"),
             ne(schema.session.id, created.session.id),
           ),
         );
@@ -135,6 +141,9 @@ export function createAuth(options: AuthOptions) {
     trustedOrigins: [publicOrigin],
     telemetry: { enabled: false },
     logger: { log: logAuthEvent },
+    // Errors other than API errors go to the app's error handler, which logs them
+    // without query parameters; otherwise the router prints them whole.
+    onAPIError: { throw: true },
     database: drizzleAdapter(db, {
       provider: "pg",
       schema: {
@@ -152,6 +161,15 @@ export function createAuth(options: AuthOptions) {
       disableSignUp: true,
       minPasswordLength: 12,
       maxPasswordLength: 128,
+      password: {
+        verify: async (data) => {
+          const valid = await verifyPassword(data);
+          if (valid) {
+            await options.testHooks?.afterPasswordCheck?.();
+          }
+          return valid;
+        },
+      },
     },
     session: {
       expiresIn: SESSION_MAX_AGE_SECONDS,
@@ -199,10 +217,11 @@ export function createAuth(options: AuthOptions) {
           },
         },
         authentication: {
-          afterVerification: ({ verification }) => {
+          afterVerification: async ({ verification }) => {
             if (verification.authenticationInfo.userVerified !== true) {
               throw userVerificationRequired();
             }
+            await options.testHooks?.afterPasskeyCheck?.();
           },
         },
       }),

@@ -13,6 +13,7 @@ export const AUDIT_ACTIONS = [
   "sign_in.failed",
   "sign_in.rate_limited",
   "sign_out",
+  "totp.secret_created",
   "totp.enrolled",
   "passkey.added",
   "passkey.removed",
