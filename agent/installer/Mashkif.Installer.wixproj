@@ -1,0 +1,47 @@
+<Project Sdk="WixToolset.Sdk">
+  <!--
+    Builds the unsigned per-machine MSI "Mashkif for Windows".
+    Run from agent/: dotnet build installer/Mashkif.Installer.wixproj -c Release
+    The WixToolset.Sdk version is pinned in agent/global.json (msbuild-sdks).
+  -->
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>Mashkif</OutputName>
+    <Cultures>en-US;he-IL</Cultures>
+    <PublishRoot>$(ArtifactsRoot)publish\$(Configuration)\</PublishRoot>
+    <ServicePublishDir>$(PublishRoot)service\</ServicePublishDir>
+    <TrayPublishDir>$(PublishRoot)tray\</TrayPublishDir>
+    <MsiArtifactsDir>$(ArtifactsRoot)msi\</MsiArtifactsDir>
+    <DefineConstants>ProductVersion=$(Version);ServicePublishDir=$(ServicePublishDir);TrayPublishDir=$(TrayPublishDir)</DefineConstants>
+    <DotnetHost>$(DOTNET_HOST_PATH)</DotnetHost>
+    <DotnetHost Condition="'$(DotnetHost)' == ''">dotnet</DotnetHost>
+  </PropertyGroup>
+
+  <!--
+    Publishes the service and the tray app self-contained for win-x64, so the
+    target machine needs no .NET runtime. Restore runs in locked mode against
+    the committed packages.lock.json files.
+  -->
+  <Target Name="PublishAgentApps" BeforeTargets="BeforeBuild">
+    <RemoveDir Directories="$(PublishRoot)" />
+    <Exec Command="&quot;$(DotnetHost)&quot; publish &quot;$(MSBuildThisFileDirectory)..\src\Mashkif.Service\Mashkif.Service.csproj&quot; -c $(Configuration) -r win-x64 --self-contained -p:RestoreLockedMode=true -o &quot;$(ServicePublishDir).&quot; --disable-build-servers -nologo" />
+    <Exec Command="&quot;$(DotnetHost)&quot; publish &quot;$(MSBuildThisFileDirectory)..\src\Mashkif.Tray\Mashkif.Tray.csproj&quot; -c $(Configuration) -r win-x64 --self-contained -p:RestoreLockedMode=true -o &quot;$(TrayPublishDir).&quot; --disable-build-servers -nologo" />
+  </Target>
+
+  <!--
+    Copies the MSIs to agent/artifacts/msi/:
+      Mashkif-<version>-x64.msi        English (the default artifact)
+      Mashkif-<version>-x64-he-IL.msi  Hebrew
+  -->
+  <Target Name="CopyMsiToArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <_StaleMsi Include="$(MsiArtifactsDir)*.msi" />
+    </ItemGroup>
+    <Delete Files="@(_StaleMsi)" />
+    <Copy SourceFiles="$(OutDir)en-US\$(TargetName)$(TargetExt)" DestinationFiles="$(MsiArtifactsDir)Mashkif-$(Version)-x64.msi" />
+    <Copy SourceFiles="$(OutDir)he-IL\$(TargetName)$(TargetExt)" DestinationFiles="$(MsiArtifactsDir)Mashkif-$(Version)-x64-he-IL.msi" />
+    <Message Importance="high" Text="MSI: $(MsiArtifactsDir)Mashkif-$(Version)-x64.msi" />
+    <Message Importance="high" Text="MSI: $(MsiArtifactsDir)Mashkif-$(Version)-x64-he-IL.msi" />
+  </Target>
+</Project>
