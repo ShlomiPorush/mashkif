@@ -11,6 +11,8 @@
     <!-- Published by the installer as one self-contained file. -->
     <PublishSingleFile>true</PublishSingleFile>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- Embed native libraries too, so the MSI, which ships only the executable, never misses one. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
   <ItemGroup>

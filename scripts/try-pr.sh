@@ -611,8 +611,12 @@ main() {
       while (($#)); do
         case "$1" in
           --trust)
-            trusted="${2:-}"
-            shift 2 || true
+            if (($# < 2)); then
+              fail "--trust needs the full 40-character head commit SHA"
+              return "$MASHKIF_EXIT_ENV"
+            fi
+            trusted="$2"
+            shift 2
             ;;
           *)
             usage >&2

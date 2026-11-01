@@ -147,6 +147,9 @@ t_run "$TRY" start abc
 t_expect "a malformed number is a usage error" 2 "needs a pull request number"
 t_run "$TRY" start 2 --trust deadbeef
 t_expect "a short --trust SHA is a usage error" 2 "full 40-character"
+# Without a value, --trust once looped forever; timeout turns a regression into a failure.
+t_run timeout 30 "$TRY" start 2 --trust
+t_expect "--trust without a value is a usage error" 2 "full 40-character"
 
 # --- Trust gate -------------------------------------------------------------
 log "try-pr.sh: trust gate"

@@ -91,4 +91,3 @@ mashkif_js_setup() {
   fi
   log "  ok    pnpm install --frozen-lockfile"
 }
-
