@@ -1,70 +1,51 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
-import { agentBoot, syncAnchor } from "../db/schema.js";
+import { agent, agentBoot, MAX_BOOTS_PER_AGENT } from "../db/schema.js";
+import type { DroppedEvents } from "./parse.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: any Drizzle PostgreSQL database or transaction.
 type Database = PgDatabase<PgQueryResultHKT, any, any>;
 
 /**
- * Boots kept per agent, most recently active first. An agent that sends a
- * new boot ID on every request cannot grow its anchors and counts beyond
- * this; its most recent boot is never the one removed.
+ * Stores the cumulative dropped-events count of a boot, keeping the largest
+ * one seen. A new boot row evicts the agent's oldest rows by creation
+ * beyond MAX_BOOTS_PER_AGENT, never the agent's current boot (the boot of
+ * its latest heartbeat). Runs under the agent row lock the write holds.
  */
-export const MAX_BOOTS_PER_AGENT = 10;
-
-/**
- * Records activity of a boot. When the boot is new, the agent's boots beyond
- * the MAX_BOOTS_PER_AGENT most recently active ones are deleted with their
- * anchors.
- */
-export async function touchBoot(
+export async function recordDroppedEvents(
   tx: Database,
   agentId: string,
-  bootId: string,
+  dropped: DroppedEvents,
   now: Date,
 ): Promise<void> {
   const [row] = await tx
     .insert(agentBoot)
-    .values({ agentId, bootId, lastActivityAt: now })
+    .values({ agentId, bootId: dropped.bootId, createdAt: now, droppedEvents: dropped.count })
     .onConflictDoUpdate({
       target: [agentBoot.agentId, agentBoot.bootId],
-      set: {
-        lastActivityAt: sql`greatest(${agentBoot.lastActivityAt}, excluded.last_activity_at)`,
-      },
+      set: { droppedEvents: sql`greatest(${agentBoot.droppedEvents}, excluded.dropped_events)` },
     })
     // xmax is 0 only for a row this statement inserted.
     .returning({ created: sql<boolean>`(xmax = 0)` });
-  if (row?.created === true) {
-    await tx.execute(sql`delete from ${agentBoot}
-      where ${agentBoot.agentId} = ${agentId}
-        and ${agentBoot.bootId} not in (
-          select b.boot_id from ${agentBoot} b where b.agent_id = ${agentId}
-          order by b.last_activity_at desc, b.boot_id limit ${MAX_BOOTS_PER_AGENT})`);
-  }
-}
-
-/**
- * Records that the agent received these sync IDs: per boot, the newest of
- * them becomes the boot's confirmed anchor unless a newer one is confirmed
- * already. Retention keeps that anchor and every newer one of the boot.
- */
-export async function confirmAnchors(
-  tx: Database,
-  agentId: string,
-  syncIds: readonly string[],
-): Promise<void> {
-  if (syncIds.length === 0) {
+  if (row?.created !== true) {
     return;
   }
-  const newest = await tx
-    .select({ bootId: syncAnchor.bootId, id: sql<number>`max(${syncAnchor.id})`.mapWith(Number) })
-    .from(syncAnchor)
-    .where(and(eq(syncAnchor.agentId, agentId), inArray(syncAnchor.syncId, [...syncIds])))
-    .groupBy(syncAnchor.bootId);
-  for (const { bootId, id } of newest) {
-    await tx
-      .update(agentBoot)
-      .set({ confirmedAnchorId: sql`greatest(coalesce(${agentBoot.confirmedAnchorId}, 0), ${id})` })
-      .where(and(eq(agentBoot.agentId, agentId), eq(agentBoot.bootId, bootId)));
-  }
+  const [owner] = await tx
+    .select({ currentBoot: agent.lastBootId })
+    .from(agent)
+    .where(eq(agent.id, agentId));
+  const current = owner?.currentBoot ?? null;
+  const currentKept = sql`(select count(*) from ${agentBoot} c
+    where c.agent_id = ${agentId} and c.boot_id is not distinct from ${current}::uuid)`;
+  await tx.delete(agentBoot).where(
+    and(
+      eq(agentBoot.agentId, agentId),
+      sql`${agentBoot.bootId} is distinct from ${current}::uuid`,
+      sql`${agentBoot.bootId} not in (
+        select o.boot_id from ${agentBoot} o
+        where o.agent_id = ${agentId} and o.boot_id is distinct from ${current}::uuid
+        order by o.created_at desc, o.boot_id
+        limit ${MAX_BOOTS_PER_AGENT} - ${currentKept})`,
+    ),
+  );
 }

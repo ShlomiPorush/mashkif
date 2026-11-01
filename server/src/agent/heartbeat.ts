@@ -1,9 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { and, eq, isNull, lte, or } from "drizzle-orm";
+import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agent, heartbeat, syncAnchor } from "../db/schema.js";
+import { agent, heartbeat, MAX_SYNC_ANCHORS_PER_AGENT, syncAnchor } from "../db/schema.js";
 import type { AsnInfo } from "../geoip.js";
-import { confirmAnchors, touchBoot } from "./boots.js";
 import type { HeartbeatInput } from "./parse.js";
 import { guardAgentWrite, type WriteRefusal } from "./write-guard.js";
 
@@ -40,8 +39,8 @@ export function silenceInterval(reportedSeconds: number, sentSeconds: number): n
  * values, also a retry of the same heartbeat whose answer was lost: the
  * agent measures elapsed time from the answer it receives, so an old anchor
  * would place its events too early. A retry (same boot ID and sequence) is
- * stored once as a heartbeat sample. The sync ID the agent reports receiving
- * becomes its boot's confirmed anchor, which retention keeps.
+ * stored once as a heartbeat sample. The agent keeps its newest
+ * MAX_SYNC_ANCHORS_PER_AGENT anchors.
  */
 export async function recordHeartbeat(
   db: Db,
@@ -76,12 +75,16 @@ export async function recordHeartbeat(
       })
       .onConflictDoNothing({ target: [heartbeat.agentId, heartbeat.bootId, heartbeat.sequence] });
 
-    await touchBoot(tx, agentId, input.bootId, now);
-    if (input.syncId !== null) {
-      await confirmAnchors(tx, agentId, [input.syncId]);
-    }
     const syncId = randomBytes(16).toString("base64url");
     await tx.insert(syncAnchor).values({ syncId, agentId, bootId: input.bootId, serverTime: now });
+    // Only the newest anchors are kept; the agent row lock serializes this per agent.
+    await tx.delete(syncAnchor).where(
+      and(
+        eq(syncAnchor.agentId, agentId),
+        sql`${syncAnchor.id} < (select a.id from ${syncAnchor} a where a.agent_id = ${agentId}
+          order by a.id desc offset ${MAX_SYNC_ANCHORS_PER_AGENT - 1} limit 1)`,
+      ),
+    );
 
     // A heartbeat received earlier but committed later never moves the agent back.
     await tx

@@ -37,7 +37,6 @@ export interface HeartbeatBody {
   roundTripMs: number | null;
   dnsMs: number | null;
   agentVersion?: string;
-  syncId?: string | null;
 }
 
 export interface EventBody {
@@ -129,8 +128,6 @@ export class TestAgent {
       intervalSeconds: this.interval,
       roundTripMs: 40,
       dnsMs: 5,
-      // The last answer received in this boot, as the agent must send it.
-      syncId: this.syncId,
       ...overrides,
     };
   }

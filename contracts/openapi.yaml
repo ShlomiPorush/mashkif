@@ -31,13 +31,11 @@ info:
     recorded for that sync ID, so wall-clock changes on the PC do not move
     events.
 
-    Each heartbeat also names the sync ID of the last response the agent
-    received in the same boot. The server keeps that sync ID and every newer
-    one of the boot, so an agent that stays offline in one boot for a long
-    time can still place its events. The server keeps at most 10 boots per
-    agent, and drops a boot that has been inactive for longer than its
-    retention period unless it is the agent's most recent boot; an event that
-    refers to a dropped boot is stored as time uncertain.
+    The server keeps the newest 1440 sync IDs of each agent, about one day of
+    heartbeats at the default interval. No sync ID is created while an agent
+    is offline, so the one it holds survives any time offline; after
+    reconnecting, the agent has 1440 heartbeats to upload its queue. An event
+    whose sync ID is no longer kept is stored as time uncertain.
 
     ## Limits
 
@@ -569,16 +567,6 @@ components:
           description: Time to resolve the server name for this request, or null when unknown.
         agentVersion:
           $ref: "#/components/schemas/Version"
-        syncId:
-          description: |
-            Sync ID of the last heartbeat response the agent received in this
-            boot, or null when none was received since the PC started. The
-            server keeps this sync and every newer one, so events that refer
-            to them can still be placed after a long time offline. Agents
-            should always send it.
-          oneOf:
-            - $ref: "#/components/schemas/SyncId"
-            - type: "null"
     HeartbeatResponse:
       type: object
       additionalProperties: false
@@ -663,7 +651,8 @@ components:
         Events the agent dropped from its queue (by age or size) since the PC
         started, as a cumulative count for that boot. The server keeps the
         largest count it has seen per boot, so sending the same count again
-        changes nothing.
+        changes nothing, and keeps counts for at most 10 boots per agent,
+        always including the boot of its latest heartbeat.
       properties:
         bootId:
           $ref: "#/components/schemas/Uuid"

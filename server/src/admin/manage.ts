@@ -12,6 +12,7 @@ import {
   enrollmentKey,
   provider,
   providerAsn,
+  syncAnchor,
   TRUST_TIERS,
   type TrustTier,
 } from "../db/schema.js";
@@ -415,7 +416,8 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
             outcome: exists === undefined ? fail(404, "not_found") : fail(409, "agent_revoked"),
           };
         }
-        // Its boots, anchors, and dropped counts are of no further use.
+        // Its sync anchors and boot counters are of no further use.
+        await tx.delete(syncAnchor).where(eq(syncAnchor.agentId, id));
         await tx.delete(agentBoot).where(eq(agentBoot.agentId, id));
         return {
           outcome: { status: 200, body: { ok: true } },

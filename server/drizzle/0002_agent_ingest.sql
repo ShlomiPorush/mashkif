@@ -34,8 +34,7 @@ CREATE TABLE "agent" (
 CREATE TABLE "agent_boot" (
 	"agent_id" uuid NOT NULL,
 	"boot_id" uuid NOT NULL,
-	"last_activity_at" timestamp with time zone NOT NULL,
-	"confirmed_anchor_id" bigint,
+	"created_at" timestamp with time zone NOT NULL,
 	"dropped_events" bigint DEFAULT 0 NOT NULL,
 	CONSTRAINT "agent_boot_agent_id_boot_id_pk" PRIMARY KEY("agent_id","boot_id")
 );
@@ -130,13 +129,11 @@ ALTER TABLE "agent_boot" ADD CONSTRAINT "agent_boot_agent_id_agent_id_fk" FOREIG
 ALTER TABLE "agent_event" ADD CONSTRAINT "agent_event_agent_id_agent_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agent"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "heartbeat" ADD CONSTRAINT "heartbeat_agent_id_agent_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agent"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "provider_asn" ADD CONSTRAINT "provider_asn_provider_id_provider_id_fk" FOREIGN KEY ("provider_id") REFERENCES "public"."provider"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "sync_anchor" ADD CONSTRAINT "sync_anchor_boot_fk" FOREIGN KEY ("agent_id","boot_id") REFERENCES "public"."agent_boot"("agent_id","boot_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "sync_anchor" ADD CONSTRAINT "sync_anchor_agent_id_agent_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agent"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "agent_site_key_idx" ON "agent" USING btree ("site_key");--> statement-breakpoint
-CREATE INDEX "agent_boot_activity_idx" ON "agent_boot" USING btree ("agent_id","last_activity_at");--> statement-breakpoint
 CREATE INDEX "agent_event_received_at_idx" ON "agent_event" USING btree ("received_at");--> statement-breakpoint
 CREATE INDEX "agent_event_agent_occurred_at_idx" ON "agent_event" USING btree ("agent_id","occurred_at");--> statement-breakpoint
 CREATE INDEX "heartbeat_received_at_idx" ON "heartbeat" USING btree ("received_at");--> statement-breakpoint
 CREATE INDEX "heartbeat_agent_received_at_idx" ON "heartbeat" USING btree ("agent_id","received_at");--> statement-breakpoint
 CREATE INDEX "provider_asn_provider_idx" ON "provider_asn" USING btree ("provider_id");--> statement-breakpoint
-CREATE INDEX "sync_anchor_agent_boot_idx" ON "sync_anchor" USING btree ("agent_id","boot_id","id");--> statement-breakpoint
-CREATE INDEX "sync_anchor_server_time_idx" ON "sync_anchor" USING btree ("server_time");
+CREATE INDEX "sync_anchor_agent_idx" ON "sync_anchor" USING btree ("agent_id","id");

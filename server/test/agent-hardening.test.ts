@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ADDRESS_RATE_LIMIT, INVALID_TOKEN_COST } from "../src/agent/routes.js";
 import { MemoryRateLimitStore } from "../src/auth/rate-limit.js";
+import { MAX_SYNC_ANCHORS_PER_AGENT } from "../src/db/schema.js";
 import { runRetention } from "../src/retention.js";
 import { fullAdmin, insertKey, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
@@ -74,7 +76,7 @@ describe("revoking or blocking while an agent request is under way", () => {
   });
 });
 
-describe("sync anchors and retention", () => {
+describe("sync anchors", () => {
   const now = new Date("2026-11-01T12:00:00.000Z");
   const ago = (days: number) => new Date(now.getTime() - days * DAY);
 
@@ -88,124 +90,118 @@ describe("sync anchors and retention", () => {
     return rows.map((row) => String(row.sync_id));
   }
 
-  it("keeps the anchor the agent holds when its newer response was lost", async () => {
+  /** Older anchors of an agent, inserted directly, as K heartbeats would have made them. */
+  async function insertAnchors(agent: TestAgent, n: number, at: Date) {
+    await database.sql`insert into sync_anchor (sync_id, agent_id, boot_id, server_time)
+      select 'filler-' || g, ${agent.agentId ?? ""}, ${agent.bootId}, ${at.toISOString()}::timestamptz
+      from generate_series(1, ${n}) g`;
+  }
+
+  it(`keeps the newest ${MAX_SYNC_ANCHORS_PER_AGENT} anchors of an agent, evicting at insert`, async () => {
     const agent = await new TestAgent(harness).enroll(database);
-    harness.now = ago(20);
-    await agent.heartbeat(); // A1 received
-    const held = agent.syncId as string;
-    harness.now = ago(19);
-    const lost = await agent.heartbeat({}, { lose: true }); // A2 created, never received
-    await retainEightDays();
-
-    await runRetention(database.db, now);
-    // A1 is the agent's confirmed anchor (reported in the second heartbeat); A2 is newer.
-    expect(await anchorIds()).toEqual([held, String(lost.body.syncId)]);
-
-    // Nineteen days later the agent, still in that boot, uploads an event timed by A1.
-    harness.now = now;
-    const reply = await agent.events([agent.event("connectivity_restored", 20 * DAY - 60_000)]);
-    expect(reply.body.results).toMatchObject([{ status: "accepted", timeUncertain: false }]);
+    await insertAnchors(agent, MAX_SYNC_ANCHORS_PER_AGENT, ago(1));
+    const other = await new TestAgent(harness).enroll(database);
+    await other.heartbeat();
+    const reply = await agent.heartbeat();
+    const ids =
+      await database.sql`select sync_id from sync_anchor where agent_id = ${agent.agentId ?? ""}
+      order by id`;
+    expect(ids).toHaveLength(MAX_SYNC_ANCHORS_PER_AGENT);
+    expect(ids[0]?.sync_id).toBe("filler-2");
+    expect(ids.at(-1)?.sync_id).toBe(reply.body.syncId);
+    // Another agent's anchors are untouched.
+    expect(
+      await database.sql`select 1 from sync_anchor where agent_id = ${other.agentId ?? ""}`,
+    ).toHaveLength(1);
   });
 
-  it("keeps the anchor the agent holds when its reconnect heartbeat comes before the event upload", async () => {
+  it("places events after an offline period longer than retention, also for the review scenarios", async () => {
     const agent = await new TestAgent(harness).enroll(database);
     harness.now = ago(20);
     await agent.heartbeat();
-    harness.now = ago(15);
-    await agent.heartbeat(); // A2: the last answer before going offline
+    harness.now = ago(19);
+    // A later answer that was lost: the agent keeps the one it received.
+    await agent.heartbeat({}, { lose: true });
     const held = agent.syncId as string;
-    // Back online: the first heartbeat reports A2 and creates A3 before the backlog is sent.
+    // Back online, the reconnect heartbeat comes before the backlog.
     harness.now = new Date(now.getTime() - 60_000);
-    const reconnect = await agent.heartbeat({}, { lose: true });
+    await agent.heartbeat({}, { lose: true });
     await retainEightDays();
-
-    const result = await runRetention(database.db, now);
-    expect(result.anchors).toBe(1); // only A1, older than the confirmed A2
-    expect(await anchorIds()).toEqual([held, String(reconnect.body.syncId)]);
+    await runRetention(database.db, now);
+    expect(await anchorIds()).toContain(held);
 
     harness.now = now;
     agent.syncId = held;
-    const reply = await agent.events([agent.event("connectivity_lost", 15 * DAY - 120_000)]);
+    const reply = await agent.events([agent.event("connectivity_restored", 20 * DAY - 120_000)]);
     expect(reply.body.results).toMatchObject([{ status: "accepted", timeUncertain: false }]);
   });
 
-  it("keeps the newest anchor of a boot nobody confirmed", async () => {
+  it(`marks an event time uncertain once more than ${MAX_SYNC_ANCHORS_PER_AGENT} newer anchors exist`, async () => {
     const agent = await new TestAgent(harness).enroll(database);
-    harness.now = ago(20);
-    await agent.post("/heartbeat", agent.heartbeatBody({ sequence: 1 }));
-    harness.now = ago(15);
-    const second = await agent.post("/heartbeat", agent.heartbeatBody({ sequence: 2 }));
-    await retainEightDays();
-    await runRetention(database.db, now);
-    expect(await anchorIds()).toEqual([String(second.body.syncId)]);
+    harness.now = ago(2);
+    await agent.heartbeat();
+    const held = agent.syncId as string;
+    await insertAnchors(agent, MAX_SYNC_ANCHORS_PER_AGENT - 1, ago(1));
+    harness.now = now;
+    await agent.heartbeat({}, { lose: true }); // the K-th newer anchor evicts the held one
+    expect(await anchorIds()).not.toContain(held);
+    agent.syncId = held;
+    const reply = await agent.events([agent.event("sleep", DAY)]);
+    expect(reply.body.results).toMatchObject([{ status: "accepted", timeUncertain: true }]);
+    const [row] = await database.sql`select uncertain_reason from agent_event`;
+    expect(row?.uncertain_reason).toBe("sync_unknown");
+  });
+
+  it("never loses a just-returned anchor to retention running at the same time", async () => {
+    const agent = await new TestAgent(harness).enroll(database);
+    await database.sql`insert into setting (key, value, updated_by)
+      values ('retention_days', '8'::jsonb, 'shlomi')`;
+    harness.now = now;
+    const [, reply] = await Promise.all([
+      runRetention(database.db, new Date(now.getTime() + 365 * DAY)),
+      agent.heartbeat(),
+    ]);
+    await runRetention(database.db, new Date(now.getTime() + 365 * DAY));
+    expect(await anchorIds()).toEqual([reply.body.syncId]);
   });
 });
 
-describe("boot lifecycle", () => {
-  async function boots(): Promise<number> {
-    return count("agent_boot");
+describe("boot counters", () => {
+  async function bootRows(): Promise<string[]> {
+    const rows = await database.sql`select boot_id from agent_boot order by created_at`;
+    return rows.map((row) => String(row.boot_id));
   }
 
-  it("keeps at most 10 boots per agent, the most recent ones", async () => {
+  it("keeps at most 10 boot counters per agent, never evicting the current boot", async () => {
     const agent = await new TestAgent(harness).enroll(database);
     const start = Date.parse("2026-11-01T08:00:00.000Z");
-    const bootIds: string[] = [];
-    for (let i = 0; i < 12; i++) {
-      agent.reboot();
-      bootIds.push(agent.bootId);
+    harness.now = new Date(start);
+    await agent.heartbeat();
+    const current = agent.bootId;
+    // The current boot's counter is the oldest row.
+    await agent.events([], { bootId: current, count: 1 });
+    // Counters of eleven historical boots arrive later.
+    const historical: string[] = [];
+    for (let i = 1; i <= 11; i++) {
+      historical.push(randomUUID());
       harness.now = new Date(start + i * 60_000);
       harness.agentRateLimits.clear(); // not what this test is about
-      expect((await agent.heartbeat()).status).toBe(200);
+      await agent.events([], { bootId: historical.at(-1) as string, count: i });
     }
-    expect(await boots()).toBe(10);
-    const kept = await database.sql`select boot_id from agent_boot`;
-    expect(new Set(kept.map((row) => String(row.boot_id)))).toEqual(new Set(bootIds.slice(2)));
-    // The anchors of the two oldest boots went with them.
-    const anchorBoots = await database.sql`select distinct boot_id from sync_anchor`;
-    expect(anchorBoots).toHaveLength(10);
-
-    // Dropped counts with fresh boot IDs are bounded too.
-    for (let i = 0; i < 5; i++) {
-      agent.reboot();
-      await agent.events([], { bootId: agent.bootId, count: 1 });
-    }
-    expect(await boots()).toBe(10);
+    const rows = await bootRows();
+    expect(rows).toHaveLength(10);
+    expect(rows[0]).toBe(current);
+    expect(rows.slice(1)).toEqual(historical.slice(2));
   });
 
-  it("deletes boots inactive for longer than retention, except the most recent one", async () => {
-    const now = new Date("2026-11-01T12:00:00.000Z");
-    const agent = await new TestAgent(harness).enroll(database);
-    harness.now = new Date(now.getTime() - 30 * DAY);
-    await agent.heartbeat();
-    const oldSync = agent.syncId as string;
-    const oldBoot = agent.bootId;
-    agent.reboot();
-    harness.now = new Date(now.getTime() - 20 * DAY);
-    await agent.heartbeat(); // the most recent boot, inactive for 20 days
-    await database.sql`insert into setting (key, value, updated_by)
-      values ('retention_days', '8'::jsonb, 'shlomi')`;
-
-    const result = await runRetention(database.db, now);
-    expect(result.boots).toBe(1);
-    const left = await database.sql`select boot_id from agent_boot`;
-    expect(left.map((row) => String(row.boot_id))).toEqual([agent.bootId]);
-
-    // An event that refers to the deleted boot is time uncertain.
-    harness.now = now;
-    const reply = await agent.events([
-      { ...agent.event("shutdown", 60_000), bootId: oldBoot, syncId: oldSync },
-    ]);
-    expect(reply.body.results).toMatchObject([{ status: "accepted", timeUncertain: true }]);
-  });
-
-  it("deletes the boots, anchors, and dropped counts of a revoked agent", async () => {
+  it("deletes the anchors and boot counters of a revoked agent", async () => {
     const browser = await fullAdmin(database, harness);
     const agent = await new TestAgent(harness).enroll(database);
     await agent.heartbeat();
     await agent.events([], { bootId: agent.bootId, count: 4 });
-    expect(await boots()).toBe(1);
+    expect(await count("agent_boot")).toBe(1);
     expect((await browser.post(`/api/admin/agents/${agent.agentId}/revoke`)).status).toBe(200);
-    expect(await boots()).toBe(0);
+    expect(await count("agent_boot")).toBe(0);
     expect(await count("sync_anchor")).toBe(0);
   });
 });

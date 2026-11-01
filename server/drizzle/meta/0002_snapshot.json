@@ -1,5 +1,5 @@
 {
-  "id": "3551a8eb-1e7a-41a7-b09b-cdb3dc77d79b",
+  "id": "43bea643-a389-4ed8-a42d-8ac7a890daf3",
   "prevId": "d06a07f2-801e-49a3-8756-11d6fb0804bc",
   "version": "7",
   "dialect": "postgresql",
@@ -474,17 +474,11 @@
           "primaryKey": false,
           "notNull": true
         },
-        "last_activity_at": {
-          "name": "last_activity_at",
+        "created_at": {
+          "name": "created_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
-        },
-        "confirmed_anchor_id": {
-          "name": "confirmed_anchor_id",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
         },
         "dropped_events": {
           "name": "dropped_events",
@@ -494,29 +488,7 @@
           "default": 0
         }
       },
-      "indexes": {
-        "agent_boot_activity_idx": {
-          "name": "agent_boot_activity_idx",
-          "columns": [
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "last_activity_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "agent_boot_agent_id_agent_id_fk": {
           "name": "agent_boot_agent_id_agent_id_fk",
@@ -1470,17 +1442,11 @@
         }
       },
       "indexes": {
-        "sync_anchor_agent_boot_idx": {
-          "name": "sync_anchor_agent_boot_idx",
+        "sync_anchor_agent_idx": {
+          "name": "sync_anchor_agent_idx",
           "columns": [
             {
               "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "boot_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1496,35 +1462,18 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "sync_anchor_server_time_idx": {
-          "name": "sync_anchor_server_time_idx",
-          "columns": [
-            {
-              "expression": "server_time",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
-        "sync_anchor_boot_fk": {
-          "name": "sync_anchor_boot_fk",
+        "sync_anchor_agent_id_agent_id_fk": {
+          "name": "sync_anchor_agent_id_agent_id_fk",
           "tableFrom": "sync_anchor",
-          "tableTo": "agent_boot",
+          "tableTo": "agent",
           "columnsFrom": [
-            "agent_id",
-            "boot_id"
+            "agent_id"
           ],
           "columnsTo": [
-            "agent_id",
-            "boot_id"
+            "id"
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"

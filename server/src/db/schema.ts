@@ -8,7 +8,6 @@ import {
   boolean,
   check,
   cidr,
-  foreignKey,
   index,
   inet,
   integer,
@@ -342,13 +341,45 @@ export const heartbeat = pgTable(
 );
 
 /**
- * One row per boot an agent reported: when it was last active, the newest
- * sync anchor the agent confirmed it received in that boot, and the
- * cumulative count of events it dropped from its queue in that boot (the
- * largest count seen, so a retry counts once). An agent keeps at most
- * MAX_BOOTS_PER_AGENT boots; retention deletes boots inactive for longer
- * than the retention period except the agent's most recent one, and a
- * revoke deletes them all. Deleting a boot deletes its anchors.
+ * Sync anchors kept per agent: about one day of heartbeats at the default
+ * 60-second interval. No anchor is created while an agent is offline, so the
+ * anchor it holds survives any time offline; after reconnecting it has this
+ * many heartbeats to upload its queue. An event whose anchor was evicted is
+ * time uncertain.
+ */
+export const MAX_SYNC_ANCHORS_PER_AGENT = 1440;
+
+/**
+ * One row per heartbeat response: the sync ID returned to the agent and the
+ * server time it was anchored at. Events compute their time from it. Every
+ * heartbeat request gets a new anchor, also a retry of the same sequence,
+ * and the agent's anchors beyond the newest MAX_SYNC_ANCHORS_PER_AGENT are
+ * deleted in the same transaction. No retention job touches anchors.
+ */
+export const syncAnchor = pgTable(
+  "sync_anchor",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    syncId: text("sync_id").notNull().unique(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agent.id, { onDelete: "cascade" }),
+    /** For the same-boot check of events. */
+    bootId: uuid("boot_id").notNull(),
+    serverTime: ts("server_time").notNull(),
+  },
+  (t) => [index("sync_anchor_agent_idx").on(t.agentId, t.id)],
+);
+
+/** Boot counter rows kept per agent, the agent's current boot always among them. */
+export const MAX_BOOTS_PER_AGENT = 10;
+
+/**
+ * Events an agent dropped from its queue, as the cumulative count per boot
+ * it reports; the largest count seen is kept, so a retry counts once. At
+ * most MAX_BOOTS_PER_AGENT rows per agent: a new row evicts the oldest by
+ * creation, never the agent's current boot. Rows go when the agent is
+ * revoked or deleted, never by age.
  */
 export const agentBoot = pgTable(
   "agent_boot",
@@ -357,42 +388,10 @@ export const agentBoot = pgTable(
       .notNull()
       .references(() => agent.id, { onDelete: "cascade" }),
     bootId: uuid("boot_id").notNull(),
-    lastActivityAt: ts("last_activity_at").notNull(),
-    /** The newest anchor of this boot the agent reported receiving. */
-    confirmedAnchorId: bigint("confirmed_anchor_id", { mode: "number" }),
+    createdAt: ts("created_at").notNull(),
     droppedEvents: bigint("dropped_events", { mode: "number" }).notNull().default(0),
   },
-  (t) => [
-    primaryKey({ columns: [t.agentId, t.bootId] }),
-    index("agent_boot_activity_idx").on(t.agentId, t.lastActivityAt),
-  ],
-);
-
-/**
- * One row per heartbeat response: the sync ID returned to the agent and the
- * server time it was anchored at. Events compute their time from it. Every
- * heartbeat request gets a new anchor, also a retry of the same sequence.
- * Retention never deletes the newest anchor the agent confirmed in a boot,
- * nor any newer one, because the agent may still hold it.
- */
-export const syncAnchor = pgTable(
-  "sync_anchor",
-  {
-    id: bigserial("id", { mode: "number" }).primaryKey(),
-    syncId: text("sync_id").notNull().unique(),
-    agentId: uuid("agent_id").notNull(),
-    bootId: uuid("boot_id").notNull(),
-    serverTime: ts("server_time").notNull(),
-  },
-  (t) => [
-    foreignKey({
-      name: "sync_anchor_boot_fk",
-      columns: [t.agentId, t.bootId],
-      foreignColumns: [agentBoot.agentId, agentBoot.bootId],
-    }).onDelete("cascade"),
-    index("sync_anchor_agent_boot_idx").on(t.agentId, t.bootId, t.id),
-    index("sync_anchor_server_time_idx").on(t.serverTime),
-  ],
+  (t) => [primaryKey({ columns: [t.agentId, t.bootId] })],
 );
 
 /** Raw agent events, deleted after the retention period. */

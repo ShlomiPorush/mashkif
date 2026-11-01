@@ -9,10 +9,8 @@ import { EVENT_KINDS, type EventKind, INFRASTRUCTURES, type Infrastructure } fro
 
 type Schemas = components["schemas"];
 export type RegisterRequest = Schemas["RegisterRequest"];
-export type HeartbeatInput = Omit<Schemas["HeartbeatRequest"], "infrastructure" | "syncId"> & {
+export type HeartbeatInput = Omit<Schemas["HeartbeatRequest"], "infrastructure"> & {
   infrastructure: Infrastructure;
-  /** The sync ID of the last heartbeat response the agent received, if any. */
-  syncId: string | null;
 };
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; field: string };
@@ -92,16 +90,8 @@ export function parseHeartbeat(body: unknown): Parsed<HeartbeatInput> {
   if (fields === undefined) {
     return { ok: false, field: "body" };
   }
-  const {
-    sequence,
-    areaCell,
-    infrastructure,
-    intervalSeconds,
-    roundTripMs,
-    dnsMs,
-    agentVersion,
-    syncId,
-  } = fields;
+  const { sequence, areaCell, infrastructure, intervalSeconds, roundTripMs, dnsMs, agentVersion } =
+    fields;
   if (!int(sequence, 0, MAX_SAFE)) {
     return { ok: false, field: "sequence" };
   }
@@ -130,17 +120,9 @@ export function parseHeartbeat(body: unknown): Parsed<HeartbeatInput> {
   ) {
     return { ok: false, field: "agentVersion" };
   }
-  if (
-    syncId !== undefined &&
-    syncId !== null &&
-    (typeof syncId !== "string" || !SYNC_ID.test(syncId))
-  ) {
-    return { ok: false, field: "syncId" };
-  }
   return {
     ok: true,
     value: {
-      syncId: typeof syncId === "string" ? syncId : null,
       sequence,
       bootId,
       areaCell,

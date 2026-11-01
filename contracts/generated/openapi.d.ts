@@ -205,14 +205,6 @@ export interface components {
             /** @description Time to resolve the server name for this request, or null when unknown. */
             dnsMs: number | null;
             agentVersion?: components["schemas"]["Version"];
-            /**
-             * @description Sync ID of the last heartbeat response the agent received in this
-             *     boot, or null when none was received since the PC started. The
-             *     server keeps this sync and every newer one, so events that refer
-             *     to them can still be placed after a long time offline. Agents
-             *     should always send it.
-             */
-            syncId?: components["schemas"]["SyncId"] | null;
         };
         HeartbeatResponse: {
             syncId: components["schemas"]["SyncId"];
@@ -250,7 +242,8 @@ export interface components {
          * @description Events the agent dropped from its queue (by age or size) since the PC
          *     started, as a cumulative count for that boot. The server keeps the
          *     largest count it has seen per boot, so sending the same count again
-         *     changes nothing.
+         *     changes nothing, and keeps counts for at most 10 boots per agent,
+         *     always including the boot of its latest heartbeat.
          */
         DroppedEvents: {
             bootId: components["schemas"]["Uuid"];
