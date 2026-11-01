@@ -40,5 +40,5 @@ scripts/verify.sh
 ## Open the pull request
 
 - Fill in the pull request template: what changed, and how you verified it.
-- CI must pass. The `main` branch accepts a pull request only when the `summary` check is green and the branch is up to date with `main`.
+- CI must pass. The `main` branch accepts a pull request only when the `summary` and `license/cla` checks are green and the branch is up to date with `main`.
 - If `main` moves before your pull request is merged, update your branch from `main` and let CI run again.
