@@ -1,0 +1,34 @@
+{
+  "name": "@mashkif/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Mashkif server: agent API, readiness, and the built web app on one origin.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "check": "biome ci --colors=off .",
+    "format": "biome check --write .",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "drizzle-orm": "^0.45.4",
+    "hono": "^4.13.14",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.4",
+    "@mashkif/contracts": "workspace:*",
+    "@types/node": "^24.19.2",
+    "drizzle-kit": "^0.31.11",
+    "typescript": "5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

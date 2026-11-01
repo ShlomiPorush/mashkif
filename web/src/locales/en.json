@@ -1,0 +1,20 @@
+{
+  "app": {
+    "name": "Mashkif",
+    "tagline": "Mashkif · Internet outage map for Israel"
+  },
+  "home": {
+    "heading": "Is it just me or everyone?",
+    "privacy": "Mashkif watches the network, not you"
+  },
+  "language": {
+    "name": "English",
+    "switch": "Change language:"
+  },
+  "theme": {
+    "label": "Color theme",
+    "system": "Match device",
+    "light": "Light",
+    "dark": "Dark"
+  }
+}

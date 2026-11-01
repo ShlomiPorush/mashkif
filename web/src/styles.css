@@ -1,0 +1,320 @@
+/*
+ * Mashkif web shell.
+ * Colors use light-dark(): with no data-theme the page follows the device
+ * (prefers-color-scheme); data-theme="light" or "dark" on <html> pins it.
+ * Layout uses logical properties only, so Hebrew (RTL) and English (LTR)
+ * mirror without separate rules.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Ground and ink: a cool morning mist by day, a deep sea-night by night. */
+  --ground: light-dark(#eef2f4, #08151d);
+  --ink: light-dark(#0c1b26, #e8f0f3);
+  --muted: light-dark(#475966, #9db1bc);
+  --line: light-dark(#c9d5db, #1f3a48);
+  /* Signal amber, for graphics only. */
+  --signal: light-dark(#e08a00, #ffb23f);
+  /* Online sea-green, for the status dot. */
+  --online: light-dark(#0b7a6f, #3cc4b4);
+  --focus: light-dark(#0b6e69, #ffc56b);
+
+  --gutter: clamp(1.25rem, 4vw + 0.25rem, 4rem);
+
+  font-family: "Rubik Variable", system-ui, "Segoe UI", Arial, sans-serif;
+  font-size: 100%;
+  line-height: 1.5;
+  background: var(--ground);
+  color: var(--ink);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-block-size: 100dvh;
+}
+
+.visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+/* Shell */
+
+.shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-block-size: 100dvh;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem 1.5rem;
+  padding-block: 1.25rem;
+  padding-inline: var(--gutter);
+  border-block-end: 1px solid var(--line);
+}
+
+.brand {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.brand-name {
+  justify-self: start;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 0.25rem;
+  font-size: 1.75rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+
+.brand-tagline {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 450;
+  color: var(--muted);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+/* Language switch */
+
+.language-switch {
+  min-block-size: 2.75rem;
+  padding-inline: 1.125rem;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.language-switch:hover {
+  background: var(--ink);
+  color: var(--ground);
+}
+
+/* Theme switch */
+
+.theme-switch {
+  display: flex;
+  gap: 0.125rem;
+  margin: 0;
+  padding: 0.1875rem;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  min-inline-size: 0;
+}
+
+.theme-option {
+  display: grid;
+  place-items: center;
+  inline-size: 2.25rem;
+  block-size: 2.25rem;
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.theme-option:hover {
+  color: var(--ink);
+}
+
+.theme-option:has(input:checked) {
+  background: var(--ink);
+  color: var(--ground);
+}
+
+.theme-option:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.theme-option svg {
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.theme-option .icon-fill {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* Home */
+
+.main {
+  display: grid;
+  align-content: center;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2rem 3rem;
+  inline-size: 100%;
+  max-inline-size: 92rem;
+  padding-block: clamp(3rem, 8vh, 7rem);
+  padding-inline: var(--gutter);
+}
+
+.hero-heading {
+  margin: 0;
+  max-inline-size: 11ch;
+  font-size: clamp(2.875rem, 1.25rem + 7vw, 8rem);
+  font-weight: 800;
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.hero-heading:lang(he) {
+  letter-spacing: -0.01em;
+  line-height: 1.08;
+}
+
+.hero-privacy {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-block: clamp(1.25rem, 2vw, 2rem) 0;
+  font-size: clamp(1.125rem, 1rem + 0.6vw, 1.5rem);
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.hero-privacy::before {
+  content: "";
+  flex: none;
+  margin-block-start: calc((1lh - 0.625rem) / 2);
+  inline-size: 0.625rem;
+  block-size: 0.625rem;
+  border-radius: 50%;
+  background: var(--online);
+  box-shadow: 0 0 0 0.3rem color-mix(in srgb, var(--online) 22%, transparent);
+}
+
+/* Signal: rings go out once when the page opens, then hold still. */
+
+.signal {
+  inline-size: clamp(10rem, 26vw, 26rem);
+  block-size: auto;
+  overflow: visible;
+}
+
+.signal-ring {
+  fill: none;
+  stroke: var(--signal);
+  stroke-width: 3;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: signal-out 1100ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.signal-ring:nth-child(1) {
+  stroke-opacity: 0.25;
+  animation-delay: 360ms;
+}
+
+.signal-ring:nth-child(2) {
+  stroke-opacity: 0.5;
+  animation-delay: 180ms;
+}
+
+.signal-ring:nth-child(3) {
+  stroke-opacity: 0.85;
+}
+
+.signal-core {
+  fill: var(--signal);
+}
+
+@keyframes signal-out {
+  from {
+    opacity: 0;
+    transform: scale(0.35);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .signal-ring {
+    animation: none;
+  }
+}
+
+/* Narrow screens: the signal sits above the heading at the inline end. */
+
+@media (max-width: 40rem) {
+  .header {
+    padding-block: 1rem;
+  }
+
+  .brand-name {
+    font-size: 1.5rem;
+  }
+
+  .brand-tagline {
+    font-size: 0.875rem;
+  }
+
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+  }
+
+  .signal {
+    order: -1;
+    justify-self: end;
+    inline-size: 7.5rem;
+  }
+}

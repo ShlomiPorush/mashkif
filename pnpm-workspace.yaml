@@ -1,0 +1,10 @@
+packages:
+  - contracts
+  - server
+  - web
+
+# Dependency install scripts are blocked by default. esbuild (used by Vite,
+# Vitest, and drizzle-kit) runs a postinstall step that checks its platform
+# binary; nothing else may run install scripts.
+allowBuilds:
+  esbuild: true
