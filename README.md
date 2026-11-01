@@ -45,7 +45,7 @@ The admin panel is at `/admin`. Mashkif has one admin. Run these commands next t
 | Command | Purpose |
 |---|---|
 | `docker compose exec app node server/dist/cli.js setup-token` | Print a setup token for creating the admin at `/admin/setup`. It works once, for 15 minutes, and is refused once an admin exists. |
-| `docker compose exec app node server/dist/cli.js reset-admin` | Regain access: prints a new random password once, and removes TOTP, passkeys, sessions, and pending sign-ins. After signing in with it, TOTP must be set up again. |
+| `docker compose exec app node server/dist/cli.js reset-admin` | Regain access: the current password, TOTP, passkeys, sessions, and pending sign-ins stop working, and a single-use reset token is printed (valid 15 minutes). Open `/admin/reset`, enter the token, and choose a new password; then sign in and set up TOTP again. No password is ever printed. |
 
 ## Contributing
 

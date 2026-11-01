@@ -186,7 +186,7 @@ Decisions made while building the foundation and later steps, within the approve
 | Error logging (step 1) | Database errors are logged by name and PostgreSQL SQLSTATE only, in the server, the CLI,; Better Auth's log writes only an allowlist of fixed messages and names errors without their messages, and Better Auth hands errors other than API errors to the server's handler instead of printing them | Their messages carry SQL parameters such as password hashes and session tokens |
 | Passkey user verification (step 1) | The passkey plugin's verification hooks refuse a response without the user-verified flag; the authentication options are rewritten to ask for user verification | The plugin verifies with user verification optional and does not let the authentication options be configured |
 | Rate-limit address (step 1) | Better Auth reads the client address only from a header Mashkif sets from the TCP peer; any client value is replaced | Forwarded headers are not trusted before step 2a adds trusted proxies. Behind Traefik every client then shares one address, which is stricter, never weaker |
-| Admin recovery (step 1) | No backup codes: their routes are blocked and the pages never show them; `cli.js reset-admin` is the only recovery | n8n-ops stored backup codes that could not be used |
+| Admin recovery (step 1) | No backup codes: their routes are blocked and the pages never show them; `cli.js reset-admin` is the only recovery: it prints a single-use reset token (never a password) for `/admin/reset` | n8n-ops stored backup codes that could not be used |
 
 ## Handoff to foundation implementation
 
