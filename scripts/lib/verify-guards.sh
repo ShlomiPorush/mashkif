@@ -159,9 +159,120 @@ guard_selection_tests() {
   bash "$MASHKIF_ROOT/scripts/tests/test-select-areas.sh"
 }
 
+# CI configuration under .github/:
+# - every action is pinned by a full commit SHA (local ./ actions excepted,
+#   docker:// references need a sha256 digest);
+# - no workflow uses the pull_request_target trigger;
+# - actionlint, with its bundled shellcheck for run: scripts, passes;
+# - dependabot.yml validates against the SchemaStore schema vendored in
+#   check-jsonschema, so no schema is fetched at run time.
+guard_ci_config() {
+  local actionlint_image="rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"
+  local python_image="python:3.14-slim-bookworm@sha256:516b51cb9db2ef061e465c803e50f64361b82cefd91e525b889b967b83e83527"
+  # check-jsonschema and its dependencies at exact versions (binary wheels only).
+  local requirements="attrs==26.1.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+check-jsonschema==0.39.0
+click==8.5.0
+idna==3.20
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+regress==2026.9.1
+requests==2.34.2
+rpds-py==2026.9.1
+ruamel.yaml==0.19.1
+urllib3==2.8.0"
+  local -a workflows=() dependabot=() problems=()
+  local file line ref root rc
+
+  while IFS= read -r -d '' file; do
+    case "$file" in
+      .github/workflows/*.yml | .github/workflows/*.yaml) workflows+=("$file") ;;
+      .github/dependabot.yml | .github/dependabot.yaml) dependabot+=("$file") ;;
+    esac
+  done < <(_guard_files)
+  ((${#workflows[@]} + ${#dependabot[@]})) || return 0
+
+  for file in "${workflows[@]}"; do
+    while IFS= read -r line; do
+      ref="${line#*uses:}"
+      ref="${ref%%#*}"
+      ref="${ref//[[:space:]\"\']/}"
+      case "$ref" in
+        ./*) ;;
+        docker://*)
+          [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] ||
+            problems+=("$file:${line%%:*}: $ref is not pinned by a sha256 digest")
+          ;;
+        *)
+          [[ "$ref" =~ ^[^@]+@[0-9a-f]{40}$ ]] ||
+            problems+=("$file:${line%%:*}: $ref is not pinned by a full commit SHA")
+          ;;
+      esac
+    done < <(grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:' "$MASHKIF_ROOT/$file")
+    while IFS= read -r line; do
+      problems+=("$file:${line%%:*}: pull_request_target is not allowed")
+    done < <(grep -nE '^[^#]*pull_request_target' "$MASHKIF_ROOT/$file")
+  done
+
+  require_cmd docker "actionlint and check-jsonschema run in containers" || return
+
+  if ((${#workflows[@]})); then
+    rc=0
+    docker run --rm --network none -v "$MASHKIF_ROOT:/repo:ro" -w /repo \
+      "$actionlint_image" -no-color -shellcheck=/usr/local/bin/shellcheck "${workflows[@]}" >&2 || rc=$?
+    case "$rc" in
+      0) ;;
+      125)
+        fail "could not run the actionlint container"
+        return "$MASHKIF_EXIT_ENV"
+        ;;
+      *) problems+=("actionlint reported problems (see above)") ;;
+    esac
+  fi
+
+  if ((${#dependabot[@]})); then
+    if ! root="$(mashkif_tmp_root)"; then
+      fail "no scratch location: set MASHKIF_TMP_DIR (locally the T: drive is expected at /mnt/t)"
+      return "$MASHKIF_EXIT_ENV"
+    fi
+    mkdir -p "$root/cache/pip" || return "$MASHKIF_EXIT_ENV"
+    rc=0
+    # shellcheck disable=SC2016 # Expanded by the container shell.
+    docker run --rm --user "$(id -u):$(id -g)" \
+      -e HOME=/tmp/home \
+      -e PIP_CACHE_DIR=/cache/pip \
+      -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
+      -e PIP_NO_INPUT=1 \
+      -e MASHKIF_REQUIREMENTS="$requirements" \
+      -v "$MASHKIF_ROOT:/repo:ro" -v "$root/cache:/cache" -w /repo \
+      "$python_image" sh -euc '
+        printf "%s\n" "$MASHKIF_REQUIREMENTS" >/tmp/requirements.txt
+        { python -m venv /tmp/venv &&
+          /tmp/venv/bin/pip install --quiet --only-binary=:all: -r /tmp/requirements.txt; } >&2 || exit 125
+        exec /tmp/venv/bin/check-jsonschema --builtin-schema vendor.dependabot "$@"
+      ' sh "${dependabot[@]}" >&2 || rc=$?
+    case "$rc" in
+      0) ;;
+      125)
+        fail "could not run check-jsonschema (container or pip install failed)"
+        return "$MASHKIF_EXIT_ENV"
+        ;;
+      *) problems+=("${dependabot[*]} does not match the Dependabot schema (see above)") ;;
+    esac
+  fi
+
+  if ((${#problems[@]})); then
+    printf '  %s\n' "${problems[@]}" >&2
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+}
+
 verify_guards() {
   local name rc failed=0 env=0
-  for name in hebrew compose_build shell line_endings selection_tests; do
+  for name in hebrew compose_build shell line_endings selection_tests ci_config; do
     set +e
     "guard_$name"
     rc=$?
