@@ -997,7 +997,7 @@ release_main() {
     release_preflight_start || return
     release_make_run_dir || return
     release_acquire_lease || return 1
-    release_recheck_after_lease || return 1
+    release_recheck_after_lease || return
     release_make_commit || return 1
     release_reserve || return 1
   else

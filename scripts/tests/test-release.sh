@@ -130,6 +130,13 @@ if [[ "$sub" == push ]]; then
         : >"$state/remote-down"
         exit 1
       fi
+      # The lease push succeeds, then origin becomes unreachable.
+      if has_fault down-after-lease; then
+        "$real" "$@"
+        rc=$?
+        : >"$state/remote-down"
+        exit "$rc"
+      fi
       ;;
     lease-release)
       if has_fault release-fail; then
@@ -1097,6 +1104,17 @@ case_lease_after_other_release() {
   expect "no lease left" no_leases
 }
 
+# R7: origin becomes unreadable right after the lease is taken. The recheck
+# cannot run, which is an environment error (exit 2), not a refusal.
+case_origin_down_after_lease() {
+  world origin-down-after-lease
+  run_release a down-after-lease SHIM_FAULTS=down-after-lease -- server --version 1.0.0
+  expect_eq "an unreadable origin after the lease exits 2" 2 "$RC"
+  expect_out "the error names the unreadable remote" "cannot read main from origin after taking the lease"
+  expect_no_out "nothing was committed" "Created the local release commit"
+  expect_eq "local tree clean" "" "$(g a status --porcelain)"
+}
+
 # R2: TERM after origin accepted the reservation, before the script read the result.
 case_interrupt_after_reservation_accepted() {
   local variant pid tag_sha
@@ -1176,6 +1194,7 @@ case_resume_dirty_and_preview
 case_concurrent_starts_different_versions
 case_interrupt_after_reservation_accepted
 case_lease_after_other_release
+case_origin_down_after_lease
 case_resume_does_not_trust_label
 
 printf 'release tests: %d failure(s) in %ds\n' "$failures" "$((SECONDS - started_at))" >&2
