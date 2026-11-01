@@ -27,7 +27,7 @@ release_state_dir() {
 }
 
 # release_prepare_lock: an exclusive, non-blocking flock for this user, held
-# until the process exits (after the branch is pushed and the pull request
+# until the exit handler releases it (after the branch is pushed and the pull request
 # exists). A second prepare fails fast instead of waiting.
 release_prepare_lock() {
   local dir file
@@ -41,6 +41,17 @@ release_prepare_lock() {
     fail "another 'scripts/release.sh prepare' is running for this user (lock: $file); let it finish, then run this again"
     return 1
   fi
+}
+
+# release_prepare_unlock: releases the prepare lock explicitly, from the exit
+# handler after the cleanup. A flock belongs to the open file description, so
+# this also frees it for a child that inherited the descriptor and outlives
+# the run (for example a detached `git gc --auto`). The lock file stays.
+release_prepare_unlock() {
+  [[ -n "$REL_PREP_LOCK_FD" ]] || return 0
+  flock -u "$REL_PREP_LOCK_FD" 2>/dev/null || true
+  exec {REL_PREP_LOCK_FD}>&-
+  REL_PREP_LOCK_FD=""
 }
 
 # release_render <base-rev> <date> <path>: prints the expected release content
@@ -219,7 +230,7 @@ release_prepare_push() {
 # commit, or opens one. A lost `gh pr create` response is resolved by listing
 # the pull requests for the head again.
 release_prepare_pr() {
-  local url rc body out
+  local url rc body out lost=0
   url="$(release_find_open_pr "$REL_PREP_COMMIT")"
   rc=$?
   case "$rc" in
@@ -245,17 +256,20 @@ release_prepare_pr() {
     url="$(grep -oE 'https://[^[:space:]]+' <<<"$out" | tail -n 1)"
   fi
   if [[ -z "$url" ]]; then
+    lost=1
     log "gh pr create gave no pull request URL; looking for the pull request on GitHub."
-    url="$(release_find_open_pr "$REL_PREP_COMMIT")"
-    rc=$?
-    if ((rc == 1)); then
-      fail "the release pull request was not created"
-      return 1
-    elif ((rc != 0)); then
-      return 1
-    fi
-    log "GitHub shows the pull request; it was created."
   fi
+  # Also after a successful creation: the branch may have moved between the
+  # push and the creation, so the pull request must be at the release commit.
+  url="$(release_find_open_pr "$REL_PREP_COMMIT")"
+  rc=$?
+  if ((rc == 1)); then
+    fail "no open release pull request at $REL_PREP_COMMIT was found after gh pr create"
+    return 1
+  elif ((rc != 0)); then
+    return 1
+  fi
+  ((!lost)) || log "GitHub shows the pull request; it was created."
   REL_PREP_PR_URL="$url"
   log "Opened the release pull request: $url"
 }

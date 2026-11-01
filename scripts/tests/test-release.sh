@@ -120,6 +120,12 @@ case "$sub" in
     fi
     ;;
 esac
+# A child that outlives the run and inherits its open descriptors, like a
+# detached `git gc --auto`.
+if [[ "$sub" == commit && -n "${SHIM_LINGER:-}" ]]; then
+  sleep "$SHIM_LINGER" >/dev/null 2>&1 </dev/null &
+  printf '%s\n' "$!" >>"$state/linger.pids"
+fi
 if [[ "$sub" == push ]]; then
   kind=other
   case " $* " in
@@ -361,6 +367,10 @@ case "${1:-} ${2:-}" in
     endpoint="${path%%\?*}"
     q=""
     [[ "$path" == *\?* ]] && q="${path#*\?}"
+    # GitHub matches owner and repository names case-insensitively.
+    if [[ "${endpoint,,}" == "repos/${repo,,}/"* ]]; then
+      endpoint="repos/$repo/${endpoint#repos/*/*/}"
+    fi
     case "$endpoint" in
       "repos/$repo/pulls")
         need_jq "$PULLS_JQ"
@@ -409,9 +419,12 @@ case "${1:-} ${2:-}" in
         *) echo "gh shim: unexpected pr create argument $1" >&2; exit 1 ;;
       esac
     done
-    if [[ "$prrepo" != "$repo" || -z "$base" || -z "$head" || -z "$title" || ! -f "$body" ]]; then
+    if [[ "${prrepo,,}" != "${repo,,}" || -z "$base" || -z "$head" || -z "$title" || ! -f "$body" ]]; then
       echo "gh shim: incomplete pr create call" >&2
       exit 1
+    fi
+    if [[ -n "${SHIM_BEFORE_PR_CREATE:-}" ]]; then
+      "$SHIM_BEFORE_PR_CREATE" || exit 1
     fi
     if ! sha="$("$SHIM_REAL_GIT" -C "${SHIM_ORIGIN:?}" rev-parse -q --verify "refs/heads/$head")"; then
       echo "pull request create failed: GraphQL: Head sha can't be blank (createPullRequest)" >&2
@@ -1682,12 +1695,156 @@ EOF
   expect "nothing built" no_builds
 }
 
+# P1: the source commit is not unique to this run, so a tag at it without
+# porcelain "*" is no proof of this run's push. The run stops and resume,
+# which checks everything again, publishes.
 case_lost_reservation_response() {
   world lost-reservation merged
   publish a lost SHIM_FAULTS=reserve-lost
-  expect_rc_zero "lost reservation response"
-  expect_out "origin decided" "The reservation push gave no clear answer"
-  expect_published "lost reservation response" a "$MERGE"
+  expect_rc_nonzero "lost reservation response"
+  expect_out "origin was read" "The reservation push gave no clear answer"
+  expect_out "no proof is reported" "this run has no proof that it created the tag"
+  expect_out "resume is suggested" "scripts/release.sh server publish --resume 1.0.0"
+  expect_eq "the tag is at the merge commit" "$MERGE" "$(remote_ref "refs/tags/$TAG")"
+  expect "nothing built" no_builds
+  expect "lease released" no_leases
+  run_release a resume -- server publish --resume 1.0.0
+  expect_rc_zero "resume after the lost response"
+  expect_published "resume after the lost response" a "$MERGE"
+}
+
+# P1: a tag created by hand at the source commit, combined with a lost
+# reservation response, is never taken as this run's reservation.
+case_foreign_tag_with_lost_reservation_response() {
+  world foreign-tag-lost merged
+  cat >"$W/hook.sh" <<EOF
+#!/usr/bin/env bash
+"$REAL_GIT" -C "\$1" push -q origin "$MERGE:refs/tags/$TAG"
+EOF
+  chmod +x "$W/hook.sh"
+  publish a foreign SHIM_BEFORE_RESERVE="$W/hook.sh" SHIM_FAULTS=reserve-lost
+  expect_rc_nonzero "a foreign tag at the source commit with a lost response"
+  expect_out "no proof is reported" "this run has no proof that it created the tag"
+  expect_out "resume is suggested" "scripts/release.sh server publish --resume 1.0.0"
+  expect_no_out "nothing is reported as released" "Released server 1.0.0"
+  expect "nothing built" no_builds
+  expect "lease released" no_leases
+}
+
+# P2: an origin URL in another case still finds the pull requests and the CI
+# evidence, and prepare finds its open pull request instead of opening another.
+use_lowercase_origin() {
+  local lower="https://github.com/${REPO,,}.git"
+  g "$1" remote set-url origin "$lower"
+  g "$1" config --add "url.$W/origin.git.insteadOf" "$lower"
+}
+
+case_origin_url_case() {
+  world origin-case-publish merged
+  use_lowercase_origin a
+  publish a publish
+  expect_rc_zero "publish with a lower-case origin URL"
+  expect_published "publish with a lower-case origin URL" a "$MERGE"
+
+  world origin-case-prepare
+  use_lowercase_origin a
+  run_release a prepare -- server prepare --version 1.0.0
+  expect_rc_zero "prepare with a lower-case origin URL"
+  run_release a again -- server prepare --version 1.0.0
+  expect_rc_zero "prepare again with a lower-case origin URL"
+  expect_out "the open pull request is found" "The release pull request is already open"
+  expect_eq "one pull request" 1 "$(pr_lines)"
+  expect_eq "one pr create call" 1 "$(grep -c '^pr create' "$W/gh.log")"
+}
+
+# P3: a child that outlives prepare and inherited the lock descriptor does
+# not block the next prepare.
+case_prepare_lock_released() {
+  world prepare-lock-linger
+  run_release a first SHIM_LINGER=60 -- server prepare --version 1.0.0
+  expect_rc_zero "prepare that leaves a lingering child"
+  local pid
+  pid="$(head -n 1 "$W/state/linger.pids" 2>/dev/null || true)"
+  expect "a child outlived the run" kill -0 "${pid:-0}"
+  run_release a second -- server prepare --version 1.0.0
+  expect_rc_zero "the next prepare while the child still runs"
+  expect_no_out "no lock refusal" "another 'scripts/release.sh prepare' is running"
+  expect_out "the next prepare finds the pull request" "The release pull request is already open"
+  expect "the lock file is kept" test -f "$W/state-home/mashkif/release-prepare.lock"
+  while read -r pid; do
+    kill "$pid" 2>/dev/null || true
+  done <"$W/state/linger.pids"
+}
+
+# set_main_version <version>: a commit on origin main that sets the server version.
+set_main_version() {
+  [[ -d "$W/m" ]] || clone m
+  g m fetch -q origin
+  g m checkout -q -B main origin/main
+  sed -i -E "s/^(  \"version\": \")[^\"]*/\1$1/" "$W/m/server/package.json"
+  g m commit -q -am "Set version $1"
+  g m push -q origin main
+}
+
+# P4: version comparison without integer conversion.
+case_version_overflow() {
+  world version-huge
+  run_release a huge-new -- server prepare --preview --version 18446744073709551616.0.0
+  expect_rc_zero "a huge new version is greater than 0.1.0"
+  set_main_version 18446744073709551617.0.0
+  run_release a huge-current -- server prepare --preview --version 2.0.0
+  expect_rc_nonzero "2.0.0 is not greater than a huge current version"
+  expect_out "huge current: explained" "not greater than the server version 18446744073709551617.0.0"
+  set_main_version 01.0.0
+  run_release a leading-zero -- server prepare --preview --version 2.0.0
+  expect_rc_nonzero "a current version with a leading zero"
+  expect_out "leading zero: explained" "is not X.Y.Z"
+
+  world revert-huge merged
+  set_main_version 18446744073709551616.0.0
+  g a pull -q --ff-only
+  publish a huge-main
+  expect_rc_zero "publish when main has a huge higher version"
+  expect_published "publish when main has a huge higher version" a "$MERGE"
+
+  world revert-leading-zero merged
+  set_main_version 01.0.0
+  publish a leading-zero-main
+  expect_rc_nonzero "publish when the version on main has a leading zero"
+  expect_out "leading zero on main: explained" "is not X.Y.Z"
+  expect "leading zero on main: nothing built" no_builds
+}
+
+# P5: the release branch moves between the push and the pull request creation.
+case_prepare_branch_advanced_before_pr() {
+  world prepare-advanced
+  clone b
+  cat >"$W/hook.sh" <<EOF
+#!/usr/bin/env bash
+"$REAL_GIT" -C "$W/b" fetch -q origin "$BRANCH" &&
+  "$REAL_GIT" -C "$W/b" checkout -q -B advanced "origin/$BRANCH" &&
+  printf 'more\n' >>"$W/b/README.txt" &&
+  "$REAL_GIT" -C "$W/b" add README.txt &&
+  "$REAL_GIT" -C "$W/b" commit -q -m "Advance the release branch" &&
+  "$REAL_GIT" -C "$W/b" push -q origin "HEAD:refs/heads/$BRANCH"
+EOF
+  chmod +x "$W/hook.sh"
+  run_release a advanced SHIM_BEFORE_PR_CREATE="$W/hook.sh" -- server prepare --version 1.0.0
+  expect_rc_nonzero "prepare whose branch moved before the pull request was created"
+  expect_out "the other head is reported" "an open release pull request has another head commit"
+  expect_no_out "nothing is reported as prepared" "Prepared server 1.0.0"
+}
+
+# P5: an open pull request of this repository at another head is not reused.
+case_prepare_open_pr_other_head() {
+  world prepare-pr-other-head
+  run_release a first SHIM_FAULTS=pr-create-fail -- server prepare --version 1.0.0
+  expect_rc_nonzero "prepare whose pull request creation fails"
+  pr_add open - - "$BRANCH" "$(printf '%040d' 9)" "$REPO"
+  run_release a rerun -- server prepare --version 1.0.0
+  expect_rc_nonzero "rerun next to an open pull request at another head"
+  expect_out "the other head is reported" "an open release pull request has another head commit"
+  expect_eq "no second pr create" 1 "$(grep -c '^pr create' "$W/gh.log")"
 }
 
 case_lost_lease_response() {
@@ -1990,7 +2147,7 @@ case_interrupt_after_reservation_accepted() {
     expect_eq "$variant: interrupted run exits 143" 143 "$RC"
     expect "$variant: nothing built" no_builds
     if [[ "$variant" == readable ]]; then
-      expect_out "$variant: origin decides the result" "the reservation happened"
+      expect_out "$variant: origin is read, and the tag is not claimed" "this run has no proof that it created the tag"
       expect_out "$variant: resume is suggested" "scripts/release.sh server publish --resume 1.0.0"
       expect "$variant: lease released" no_leases
     else
@@ -2070,6 +2227,12 @@ ALL_CASES=(
   case_origin_down_after_lease
   case_interrupt_after_reservation_accepted
   case_resume_does_not_trust_label
+  case_foreign_tag_with_lost_reservation_response
+  case_origin_url_case
+  case_prepare_lock_released
+  case_version_overflow
+  case_prepare_branch_advanced_before_pr
+  case_prepare_open_pr_other_head
 )
 
 if [[ -n "${RELEASE_TEST_CASES:-}" ]]; then

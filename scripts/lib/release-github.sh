@@ -58,8 +58,10 @@ release_list_prs() {
     fail "cannot read pull requests of $REL_REPO from GitHub (gh api)"
     return "$MASHKIF_EXIT_ENV"
   fi
+  # Owner and repository names compare case-insensitively, as GitHub treats
+  # them; branch names compare exactly.
   awk -F '\t' -v branch="$branch" -v repo="$REL_REPO" -v base="$RELEASE_MAIN" '
-    NF == 10 && $5 == branch && $7 == repo && $8 == base && $9 == repo
+    NF == 10 && $5 == branch && tolower($7) == tolower(repo) && $8 == base && tolower($9) == tolower(repo)
   ' <<<"$out"
 }
 
@@ -118,8 +120,9 @@ release_ci_evidence() {
   while IFS=$'\t' read -r id attempt status conclusion head event branch path repo; do
     [[ -n "$id" ]] || continue
     count=$((count + 1))
+    # Repository names compare case-insensitively, as GitHub treats them.
     if [[ "$path" != "$RELEASE_CI_WORKFLOW" || "$event" != push || "$branch" != "$RELEASE_MAIN" ||
-      "$head" != "$sha" || "$repo" != "$REL_REPO" ]]; then
+      "$head" != "$sha" || "${repo,,}" != "${REL_REPO,,}" ]]; then
       fail "CI run $id does not match the release source (workflow $path, event $event, branch $branch, commit $head, repository $repo)"
       return 1
     fi

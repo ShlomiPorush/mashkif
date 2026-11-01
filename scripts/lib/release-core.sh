@@ -40,7 +40,7 @@ REL_LEASE_STATE=none    # none | pending | held | unknown | released | release-f
 REL_MAIN_SHA=""         # origin/main as last fetched
 REL_RESOLVED_SHA=""     # the source commit found by release_resolve_source
 REL_RESERVE_TRIED=0
-REL_RESERVED=no         # no | pending | yes | unknown | foreign
+REL_RESERVED=no         # no | pending | yes | unconfirmed | unknown | foreign
 REL_MANUAL_CHECK=0
 REL_SOURCE_SHA=""
 REL_PUBLISHED=0
@@ -95,16 +95,24 @@ release_is_semver() {
   [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 }
 
-# release_version_gt <a> <b>: true when a > b. Both must be X.Y.Z.
+# release_version_gt <a> <b>: true when a > b. Both must be X.Y.Z. Components
+# are compared as digit strings (length, then lexicographically after leading
+# zeros are stripped), never as Bash integers, which overflow.
 release_version_gt() {
   local -a a b
-  local i
+  local i x y
   IFS=. read -r -a a <<<"$1"
   IFS=. read -r -a b <<<"$2"
   for i in 0 1 2; do
-    if ((10#${a[i]} > 10#${b[i]})); then
+    x="${a[i]}" y="${b[i]}"
+    while [[ ${#x} -gt 1 && "$x" == 0* ]]; do x="${x#0}"; done
+    while [[ ${#y} -gt 1 && "$y" == 0* ]]; do y="${y#0}"; done
+    if ((${#x} != ${#y})); then
+      ((${#x} > ${#y}))
+      return
+    elif [[ "$x" > "$y" ]]; then
       return 0
-    elif ((10#${a[i]} < 10#${b[i]})); then
+    elif [[ "$x" < "$y" ]]; then
       return 1
     fi
   done
@@ -465,6 +473,11 @@ release_print_recovery() {
         log "If refs/tags/$REL_TAG is absent, nothing was tagged or published: run"
         log "  scripts/release.sh $REL_TARGET publish --version $REL_VERSION"
         ;;
+      unconfirmed)
+        log "refs/tags/$REL_TAG is at the source commit $REL_SOURCE_SHA, but this run cannot confirm that it created it."
+        log "Publish it with: scripts/release.sh $REL_TARGET publish --resume $REL_VERSION"
+        log "Resume checks the tag, the release pull request, $RELEASE_MAIN, and CI again before publishing."
+        ;;
       foreign)
         log "refs/tags/$REL_TAG already existed on $RELEASE_REMOTE and was not created by this run."
         log "This run published nothing. Inspect the tag with: git ls-remote $RELEASE_REMOTE refs/tags/$REL_TAG"
@@ -513,6 +526,7 @@ release_on_exit() {
   fi
   release_cleanup_worktree
   release_print_recovery "$rc"
+  release_prepare_unlock
   exit "$rc"
 }
 
@@ -678,7 +692,11 @@ release_resolve_source() {
     return 1
   fi
   main_version="$(release_version_at "$REL_MAIN_SHA")" || return 1
-  if ! release_is_semver "$main_version" || release_version_gt "$REL_VERSION" "$main_version"; then
+  if ! release_is_semver "$main_version"; then
+    fail "$REL_VERSION_FILE on $RELEASE_REMOTE/$RELEASE_MAIN ($REL_MAIN_SHA) says '$main_version', which is not X.Y.Z"
+    return 1
+  fi
+  if release_version_gt "$REL_VERSION" "$main_version"; then
     fail "$REL_VERSION_FILE on $RELEASE_REMOTE/$RELEASE_MAIN ($REL_MAIN_SHA) says $main_version, lower than $REL_VERSION; the release looks reverted"
     return 1
   fi
@@ -811,16 +829,18 @@ release_reserve() {
 }
 
 # release_resolve_reservation: decides the reservation from origin after a
-# lost, ambiguous, or interrupted tag push. The lease keeps other release runs
-# out, so the tag at the source commit means this run's push happened.
+# lost, ambiguous, or interrupted tag push. The source commit is the release
+# pull request's merge commit, not unique to this run, so a tag at it may have
+# been created by hand: without porcelain "*" it is never taken as this run's
+# tag. The run stops, and --resume, which checks everything again, publishes.
 release_resolve_reservation() {
   local tag_ref="refs/tags/$REL_TAG" tag_sha
   tag_sha="$(release_remote_ref "$tag_ref")"
   case $? in
     0)
       if [[ "$tag_sha" == "$REL_SOURCE_SHA" ]]; then
-        REL_RESERVED=yes
-        log "Origin shows $tag_ref at the source commit; the reservation happened."
+        REL_RESERVED=unconfirmed
+        fail "origin shows $tag_ref at the source commit, but this run has no proof that it created the tag; nothing was published"
       else
         REL_RESERVED=foreign
         fail "$tag_ref on $RELEASE_REMOTE points at $tag_sha, not at the source commit $REL_SOURCE_SHA"
