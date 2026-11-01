@@ -3,7 +3,8 @@
 #
 # Order of a release start:
 #   1. Preflight, read-only: nothing local or remote changes.
-#   2. Publish lease: refs/release-leases/<tag> on origin, created only when absent.
+#   2. Publish lease: refs/release-leases/active on origin, created only when
+#      absent. One ref for every target and version, so only one release runs.
 #   3. Local release commit: version file and changelog, staged by name.
 #   4. Reservation: one atomic push of main and the tag.
 #   5. Publish: build from the tag SHA in a fresh detached worktree, push, verify.
@@ -13,6 +14,8 @@
 RELEASE_REMOTE=origin
 RELEASE_MAIN=main
 RELEASE_LEASE_NS=refs/release-leases
+# The single publish lease. The lease commit records the target, tag, and owner.
+RELEASE_LEASE_REF="$RELEASE_LEASE_NS/active"
 RELEASE_IMAGE_REPO=ghcr.io/shlomiporush/mashkif
 RELEASE_DOCKERFILE=config/docker/app.Dockerfile
 RELEASE_REVISION_LABEL=org.opencontainers.image.revision
@@ -31,7 +34,8 @@ REL_LEASE_STATE=none    # none | pending | held | unknown | released | release-f
 REL_ORIG_HEAD=""
 REL_EDITS_STARTED=0
 REL_RELEASE_COMMIT=""
-REL_RESERVED=no         # no | yes | unknown | foreign
+REL_RESERVED=no         # no | pending | yes | unknown | foreign
+REL_MANUAL_CHECK=0
 REL_SOURCE_SHA=""
 REL_PUBLISHED=0
 REL_LEASE_ACQUIRED=0
@@ -211,7 +215,7 @@ release_show_lease() {
   if [[ -n "$url" ]] && tmp="$(mashkif_mktemp release-lease-owner 2>/dev/null)"; then
     if git init -q --bare "$tmp/repo" >/dev/null 2>&1 &&
       git -C "$tmp/repo" fetch -q --no-tags --no-write-fetch-head "$url" "$ref" >/dev/null 2>&1; then
-      details="$(git -C "$tmp/repo" cat-file commit "$sha" 2>/dev/null | sed '1,/^$/d' | grep -E '^(owner|host|user|pid|started|mode): ')" || details=""
+      details="$(git -C "$tmp/repo" cat-file commit "$sha" 2>/dev/null | sed '1,/^$/d' | grep -E '^(target|tag|owner|host|user|pid|started|mode): ')" || details=""
     fi
     rm -rf -- "$tmp"
   fi
@@ -252,7 +256,10 @@ release_refuse_if_leased() {
 release_push() {
   local out="$1"
   shift
-  rgit push --porcelain --no-follow-tags "$@" >"$out" 2>"$out.err"
+  # git, not the rgit function: a redirected function call keeps its
+  # redirections while a pending signal trap runs, which would send the exit
+  # handler's messages into these files.
+  git -C "$MASHKIF_ROOT" push --porcelain --no-follow-tags "$@" >"$out" 2>"$out.err"
 }
 
 # release_flag <out-file> <dst-ref>: prints the porcelain status flag for <dst-ref>.
@@ -278,8 +285,8 @@ release_new_lease_commit() {
   host="$(uname -n)"
   user="$(id -un 2>/dev/null || printf 'unknown')"
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'Release lease for %s\n\nowner: %s/%s/%s\nhost: %s\nuser: %s\npid: %s\nstarted: %s\nmode: %s\n' \
-    "$REL_TAG" "$host" "$user" "$token" "$host" "$user" "$$" "$started" "$REL_MODE" |
+  printf 'Release lease for %s\n\ntarget: %s\ntag: %s\nowner: %s/%s/%s\nhost: %s\nuser: %s\npid: %s\nstarted: %s\nmode: %s\n' \
+    "$REL_TAG" "$REL_TARGET" "$REL_TAG" "$host" "$user" "$token" "$host" "$user" "$$" "$started" "$REL_MODE" |
     rgit commit-tree "$tree"
 }
 
@@ -309,7 +316,7 @@ release_resolve_lease() {
 
 release_acquire_lease() {
   local out rc flag
-  REL_LEASE_REF="$RELEASE_LEASE_NS/$REL_TAG"
+  REL_LEASE_REF="$RELEASE_LEASE_REF"
   REL_LEASE_SHA="$(release_new_lease_commit)" || {
     fail "could not create the lease commit"
     return 1
@@ -326,7 +333,7 @@ release_acquire_lease() {
     log "Acquired $REL_LEASE_REF ($REL_LEASE_SHA)."
   elif [[ "$flag" == "!" ]]; then
     REL_LEASE_STATE=none
-    fail "another run holds the publish lease for $REL_TAG"
+    fail "another release run holds the publish lease $REL_LEASE_REF"
     local sha
     if sha="$(release_remote_ref "$REL_LEASE_REF")"; then
       release_show_lease "$REL_LEASE_REF" "$sha"
@@ -443,6 +450,8 @@ release_print_recovery() {
         log "Check it with: git ls-remote $RELEASE_REMOTE refs/heads/$RELEASE_MAIN refs/tags/$REL_TAG"
         log "If refs/tags/$REL_TAG points at $REL_RELEASE_COMMIT, the reservation happened: run"
         log "  scripts/release.sh $REL_TARGET --resume $REL_VERSION"
+        log "If refs/tags/$REL_TAG is absent, the reservation did not happen. Local $RELEASE_MAIN has the"
+        log "unpushed release commit; to discard it: git reset --keep $REL_ORIG_HEAD"
         ;;
       foreign)
         log "refs/tags/$REL_TAG already existed on $RELEASE_REMOTE and was not created by this run."
@@ -458,7 +467,7 @@ release_print_recovery() {
         ;;
     esac
   fi
-  if ((rc != 0)) && ((!REL_PUBLISHED)) &&
+  if ((rc != 0)) && ((!REL_PUBLISHED)) && ((!REL_MANUAL_CHECK)) &&
     [[ "$REL_RESERVED" == yes || ("$REL_MODE" == resume && "$REL_LEASE_ACQUIRED" == 1) ]]; then
     log ""
     log "The tag $REL_TAG is reserved, but its artifacts are not all published."
@@ -473,6 +482,10 @@ release_on_exit() {
   trap - EXIT
   trap '' INT TERM
   release_wait_children
+  if [[ "$REL_RESERVED" == pending ]]; then
+    log "Interrupted during the reservation push; reading $RELEASE_REMOTE to decide its result."
+    release_resolve_reservation
+  fi
   case "$REL_LEASE_STATE" in
     pending)
       if release_resolve_lease 2>/dev/null; then
@@ -710,6 +723,8 @@ release_make_commit() {
 release_reserve() {
   local out rc main_flag tag_flag tag_sha main_ref="refs/heads/$RELEASE_MAIN" tag_ref="refs/tags/$REL_TAG"
   out="$REL_RUN_DIR/reservation-push"
+  # Until the result is parsed, the exit handler reads origin to decide.
+  REL_RESERVED=pending
   release_push "$out" --atomic "$RELEASE_REMOTE" "$REL_RELEASE_COMMIT:$main_ref" "$REL_RELEASE_COMMIT:$tag_ref"
   rc=$?
   main_flag="$(release_flag "$out" "$main_ref")"
@@ -726,31 +741,39 @@ release_reserve() {
     release_push_details "$out"
   else
     log "The reservation push gave no clear answer (exit $rc); reading $RELEASE_REMOTE."
-    tag_sha="$(release_remote_ref "$tag_ref")"
-    case $? in
-      0)
-        if [[ "$tag_sha" == "$REL_RELEASE_COMMIT" ]]; then
-          REL_RESERVED=yes
-          log "Origin shows $tag_ref at the release commit; the reservation happened."
-        else
-          REL_RESERVED=foreign
-          fail "$tag_ref on $RELEASE_REMOTE points at $tag_sha, not at this run's release commit"
-        fi
-        ;;
-      1)
-        REL_RESERVED=no
-        fail "the reservation did not happen: $tag_ref is absent on $RELEASE_REMOTE"
-        release_push_details "$out"
-        ;;
-      *)
-        REL_RESERVED=unknown
-        fail "cannot read $RELEASE_REMOTE after the reservation push"
-        ;;
-    esac
+    release_resolve_reservation
+    [[ "$REL_RESERVED" != no ]] || release_push_details "$out"
   fi
   rm -f -- "$out" "$out.err"
   [[ "$REL_RESERVED" == yes ]] || return 1
   log "Reserved $tag_ref and $RELEASE_MAIN at $REL_RELEASE_COMMIT."
+}
+
+# release_resolve_reservation: decides the reservation from origin after a
+# lost, ambiguous, or interrupted reservation push. The release commit is
+# unique to this run, so the tag at that commit means the push happened.
+release_resolve_reservation() {
+  local tag_ref="refs/tags/$REL_TAG" tag_sha
+  tag_sha="$(release_remote_ref "$tag_ref")"
+  case $? in
+    0)
+      if [[ "$tag_sha" == "$REL_RELEASE_COMMIT" ]]; then
+        REL_RESERVED=yes
+        log "Origin shows $tag_ref at the release commit; the reservation happened."
+      else
+        REL_RESERVED=foreign
+        fail "$tag_ref on $RELEASE_REMOTE points at $tag_sha, not at this run's release commit"
+      fi
+      ;;
+    1)
+      REL_RESERVED=no
+      fail "the reservation did not happen: $tag_ref is absent on $RELEASE_REMOTE"
+      ;;
+    *)
+      REL_RESERVED=unknown
+      fail "cannot read $RELEASE_REMOTE after the reservation push"
+      ;;
+  esac
 }
 
 # release_verify_source: reads the tag SHA from origin after the lease, makes
@@ -823,9 +846,18 @@ release_publish_server() {
   state="$(release_image_state "$sha")" || return 1
   case "$state" in
     match)
-      log "$ref is already published from $sha; nothing to publish."
-      REL_PUBLISHED=1
-      return 0
+      # A matching revision label does not prove the content, and this run has
+      # no locally built digest to compare with, so it never reports success.
+      remote_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$ref" 2>/dev/null)" ||
+        remote_digest="could not be read"
+      fail "$ref already exists; this run cannot verify its content"
+      log "  registry digest: $remote_digest"
+      log "  $RELEASE_REVISION_LABEL: $sha"
+      log "  A matching revision label does not prove the content. Check the digest by hand, for example"
+      log "  against the digest the original run printed or a trusted build of $sha."
+      log "  The image is never overwritten. If it is wrong, release a new version instead."
+      REL_MANUAL_CHECK=1
+      return 1
       ;;
     mismatch)
       fail "$ref exists but was not built from $sha; it is never overwritten"
@@ -905,7 +937,7 @@ release_print_preview() {
   if [[ "$REL_MODE" == start ]]; then
     current="$(release_version_at HEAD)"
     log "A release would:"
-    log "  1. create the publish lease $RELEASE_LEASE_NS/$REL_TAG on $RELEASE_REMOTE"
+    log "  1. create the publish lease $RELEASE_LEASE_REF on $RELEASE_REMOTE, recording $REL_TAG"
     log "  2. commit $REL_VERSION_FILE ($current -> $REL_VERSION) and promote Unreleased in $REL_CHANGELOG"
     log "  3. push $RELEASE_MAIN and refs/tags/$REL_TAG to $RELEASE_REMOTE in one atomic push"
     log "  4. build and push $(release_image_ref) from the tag commit, then verify its digest"

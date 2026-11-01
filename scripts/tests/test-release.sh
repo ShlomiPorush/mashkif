@@ -145,6 +145,16 @@ if [[ "$sub" == push ]]; then
         "$real" "$@" >/dev/null 2>&1
         exit 1
       fi
+      # Origin has accepted the push; hold the push process open at a barrier.
+      if [[ -n "${SHIM_RESERVE_BARRIER:-}" ]]; then
+        "$real" "$@"
+        rc=$?
+        if has_fault down-after-reserve; then
+          : >"$state/remote-down"
+        fi
+        barrier "$SHIM_RESERVE_BARRIER" reserve
+        exit "$rc"
+      fi
       ;;
   esac
 fi
@@ -495,6 +505,14 @@ expect_rc_nonzero() {
   fi
 }
 
+expect_no_out() {
+  if grep -qF -- "$2" "$OUT"; then
+    flunk "$1 (output contains: $2)"
+  else
+    pass "$1"
+  fi
+}
+
 expect_out() {
   if grep -qF -- "$2" "$OUT"; then
     pass "$1"
@@ -720,7 +738,7 @@ case_concurrent_starts() {
   fi
   pass "exactly one concurrent start succeeds ($winner)"
   OUT="$W/race-$loser.out"
-  expect_out "loser reports the held lease" "another run holds the publish lease for $TAG"
+  expect_out "loser reports the held lease" "another release run holds the publish lease refs/release-leases/active"
   expect_out "loser shows the owner" "owner: "
   expect_out "loser shows the start time" "started: "
   expect_eq "loser made no release commit" "$ORIG" "$(g "$loser" rev-parse HEAD)"
@@ -742,7 +760,8 @@ case_start_vs_resume() {
   expect_rc_nonzero "resume from another clone while the start holds the lease"
   expect_out "blocked resume shows the owner" "owner: "
   expect_out "blocked resume shows the start time" "started: "
-  expect_out "blocked resume prints the manual recovery" "git push --porcelain --force-with-lease=refs/release-leases/$TAG:"
+  expect_out "blocked resume prints the manual recovery" "git push --porcelain --force-with-lease=refs/release-leases/active:"
+  expect_out "blocked resume shows the leased tag" "tag: $TAG"
   expect_eq "blocked resume changed nothing" "$before_b" "$(snapshot b)"
   : >"$W/barrier/go"
   wait_exit "$pid" || true
@@ -752,8 +771,8 @@ case_start_vs_resume() {
   tag_sha="$(remote_ref "refs/tags/$TAG")"
   expect "other clone lacks the tagged commit" lacks_commit b "$tag_sha"
   run_release b resume-after -- server --resume 1.0.0
-  expect_rc_zero "resume after the start finished"
-  expect_out "resume finds the artifact published" "is already published from $tag_sha"
+  expect_rc_nonzero "resume after the start finished does not claim success"
+  expect_out "resume cannot verify the existing image" "already exists; this run cannot verify its content"
   expect_eq "resume built nothing" 1 "$(count_lines "$W/docker/builds")"
   expect "resume fetched the missing tagged commit" g b cat-file -e "$tag_sha^{commit}"
   expect_eq "resume created no local tag" "" "$(g b tag -l)"
@@ -913,13 +932,16 @@ case_publish_failures() {
     expect "$fault: scratch cleaned" scratch_clean
     expect_eq "$fault: still no local tag" "" "$(g a tag -l)"
     run_release a "resume-$fault" -- server --resume 1.0.0
-    expect_rc_zero "$fault: resume"
     expect_eq "$fault: registry has the tag SHA" "$tag_sha" "$(registry_revision)"
     case "$fault" in
       push-lost | remote-digest-mismatch)
-        expect_out "$fault: resume publishes nothing twice" "is already published from $tag_sha"
+        # The image already exists: the label alone is not accepted as proof.
+        expect_rc_nonzero "$fault: resume over the pushed image"
+        expect_out "$fault: resume asks for a manual check" "this run cannot verify its content"
+        expect_eq "$fault: resume built nothing" 1 "$(count_lines "$W/docker/builds")"
         ;;
       *)
+        expect_rc_zero "$fault: resume"
         expect_eq "$fault: resume built from the tag SHA" \
           "tag=$IMAGE rev=$tag_sha head=$tag_sha version=1.0.0" "$(last_build)"
         ;;
@@ -1003,6 +1025,105 @@ case_resume_dirty_and_preview() {
   expect_out "missing tag is explained" "there is nothing to resume"
 }
 
+# R1: starts for different versions in the same checkout share one lease, so
+# only one of them edits, commits, and reserves.
+case_concurrent_starts_different_versions() {
+  world concurrent-versions
+  local pid_one pid_two rc_one rc_two loser winner_tag loser_tag
+  spawn_release a versions-one SHIM_LEASE_BARRIER="$W/barrier" SHIM_NAME=one -- server --version 1.0.0
+  pid_one=$LAST_PID
+  spawn_release a versions-two SHIM_LEASE_BARRIER="$W/barrier" SHIM_NAME=two -- server --version 1.1.0
+  pid_two=$LAST_PID
+  if wait_file "$W/barrier/one.ready" && wait_file "$W/barrier/two.ready"; then
+    pass "both versions passed preflight and reached the lease push"
+  else
+    flunk "both versions reached the lease push"
+  fi
+  : >"$W/barrier/go"
+  wait_exit "$pid_one" || true
+  rc_one=$RC
+  wait_exit "$pid_two" || true
+  rc_two=$RC
+  if ((rc_one == 0 && rc_two != 0)); then
+    loser=two winner_tag=server-v1.0.0 loser_tag=server-v1.1.0
+  elif ((rc_two == 0 && rc_one != 0)); then
+    loser=one winner_tag=server-v1.1.0 loser_tag=server-v1.0.0
+  else
+    OUT="$W/versions-one.out"
+    flunk "exactly one start of two versions proceeds (1.0.0=$rc_one 1.1.0=$rc_two)"
+    return
+  fi
+  pass "exactly one start of two versions proceeds"
+  OUT="$W/versions-$loser.out"
+  expect_out "the other version is refused at the lease" "another release run holds the publish lease refs/release-leases/active"
+  expect_out "the refusal names the leased tag" "tag: $winner_tag"
+  expect_no_out "the refused version never acquired a lease" "Acquired refs/release-leases/"
+  expect_no_out "the refused version never edited or committed" "release edits"
+  expect_no_out "the refused version never committed" "Created the local release commit"
+  expect_eq "origin main has exactly one release commit" "$ORIG" "$(remote_ref refs/heads/main^)"
+  expect_eq "local main is that release commit" "$(remote_ref refs/heads/main)" "$(g a rev-parse HEAD)"
+  expect_eq "the winner's tag is on that commit" "$(remote_ref refs/heads/main)" "$(remote_ref "refs/tags/$winner_tag")"
+  expect_eq "the refused version has no tag" "" "$(remote_ref "refs/tags/$loser_tag")"
+  expect_eq "local tree clean" "" "$(g a status --porcelain)"
+  expect_eq "one build in total" 1 "$(count_lines "$W/docker/builds")"
+  expect "no lease left" no_leases
+}
+
+# R2: TERM after origin accepted the reservation, before the script read the result.
+case_interrupt_after_reservation_accepted() {
+  local variant pid tag_sha
+  for variant in readable unreadable; do
+    world "interrupt-reservation-$variant"
+    local faults=""
+    [[ "$variant" == unreadable ]] && faults=down-after-reserve
+    spawn_release a interrupted SHIM_RESERVE_BARRIER="$W/barrier" SHIM_FAULTS="$faults" -- server --version 1.0.0
+    pid=$LAST_PID
+    wait_file "$W/barrier/reserve.ready" || true
+    tag_sha="$(remote_ref "refs/tags/$TAG")"
+    expect "$variant: origin accepted the reservation" test -n "$tag_sha"
+    kill -TERM "$pid"
+    sleep 1
+    : >"$W/barrier/go"
+    wait_exit "$pid" || true
+    OUT="$W/interrupted.out"
+    expect_eq "$variant: interrupted run exits 143" 143 "$RC"
+    expect_eq "$variant: the tag is on the local release commit" "$tag_sha" "$(g a rev-parse HEAD)"
+    expect "$variant: nothing built" no_builds
+    if [[ "$variant" == readable ]]; then
+      expect_out "$variant: origin decides the result" "the reservation happened"
+      expect_no_out "$variant: no advice to discard the published commit" "git reset --keep"
+      expect_out "$variant: resume is suggested" "scripts/release.sh server --resume 1.0.0"
+      expect "$variant: lease released" no_leases
+    else
+      expect_out "$variant: the result is reported as unknown" "The reservation result is unknown"
+      expect_out "$variant: the reserved check is printed" "the reservation happened: run"
+      expect_out "$variant: the not-reserved check is printed" "is absent, the reservation did not happen"
+    fi
+  done
+}
+
+# R3: a resume over an existing image with the right label still fails,
+# because the label does not prove the content.
+case_resume_does_not_trust_label() {
+  world resume-label
+  fail_start start remote-digest-mismatch
+  expect_rc_nonzero "start with a digest mismatch"
+  local tag_sha registry_before digest
+  tag_sha="$(remote_ref "refs/tags/$TAG")"
+  registry_before="$(cat "$W/docker/registry/$IMAGE_KEY")"
+  digest="${registry_before%% *}"
+  run_release a resume -- server --resume 1.0.0
+  expect_rc_nonzero "resume over an image whose label matches"
+  expect_out "resume says the content cannot be verified" "this run cannot verify its content"
+  expect_out "resume prints the registry digest" "registry digest: $digest"
+  expect_out "resume prints the revision label" "org.opencontainers.image.revision: $tag_sha"
+  expect_no_out "resume does not claim the release is done" "Released server 1.0.0"
+  expect_no_out "resume does not suggest resuming again" "After fixing the cause, run:"
+  expect_eq "resume built nothing" 1 "$(count_lines "$W/docker/builds")"
+  expect_eq "registry unchanged" "$registry_before" "$(cat "$W/docker/registry/$IMAGE_KEY")"
+  expect "lease released" no_leases
+}
+
 case_preview_start
 case_start_success
 case_version_rules
@@ -1024,6 +1145,9 @@ case_resume_mismatched_artifact
 case_resume_main_moved
 case_resume_commit_missing
 case_resume_dirty_and_preview
+case_concurrent_starts_different_versions
+case_interrupt_after_reservation_accepted
+case_resume_does_not_trust_label
 
 printf 'release tests: %d failure(s) in %ds\n' "$failures" "$((SECONDS - started_at))" >&2
 ((failures == 0))

@@ -27,8 +27,9 @@ Targets:
            $RELEASE_DOCKERFILE and labelled with the tag commit.
   agent    Signed MSI as a GitHub Release asset. Refused until code signing exists.
 
-Only one release runs at a time: a lease ref under $RELEASE_LEASE_NS/ on origin
-guards it, and the script never removes a lease it does not own.
+Only one release runs at a time, for any target or version: the lease ref
+$RELEASE_LEASE_REF on origin guards it, and the script never removes a
+lease it does not own.
 
 Exit codes: 0 done, 1 refused or failed, 2 usage or environment error.
 EOF
