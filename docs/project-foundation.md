@@ -8,10 +8,10 @@ This document separates the repository's current state from the approved foundat
 
 Inspected on 2026-11-01:
 
-- The public repository is `ShlomiPorush/mashkif`, default branch `main`. The foundation is implemented on the topic branch `feature/foundation` and is not merged.
+- The public repository is `ShlomiPorush/mashkif`, default branch `main`. The foundation is merged into `main` (pull request #1).
 - Implemented: per-component licenses, the protocol contract with one health endpoint, the server and web shells, the Windows agent skeleton and its unsigned MSI, the container image and Compose files, `scripts/verify.sh`, `scripts/local.sh`, `scripts/try-pr.sh`, `scripts/release.sh`, path-filtered CI, and Dependabot. Evidence is in the implementation plan table below.
 - `scripts/verify.sh` (full sweep, all six areas) passed locally from WSL on 2026-11-01.
-- No GitHub settings (rulesets, labels, CLA Assistant, security settings) are applied. No release has been made, and nothing is deployed.
+- The GitHub configuration (deliverable 14) is applied: labels, templates, rulesets for `main` and release tags, security settings, and CLA Assistant. No release has been made, and nothing is deployed.
 - The domain `mashkif.co.il` is registered. Hosting is an existing Linux server with Docker and Traefik that Shlomi operates; its details are not recorded in the repository.
 - A related project, geoip-extractor (outside this repository), downloads MaxMind GeoLite2 data and writes per-country CIDR and ASN lists. Its CIDR output is collapsed without per-range ASN, so it cannot map an IP address to a provider. Its Israeli ASN list is a useful seed for the curated provider table.
 
@@ -132,7 +132,7 @@ Everything else lives in purpose-specific directories: `agent/` (including its `
 | 11 | Release workflow | Implemented, with releases through a pull request: the scenario tests for `prepare` (preview, recovery after partial failures, concurrency) and `publish` (source and revert rules, CI evidence, concurrency, interruption, lost responses, resume) pass against a local bare repository with shims for Docker and gh; the gh projections were checked against the real pulls, runs, and jobs APIs with read-only calls; no real release; GitHub acceptance of `refs/release-leases/*` and real `gh pr create` are unverified | `scripts/release.sh` with preview mode, explicit target (`agent` or `server`), version and changelog update, immutable tag | Preview run produces no changes |
 | 12 | Path-filtered CI | Implemented: actionlint passes; every check, including `agent` on Windows and `summary`, passed on pull request #1 | Change detection, server and web on Linux, agent on Windows, guards, final summary job; least-privilege permissions; pinned actions; manual and weekly full runs | Green run on a pull request that touches each area |
 | 13 | Dependency management | Implemented: validated against the published schema; GitHub validates it only after merge to `main` | Dependabot weekly for npm, NuGet, Docker, and GitHub Actions; grouped minor and patch updates; no auto-merge | Configuration validated by GitHub |
-| 14 | GitHub configuration | Blocked | Repository, labels, templates, branch rules, security settings, CLA Assistant with the approved CLA text | Requires separate authorization |
+| 14 | GitHub configuration | In progress, applied on 2026-11-01 with a saved backup and rollback command for each setting: 14 area, priority, and topic labels; issue forms, pull request template, `SECURITY.md`, and `CONTRIBUTING.md` (pull request #4); tag ruleset `release-tags` (updates and deletions of `agent-v*` and `server-v*` blocked); branch ruleset `main` (no deletion, no force push, pull request with resolved conversations, `summary` from GitHub Actions required and up to date, no bypass), checked with a throwaway pull request that stayed blocked until `summary` passed; Actions approval required for every external fork pull request; CodeQL default setup, first analyses for `actions`, `csharp`, and `javascript-typescript` succeeded with no alerts; CLA Assistant linked to the approved CLA version 1.0 gist, with `dependabot[bot]` allowlisted. Remaining: the CLA check as a required check. Not verified, for lack of a second GitHub account: an unsigned external pull request, a multi-author pull request, and an Actions run from a real fork | Repository, labels, templates, branch rules, security settings, CLA Assistant with the approved CLA text | Read-back of every setting; a pull request blocked until its required checks pass; first CodeQL analyses complete; CLA check present on a real pull request |
 
 ## Required workflow contracts
 
@@ -186,4 +186,4 @@ Out of scope: heartbeats, diagnosis, outage detection, reputation, admin feature
 
 Stopping point: `scripts/verify.sh` passes a full sweep locally, `scripts/local.sh` brings up a healthy non-root development environment, the unsigned MSI installs and uninstalls on a test machine, and CI is green on the pull request. Then update this document's statuses with evidence and stop for review.
 
-Outcome on 2026-11-01: every stopping criterion is met (see the implementation plan table), and CI is green on pull request #1. `.github/SECURITY.md` and `.github/CONTRIBUTING.md` belong to deliverable 14 and do not exist yet.
+Outcome on 2026-11-01: every stopping criterion is met (see the implementation plan table), and CI is green on pull request #1. `.github/SECURITY.md` and `.github/CONTRIBUTING.md` were added later with deliverable 14 (pull request #4).

@@ -4,7 +4,7 @@ Thank you for your interest in Mashkif. This guide explains how to propose a cha
 
 ## Contributor License Agreement
 
-Every external contributor signs the Mashkif Contributor License Agreement (CLA) before a pull request can be merged. You sign once for each version of the CLA. CLA Assistant asks for the signature in a comment on your first pull request, and asks again only when the CLA version changes. Pull requests from authors who have not signed the current version are not merged.
+Every external contributor signs the [Mashkif Contributor License Agreement](https://gist.github.com/ShlomiPorush/135b9c62c325a54f49f71b984803e12c) (CLA), version 1.0, before a pull request can be merged. The CLA is adapted from the Apache Individual Contributor License Agreement v2.2. It grants a license to your contribution, including the right to relicense it; it does not transfer ownership. You sign once for each version of the CLA. CLA Assistant asks for the signature in a comment on your first pull request, and asks again only when the CLA version changes. Pull requests from authors who have not signed the current version are not merged.
 
 ## Before you start
 
