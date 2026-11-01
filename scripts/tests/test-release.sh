@@ -1069,6 +1069,34 @@ case_concurrent_starts_different_versions() {
   expect "no lease left" no_leases
 }
 
+# R1 follow-up: a run that passed preflight waits at the lease while another
+# run in the same checkout releases a higher version and frees the lease.
+case_lease_after_other_release() {
+  world lease-after-other
+  local pid
+  spawn_release a late SHIM_LEASE_BARRIER="$W/barrier" SHIM_NAME=late -- server --version 1.0.0
+  pid=$LAST_PID
+  if wait_file "$W/barrier/late.ready"; then
+    pass "the late run passed preflight and waits at the lease push"
+  else
+    flunk "the late run reached the lease push"
+  fi
+  run_release a early -- server --version 1.1.0
+  expect_rc_zero "the early run releases 1.1.0"
+  local released
+  released="$(remote_ref refs/heads/main)"
+  : >"$W/barrier/go"
+  wait_exit "$pid" || true
+  OUT="$W/late.out"
+  expect_rc_nonzero "the late run is refused after taking the lease"
+  expect_out "the refusal says the repository changed" "the repository changed while this run waited for the lease"
+  expect_no_out "the late run never committed" "Created the local release commit"
+  expect_eq "origin main is still the 1.1.0 release" "$released" "$(remote_ref refs/heads/main)"
+  expect_eq "no 1.0.0 tag" "" "$(remote_ref refs/tags/server-v1.0.0)"
+  expect_eq "local tree clean" "" "$(g a status --porcelain)"
+  expect "no lease left" no_leases
+}
+
 # R2: TERM after origin accepted the reservation, before the script read the result.
 case_interrupt_after_reservation_accepted() {
   local variant pid tag_sha
@@ -1147,6 +1175,7 @@ case_resume_commit_missing
 case_resume_dirty_and_preview
 case_concurrent_starts_different_versions
 case_interrupt_after_reservation_accepted
+case_lease_after_other_release
 case_resume_does_not_trust_label
 
 printf 'release tests: %d failure(s) in %ds\n' "$failures" "$((SECONDS - started_at))" >&2

@@ -655,6 +655,26 @@ release_preflight_start() {
   log "Preflight passed: $REL_TARGET $current -> $REL_VERSION, tag $REL_TAG, from $RELEASE_MAIN at $head."
 }
 
+# release_recheck_after_lease: the start preflight ran before the lease was
+# held, so another run may have released in between (in this checkout or
+# elsewhere). Refuse unless the repository is still exactly as checked.
+release_recheck_after_lease() {
+  local branch head remote_main rc
+  release_check_clean || return
+  branch="$(rgit symbolic-ref -q --short HEAD)" || branch=""
+  head="$(rgit rev-parse HEAD)" || return 1
+  remote_main="$(release_remote_ref "refs/heads/$RELEASE_MAIN")"
+  rc=$?
+  if ((rc == 2)); then
+    fail "cannot read $RELEASE_MAIN from $RELEASE_REMOTE after taking the lease"
+    return "$MASHKIF_EXIT_ENV"
+  fi
+  if [[ "$branch" != "$RELEASE_MAIN" || "$head" != "$REL_ORIG_HEAD" || "$remote_main" != "$REL_ORIG_HEAD" ]]; then
+    fail "the repository changed while this run waited for the lease ($RELEASE_MAIN was $REL_ORIG_HEAD; now local ${head:-unknown}, $RELEASE_REMOTE ${remote_main:-unknown}); start the release again"
+    return 1
+  fi
+}
+
 release_preflight_artifacts_absent() {
   local state
   case "$REL_TARGET" in
@@ -977,6 +997,7 @@ release_main() {
     release_preflight_start || return
     release_make_run_dir || return
     release_acquire_lease || return 1
+    release_recheck_after_lease || return 1
     release_make_commit || return 1
     release_reserve || return 1
   else
