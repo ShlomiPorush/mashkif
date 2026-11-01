@@ -265,20 +265,8 @@ verify_server() {
   }
   mashkif_node_steps server server \
     "build|rm -rf dist && corepack pnpm run build" \
-    "migrations match the schema|out=\$(mktemp -d)
-      cp -R drizzle/. \"\$out\"
-      # drizzle-kit reads earlier snapshots from ./<out>, so the path must be
-      # relative; it also exits 0 after some errors, so its output is checked.
-      if ! generated=\$(MASHKIF_DRIZZLE_OUT=\"\$(realpath --relative-to=. \"\$out\")\" \\
-        corepack pnpm exec drizzle-kit generate 2>&1) || grep -qi error <<<\"\$generated\"; then
-        printf '%s\n' \"\$generated\" >&2
-        echo 'drizzle-kit generate failed while checking for schema drift' >&2
-        exit 1
-      fi
-      if ! diff -r drizzle \"\$out\"; then
-        echo 'server/src/db/schema.ts has changes without a migration: run pnpm --filter @mashkif/server run db:generate' >&2
-        exit 1
-      fi" || {
+    "migrations match the schema|source ../scripts/lib/migration-drift.sh && mashkif_migration_drift drizzle" \
+    "the drift check fails on drift (self-test)|source ../scripts/lib/migration-drift.sh && mashkif_migration_drift_self_test" || {
     step=$?
     ((step > rc)) && rc=$step
   }
