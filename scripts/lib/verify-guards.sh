@@ -171,8 +171,10 @@ guard_release_tests() {
 #   docker:// references need a sha256 digest);
 # - no workflow uses the pull_request_target trigger;
 # - actionlint, with its bundled shellcheck for run: scripts, passes;
-# - dependabot.yml validates against the SchemaStore schema vendored in
-#   check-jsonschema, so no schema is fetched at run time.
+# - dependabot.yml, the issue forms in .github/ISSUE_TEMPLATE/, and the
+#   issue template chooser (.github/ISSUE_TEMPLATE/config.yml) validate
+#   against the SchemaStore schemas vendored in check-jsonschema, so no
+#   schema is fetched at run time.
 guard_ci_config() {
   local actionlint_image="rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"
   local python_image="python:3.14-slim-bookworm@sha256:516b51cb9db2ef061e465c803e50f64361b82cefd91e525b889b967b83e83527"
@@ -191,16 +193,26 @@ requests==2.34.2
 rpds-py==2026.9.1
 ruamel.yaml==0.19.1
 urllib3==2.8.0"
-  local -a workflows=() dependabot=() problems=()
+  # schema_checks holds pairs: a check-jsonschema built-in schema, then a file.
+  local -a workflows=() schema_checks=() problems=()
   local file line ref root rc
 
   while IFS= read -r -d '' file; do
     case "$file" in
       .github/workflows/*.yml | .github/workflows/*.yaml) workflows+=("$file") ;;
-      .github/dependabot.yml | .github/dependabot.yaml) dependabot+=("$file") ;;
+      .github/dependabot.yml | .github/dependabot.yaml)
+        schema_checks+=(vendor.dependabot "$file")
+        ;;
+      # The chooser configuration must match before the issue form pattern.
+      .github/ISSUE_TEMPLATE/config.yml | .github/ISSUE_TEMPLATE/config.yaml)
+        schema_checks+=(vendor.github-issue-config "$file")
+        ;;
+      .github/ISSUE_TEMPLATE/*.yml | .github/ISSUE_TEMPLATE/*.yaml)
+        schema_checks+=(vendor.github-issue-forms "$file")
+        ;;
     esac
   done < <(_guard_files)
-  ((${#workflows[@]} + ${#dependabot[@]})) || return 0
+  ((${#workflows[@]} + ${#schema_checks[@]})) || return 0
 
   for file in "${workflows[@]}"; do
     while IFS= read -r line; do
@@ -240,7 +252,7 @@ urllib3==2.8.0"
     esac
   fi
 
-  if ((${#dependabot[@]})); then
+  if ((${#schema_checks[@]})); then
     if ! root="$(mashkif_tmp_root)"; then
       fail "no scratch location: set MASHKIF_TMP_DIR (locally the T: drive is expected at /mnt/t)"
       return "$MASHKIF_EXIT_ENV"
@@ -259,15 +271,22 @@ urllib3==2.8.0"
         printf "%s\n" "$MASHKIF_REQUIREMENTS" >/tmp/requirements.txt
         { python -m venv /tmp/venv &&
           /tmp/venv/bin/pip install --quiet --only-binary=:all: -r /tmp/requirements.txt; } >&2 || exit 125
-        exec /tmp/venv/bin/check-jsonschema --builtin-schema vendor.dependabot "$@"
-      ' sh "${dependabot[@]}" >&2 || rc=$?
+        # Check every file, then exit 1 if any failed (125 stays reserved).
+        status=0
+        while [ "$#" -gt 0 ]; do
+          schema="$1" file="$2"
+          shift 2
+          /tmp/venv/bin/check-jsonschema --builtin-schema "$schema" "$file" || status=1
+        done
+        exit "$status"
+      ' sh "${schema_checks[@]}" >&2 || rc=$?
     case "$rc" in
       0) ;;
       125)
         fail "could not run check-jsonschema (container or pip install failed)"
         return "$MASHKIF_EXIT_ENV"
         ;;
-      *) problems+=("${dependabot[*]} does not match the Dependabot schema (see above)") ;;
+      *) problems+=("check-jsonschema reported problems (see above)") ;;
     esac
   fi
 
