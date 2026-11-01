@@ -1,6 +1,6 @@
 # Mashkif Project Foundation
 
-Status: Foundation deliverables 1 to 13 implemented on branch `foundation` on 2026-11-01, pending the first CI run and review on the pull request. Deliverable 14 is blocked on separate authorization. The plan was approved by Shlomi on 2026-11-01.
+Status: Foundation deliverables 1 to 13 implemented on branch `feature/foundation` on 2026-11-01, pending the first CI run and review on the pull request. Deliverable 14 is blocked on separate authorization. The plan was approved by Shlomi on 2026-11-01.
 
 This document separates the repository's current state from the approved foundation. A planned item does not exist until its status and verification evidence say otherwise. Product features (heartbeats, outage detection, reputation, maps with real data) are out of scope for the foundation task.
 
@@ -8,7 +8,7 @@ This document separates the repository's current state from the approved foundat
 
 Inspected on 2026-11-01:
 
-- The public repository is `ShlomiPorush/mashkif`, default branch `main`. The foundation is implemented on the topic branch `foundation` and is not merged.
+- The public repository is `ShlomiPorush/mashkif`, default branch `main`. The foundation is implemented on the topic branch `feature/foundation` and is not merged.
 - Implemented: per-component licenses, the protocol contract with one health endpoint, the server and web shells, the Windows agent skeleton and its unsigned MSI, the container image and Compose files, `scripts/verify.sh`, `scripts/local.sh`, `scripts/try-pr.sh`, `scripts/release.sh`, path-filtered CI, and Dependabot. Evidence is in the implementation plan table below.
 - `scripts/verify.sh` (full sweep, all six areas) passed locally from WSL on 2026-11-01.
 - No GitHub settings (rulesets, labels, CLA Assistant, security settings) are applied. No release has been made, and nothing is deployed.
