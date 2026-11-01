@@ -385,12 +385,17 @@
 
 .form-split {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
-  align-items: end;
+  align-items: start;
 }
 
 .form-split > .button-row,
-.form-split > .notice {
+.form-split > .notice,
+.form-split > .button {
   grid-column: 1 / -1;
+}
+
+.form-split > .button {
+  justify-self: start;
 }
 
 .button-danger {
