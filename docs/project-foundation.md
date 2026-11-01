@@ -1,18 +1,17 @@
 # Mashkif Project Foundation
 
-Status: Preparation, approved by Shlomi on 2026-11-01. Nothing described as planned in this document is implemented.
+Status: Foundation deliverables 1 to 13 implemented on branch `foundation` on 2026-11-01, pending the first CI run and review on the pull request. Deliverable 14 is blocked on separate authorization. The plan was approved by Shlomi on 2026-11-01.
 
-This document separates the repository's current state from the approved foundation that a later implementation task must build. A planned item does not exist until its status and verification evidence say otherwise. Product features (heartbeats, outage detection, reputation, maps with real data) are out of scope for the foundation task.
+This document separates the repository's current state from the approved foundation. A planned item does not exist until its status and verification evidence say otherwise. Product features (heartbeats, outage detection, reputation, maps with real data) are out of scope for the foundation task.
 
 ## Current truth
 
-Inspected on 2026-10-31:
+Inspected on 2026-11-01:
 
-- The repository is a fresh `git init` on branch `main` with no commits and no remote.
-- Tracked content: none. Files added by the preparation step, uncommitted: `README.md`, `AGENTS.md`, `CLAUDE.md`, `.gitignore`, `docs/project-foundation.md`.
-- `.gitignore` currently ignores only `.project-map/`, a machine-local status map.
-- No code, scripts, CI workflows, container definitions, lockfiles, or license files exist.
-- No checks have been run, because there is nothing to check.
+- The public repository is `ShlomiPorush/mashkif`, default branch `main`. The foundation is implemented on the topic branch `foundation` and is not merged.
+- Implemented: per-component licenses, the protocol contract with one health endpoint, the server and web shells, the Windows agent skeleton and its unsigned MSI, the container image and Compose files, `scripts/verify.sh`, `scripts/local.sh`, `scripts/try-pr.sh`, `scripts/release.sh`, path-filtered CI, and Dependabot. Evidence is in the implementation plan table below.
+- `scripts/verify.sh` (full sweep, all six areas) passed locally from WSL on 2026-11-01.
+- No GitHub settings (rulesets, labels, CLA Assistant, security settings) are applied. No release has been made, and nothing is deployed.
 - The domain `mashkif.co.il` is registered. Hosting is an existing Linux server with Docker and Traefik that Shlomi operates; its details are not recorded in the repository.
 - A related project, geoip-extractor (outside this repository), downloads MaxMind GeoLite2 data and writes per-country CIDR and ASN lists. Its CIDR output is collapsed without per-range ASN, so it cannot map an IP address to a provider. Its Israeli ASN list is a useful seed for the curated provider table.
 
@@ -63,23 +62,23 @@ Mashkif is a community internet outage map for Israel. It answers one question: 
 ## Publication and language policy
 
 - All repository text is English: documentation, `AGENTS.md`, code, comments, tests, fixtures, commit messages, issues, pull requests, and reviews.
-- Hebrew is allowed only in exact locale files. Planned paths: `web/src/locales/he.json`, the agent's Hebrew resource files, and the installer's Hebrew localization file. The foundation task fixes their exact paths and lists them in the guard.
+- Hebrew is allowed only in exact locale files: `web/src/locales/he.json`, `agent/src/Mashkif.Tray/Resources/Strings.he.resx`, and `agent/installer/Package.he-IL.wxl`. The guard in `scripts/lib/verify-guards.sh` lists them.
 - A CI guard scans tracked text for Hebrew characters and excludes only those exact paths. Tests load Hebrew samples from the locale files.
 - The product name in repository text is `Mashkif`. The Hebrew name and taglines live only in locale files.
 - Secrets never enter the repository: no MaxMind license key, signing material, database passwords, or registration keys. Only `.env.example` with placeholders is tracked.
 
-## Planned architecture
+## Architecture
 
 | Component | Responsibility | Expected path | License | Status | Dependencies or blockers |
 |---|---|---|---|---|---|
-| Protocol contract | OpenAPI definition of the agent-to-server API; source for TypeScript types and C# client code | `contracts/` | MIT | Planned | None |
-| Windows agent | Background service: heartbeat, latency, local diagnosis, outage journal with retroactive reports, sleep and shutdown notices, H3 cell computed locally | `agent/` | MIT | Planned | Contract |
-| Agent tray app | User-facing status ("home or provider"), consent for location, area selection; Hebrew and English | `agent/` | MIT | Planned | Agent service |
-| Agent installer | MSI with silent install properties for GPO and Intune | `agent/` | MIT | Planned | Signing decision before stage 2 |
-| Server | Ingest API for agents, ASN lookup, site grouping, outage detection, reputation, admin API | `server/` | AGPL-3.0 | Planned | Contract, PostgreSQL, ASN data |
-| Web | Admin panel with reputation controls and internal map now; public site later | `web/` | AGPL-3.0 | Planned | Server API |
-| Database | Agents, sites, heartbeats, outages, trust tiers, detection parameters, curated provider and infrastructure table | Container | Third-party | Planned | None |
-| ASN data | GeoLite2-ASN file maintained outside Mashkif and mounted read-only | Host directory | MaxMind GeoLite2 license | Planned | Operator provides the directory |
+| Protocol contract | OpenAPI definition of the agent-to-server API; source for TypeScript types and C# client code | `contracts/` | MIT | Skeleton: health endpoint only | None |
+| Windows agent | Background service: heartbeat, latency, local diagnosis, outage journal with retroactive reports, sleep and shutdown notices, H3 cell computed locally | `agent/` | MIT | Skeleton: starts and logs only | Contract |
+| Agent tray app | User-facing status ("home or provider"), consent for location, area selection; Hebrew and English | `agent/` | MIT | Skeleton: starts and logs only | Agent service |
+| Agent installer | MSI with silent install properties for GPO and Intune | `agent/` | MIT | Skeleton: unsigned MSI | Signing decision before stage 2 |
+| Server | Ingest API for agents, ASN lookup, site grouping, outage detection, reputation, admin API | `server/` | AGPL-3.0 | Skeleton: health and readiness only | Contract, PostgreSQL, ASN data |
+| Web | Admin panel with reputation controls and internal map now; public site later | `web/` | AGPL-3.0 | Skeleton: empty shell | Server API |
+| Database | Agents, sites, heartbeats, outages, trust tiers, detection parameters, curated provider and infrastructure table | Container | Third-party | Container defined; no tables | None |
+| ASN data | GeoLite2-ASN file maintained outside Mashkif and mounted read-only | Host directory | MaxMind GeoLite2 license | Mount defined; file readability checked | Operator provides the directory |
 
 Load-bearing boundaries:
 
@@ -87,7 +86,7 @@ Load-bearing boundaries:
 - The server and web ship as one container image. The server serves the built web assets on the same origin, so the admin panel needs no cross-origin configuration. Traefik routes `mashkif.co.il` to that container.
 - Coordinates never leave the endpoint. The server stores only H3 cells.
 
-## Planned containers
+## Containers
 
 | Service | Image | Runtime user | Health check | Persistent state | Host bind directory | Named-volume exception | Backup lifecycle |
 |---|---|---|---|---|---|---|---|
@@ -96,23 +95,23 @@ Load-bearing boundaries:
 
 Compose interpolation is limited to values Compose itself resolves: the image tag, `MASHKIF_DATA_DIR`, `MASHKIF_GEOIP_DIR`, and the external Traefik network name. Application settings come from `.env` through `env_file`.
 
-## Planned repository root
+## Repository root
 
 | Root file | Git tracking policy | Why this exact root location is required | Status |
 |---|---|---|---|
-| `README.md` | Tracked | GitHub and contributor discovery | Exists, uncommitted |
-| `AGENTS.md` | Tracked | Agent instruction discovery | Exists, uncommitted |
-| `CLAUDE.md` | Tracked | Claude Code discovery; contains only an import of `AGENTS.md` | Exists, uncommitted |
-| `.gitignore` | Tracked | Git reads root ignore rules | Exists, uncommitted; ignores only `.project-map/` so far |
-| `.gitattributes` | Tracked | Enforces LF for `.sh` and text files from the root | Planned |
-| `.editorconfig` | Tracked | Editors resolve it from the root | Planned |
-| `package.json` | Tracked | pnpm workspace root | Planned |
-| `pnpm-workspace.yaml` | Tracked | pnpm requires it at the workspace root | Planned |
-| `pnpm-lock.yaml` | Tracked | pnpm writes the single workspace lockfile at the root | Planned |
-| `docker-compose.yml` | Tracked | Production deployment contract | Planned |
-| `docker-compose-dev.yml` | Ignored, machine-local | Docker contract requires this exact root path; created per machine from `config/docker-compose-dev.example.yml` | Planned |
-| `.env.example` | Tracked | Environment contract next to the Compose file, placeholders only | Planned |
-| `.env` | Ignored, machine-local | Real values read by Compose `env_file` | Planned |
+| `README.md` | Tracked | GitHub and contributor discovery | Exists |
+| `AGENTS.md` | Tracked | Agent instruction discovery | Exists |
+| `CLAUDE.md` | Tracked | Claude Code discovery; contains only an import of `AGENTS.md` | Exists |
+| `.gitignore` | Tracked | Git reads root ignore rules | Exists |
+| `.gitattributes` | Tracked | Enforces LF for `.sh` and text files from the root | Exists |
+| `.editorconfig` | Tracked | Editors resolve it from the root | Exists |
+| `package.json` | Tracked | pnpm workspace root | Exists |
+| `pnpm-workspace.yaml` | Tracked | pnpm requires it at the workspace root | Exists |
+| `pnpm-lock.yaml` | Tracked | pnpm writes the single workspace lockfile at the root | Exists |
+| `docker-compose.yml` | Tracked | Production deployment contract | Exists |
+| `docker-compose-dev.yml` | Ignored, machine-local | Docker contract requires this exact root path; created per machine from `config/docker-compose-dev.example.yml` | Machine-local; template exists |
+| `.env.example` | Tracked | Environment contract next to the Compose file, placeholders only | Exists |
+| `.env` | Ignored, machine-local | Real values read by Compose `env_file` | Machine-local; template exists |
 
 Everything else lives in purpose-specific directories: `agent/` (including its `global.json`, solution, central package management, and NuGet lock files), `server/`, `web/`, `contracts/`, `scripts/`, `config/`, `docs/`, and `.github/` (workflows, Dependabot, `SECURITY.md`, `CONTRIBUTING.md`). Changelogs live at `agent/CHANGELOG.md` and `server/CHANGELOG.md`.
 
@@ -120,19 +119,19 @@ Everything else lives in purpose-specific directories: `agent/` (including its `
 
 | Order | Deliverable | Status | Acceptance criteria | Required verification |
 |---|---|---|---|---|
-| 1 | Repository baseline | Planned | Root files from the table exist; per-component `LICENSE` files; `.gitignore` covers `.env`, `docker-compose-dev.yml`, build output, and GeoLite2 files while keeping `.env.example` tracked | `git check-ignore` confirms each ignore rule; `.env.example` is not ignored |
-| 2 | Protocol contract | Planned | OpenAPI document with only a health endpoint and the protocol version header; lint passes; TypeScript types generated or checked | Contract lint in `verify.sh` |
-| 3 | Server and web toolchain | Planned | pnpm workspace; TypeScript strict; format, lint, unit test, and build for `server/` and `web/`; server exposes only health and readiness; web shows an empty shell | `verify.sh` area runs pass |
-| 4 | Web localization and themes | Planned | Hebrew (default, RTL) and English (LTR) locale files; language switch; complete light and dark themes; responsive layout; no hard-coded user-facing strings | Screenshots of both languages and both themes at mobile and desktop widths |
-| 5 | Agent toolchain | Planned | .NET 10 solution with a service and a tray project that start and log only; tests; central package versions with lock files; MSI builds unsigned | Agent area of `verify.sh` on Windows; MSI installs and uninstalls cleanly on a test machine |
-| 6 | Production Docker definition | Planned | Image for `app` with non-root user and health check; `docker-compose.yml` with `app`, `db`, the read-only GeoLite2 mount, Traefik labels, `env_file`, bind mounts, no `build:` | Guard rejects `build:`; effective UID is not 0 for every application process |
-| 7 | Development Docker definition | Planned | `config/docker-compose-dev.example.yml` documents how to create the machine-local file; dev images use `mashkif-app:dev` | `local.sh` fails clearly when the file is missing |
-| 8 | Local workflow | Planned | `scripts/local.sh` build, up, detached up, down, status, confirmed nuke | Health, runtime identity, and running image identity verified after startup; data survives down and up |
-| 9 | Verify workflow | Planned | `scripts/verify.sh` full sweep and changed-area mode; guards for Hebrew text, Compose `build:`, and shell lint | Same commands run locally and in CI |
-| 10 | Try PR workflow | Planned | `scripts/try-pr.sh` with start, status, and restore | Disposable worktree; running `app` uses the freshly built image; database container not replaced |
-| 11 | Release workflow | Planned | `scripts/release.sh` with preview mode, explicit target (`agent` or `server`), version and changelog update, immutable tag | Preview run produces no changes |
-| 12 | Path-filtered CI | Planned | Change detection, server and web on Linux, agent on Windows, guards, final summary job; least-privilege permissions; pinned actions; manual and weekly full runs | Green run on a pull request that touches each area |
-| 13 | Dependency management | Planned | Dependabot weekly for npm, NuGet, Docker, and GitHub Actions; grouped minor and patch updates; no auto-merge | Configuration validated by GitHub |
+| 1 | Repository baseline | Implemented: `git check-ignore` confirmed every rule and `.env.example` is tracked (2026-11-01) | Root files from the table exist; per-component `LICENSE` files; `.gitignore` covers `.env`, `docker-compose-dev.yml`, build output, and GeoLite2 files while keeping `.env.example` tracked | `git check-ignore` confirms each ignore rule; `.env.example` is not ignored |
+| 2 | Protocol contract | Implemented: `GET /api/agent/health` with the `Mashkif-Protocol-Version` header; Redocly lint and a type drift check pass in the `contracts` area | OpenAPI document with only a health endpoint and the protocol version header; lint passes; TypeScript types generated or checked | Contract lint in `verify.sh` |
+| 3 | Server and web toolchain | Implemented: `contracts`, `server`, and `web` areas pass, including readiness tests against a real PostgreSQL container (database down and GeoIP file missing return 503) | pnpm workspace; TypeScript strict; format, lint, unit test, and build for `server/` and `web/`; server exposes only health and readiness; web shows an empty shell | `verify.sh` area runs pass |
+| 4 | Web localization and themes | Implemented: eight screenshots (he and en, light and dark, 390 and 1440 px) inspected on 2026-11-01; a test fails on hard-coded user-facing strings | Hebrew (default, RTL) and English (LTR) locale files; language switch; complete light and dark themes; responsive layout; no hard-coded user-facing strings | Screenshots of both languages and both themes at mobile and desktop widths |
+| 5 | Agent toolchain | Implemented: `agent` area passes from WSL and Git Bash; the MSI installed, ran, and uninstalled cleanly in Windows Sandbox (34 of 34 checks, including install and uninstall as SYSTEM) | .NET 10 solution with a service and a tray project that start and log only; tests; central package versions with lock files; MSI builds unsigned | Agent area of `verify.sh` on Windows; MSI installs and uninstalls cleanly on a test machine |
+| 6 | Production Docker definition | Implemented: `docker` area passes (no `build:`, every process non-root, build context excludes `.env` and untracked files); verified with placeholder values only, not on the server | Image for `app` with non-root user and health check; `docker-compose.yml` with `app`, `db`, the read-only GeoLite2 mount, Traefik labels, `env_file`, bind mounts, no `build:` | Guard rejects `build:`; effective UID is not 0 for every application process |
+| 7 | Development Docker definition | Implemented: `local.sh` refuses clearly when the file is missing (tested) | `config/docker-compose-dev.example.yml` documents how to create the machine-local file; dev images use `mashkif-app:dev` | `local.sh` fails clearly when the file is missing |
+| 8 | Local workflow | Implemented: live run on 2026-11-01 showed health, UIDs 10001 and 999, running image equal to the built one, data surviving down and up, then a confirmed nuke | `scripts/local.sh` build, up, detached up, down, status, confirmed nuke | Health, runtime identity, and running image identity verified after startup; data survives down and up |
+| 9 | Verify workflow | Implemented: full sweep passed locally on 2026-11-01; CI calls the same script | `scripts/verify.sh` full sweep and changed-area mode; guards for Hebrew text, Compose `build:`, and shell lint | Same commands run locally and in CI |
+| 10 | Try PR workflow | Implemented: tested with a fake Docker and a local repository standing in for GitHub; a live run against a real pull request is pending | `scripts/try-pr.sh` with start, status, and restore | Disposable worktree; running `app` uses the freshly built image; database container not replaced |
+| 11 | Release workflow | Implemented: 24 scenarios pass against a local bare repository with shims for Docker and gh; no real release; GitHub acceptance of `refs/release-leases/*` is unverified | `scripts/release.sh` with preview mode, explicit target (`agent` or `server`), version and changelog update, immutable tag | Preview run produces no changes |
+| 12 | Path-filtered CI | Implemented: actionlint passes; a real run on the pull request is pending | Change detection, server and web on Linux, agent on Windows, guards, final summary job; least-privilege permissions; pinned actions; manual and weekly full runs | Green run on a pull request that touches each area |
+| 13 | Dependency management | Implemented: validated against the published schema; GitHub validates it only after merge to `main` | Dependabot weekly for npm, NuGet, Docker, and GitHub Actions; grouped minor and patch updates; no auto-merge | Configuration validated by GitHub |
 | 14 | GitHub configuration | Blocked | Repository, labels, templates, branch rules, security settings, CLA Assistant with the approved CLA text | Requires separate authorization |
 
 ## Required workflow contracts
@@ -148,22 +147,36 @@ All scripts are Bash run inside WSL, start with `#!/usr/bin/env bash`, use LF li
 
 | Question or blocker | Why it matters | Evidence or decision needed | Owner |
 |---|---|---|---|
-| Traefik network name and certificate resolver | Compose labels must match the existing Traefik | Values from the server | Shlomi |
+| Traefik network name, entry point, and certificate resolver | Compose labels must match the existing Traefik; `docker-compose.yml` sets only `tls: "true"` for now | Values from the server | Shlomi |
 | Host data directory and GeoLite2 directory | Bind mounts and backup location | Paths on the server, and confirmation that the GeoLite2-ASN file there is kept current | Shlomi |
+| Docker Engine and Compose versions on the server | The image health check uses `--start-interval` (Engine 25 or later); the Compose files use `start_interval` and `create_host_path` (recent Compose v2) | Versions on the server | Shlomi, before the first deployment |
 | Code-signing provider | Blocks agent release for stage 2 | Choose a provider available to an individual in Israel | Shlomi, before stage 2 |
 | Public IP retention period | The privacy page must state how long full addresses are kept | Choose a period | Shlomi, before the public stage |
-| GitHub repository creation | Remote, CI, and Dependabot need it | Explicit authorization with owner, name, and visibility | Shlomi |
+| GitHub acceptance of `refs/release-leases/*` | `scripts/release.sh` uses these refs as a remote publish lock | Observe the first real server release | Shlomi, at the first release |
+| Dependabot and NuGet lock files | The agent restores in locked mode; an update that does not regenerate `packages.lock.json` fails CI | Observe the first NuGet update from Dependabot | Maintainer |
+| Backup lifecycle for `db` | The container table requires a scheduled logical dump and a documented restore | Not part of deliverables 1 to 13; build it before the first deployment | Maintainer |
 
-## Ready-for-implementation criteria
+## Implementation decisions
 
-- Shlomi approved this document on 2026-11-01.
-- Authorization is given for the first commit. CI deliverables also need the GitHub repository; without it, the task stops after local verification.
-- The Traefik network name, host data directory, and GeoLite2 directory are known before deliverable 6 is verified on the server. Local development does not need them.
+Decisions made while building the foundation, within the approved plan:
+
+| Decision | Choice | Reason |
+|---|---|---|
+| WiX version | WiX 5.0.2 as an MSBuild SDK, pinned in `agent/global.json`; Dependabot ignores WiX 6 and later | WiX 6 and 7 require accepting the Open Source Maintenance Fee EULA |
+| Agent packaging | Service and tray published self-contained for `win-x64`; English MSI at the contract path plus a Hebrew MSI | No .NET runtime needed on endpoints; Hebrew installer text for Hebrew users |
+| Tray start | The tray starts at every user sign-in through the machine `Run` key; uninstall closes it in every session | Needed for the user-facing status later; uninstall as SYSTEM must not leave it running |
+| Protocol versioning | One unversioned path with the `Mashkif-Protocol-Version` request and response header | One route can serve the current and the previous protocol version |
+| Node and pnpm | Run only in the pinned official Node image; pnpm from corepack and `packageManager` | No host installs |
+| Development port | The development app listens on `127.0.0.1:8180` | Port 8080 is taken on the development machine |
+| Release lock | A remote ref `refs/release-leases/<tag>` held for the whole publish; any lease blocks every release; no automatic takeover | Prevents two machines from publishing the same version; a crashed run is cleared manually |
+| Dependabot cooldown | New versions are proposed after seven days | Supply-chain hardening |
 
 ## Handoff to foundation implementation
 
-The first implementation task builds deliverables 1 through 13 in order on a topic branch. Permitted scope: repository baseline, contract skeleton, toolchains, empty server and web shells with health endpoints and localization and theme infrastructure, an agent that starts and logs only, container definitions, the four workflow scripts, CI, and Dependabot configuration.
+The first implementation task builds deliverables 1 through 13 on a topic branch. Permitted scope: repository baseline, contract skeleton, toolchains, empty server and web shells with health endpoints and localization and theme infrastructure, an agent that starts and logs only, container definitions, the four workflow scripts, CI, and Dependabot configuration.
 
 Out of scope: heartbeats, diagnosis, outage detection, reputation, admin features, real map data, signing, deployment to the server, and any release.
 
-Stopping point: `scripts/verify.sh` passes a full sweep locally, `scripts/local.sh` brings up a healthy non-root development environment, the unsigned MSI installs and uninstalls on a test machine, and, if the repository exists, CI is green on the pull request. Then update this document's statuses with evidence and stop for review.
+Stopping point: `scripts/verify.sh` passes a full sweep locally, `scripts/local.sh` brings up a healthy non-root development environment, the unsigned MSI installs and uninstalls on a test machine, and CI is green on the pull request. Then update this document's statuses with evidence and stop for review.
+
+Outcome on 2026-11-01: the local criteria are met (see the implementation plan table). The CI run and the live `scripts/try-pr.sh` run on the foundation pull request are pending. `.github/SECURITY.md` and `.github/CONTRIBUTING.md` belong to deliverable 14 and do not exist yet.

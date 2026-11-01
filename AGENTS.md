@@ -4,7 +4,7 @@
 
 Mashkif is a community internet outage map for Israel: a Windows agent reports heartbeats and latency, the server detects outages per provider, infrastructure, and area, and a web app shows the results.
 
-Stage: preparation. No code exists yet. `docs/project-foundation.md` is the desired-state contract. Do not assume that any file, script, command, or service it lists exists until that document marks it implemented with evidence. Keep this file aligned with implemented reality as the foundation is built.
+Stage: foundation. Toolchains, empty server and web shells, an agent that only starts and logs, container definitions, workflow scripts, and CI exist; product features do not. `docs/project-foundation.md` records decisions and the status of each foundation deliverable with evidence. Do not assume that anything it marks as planned exists. Keep this file aligned with implemented reality.
 
 ## Architecture boundaries
 
@@ -28,7 +28,7 @@ Stage: preparation. No code exists yet. `docs/project-foundation.md` is the desi
 
 ## Repository policies
 
-- Public-ready: all repository text is English. Hebrew is allowed only in the exact locale files listed in the foundation plan and in the Hebrew text guard.
+- Public-ready: all repository text is English. Hebrew is allowed only in `web/src/locales/he.json`, `agent/src/Mashkif.Tray/Resources/Strings.he.resx`, and `agent/installer/Package.he-IL.wxl`. The Hebrew guard in `scripts/lib/verify-guards.sh` enforces this list.
 - Use `Mashkif` in repository text. The Hebrew name and taglines belong in locale files.
 - Never commit secrets, real `.env` files, signing material, or the MaxMind GeoLite2 database files. The GeoLite2 license forbids redistribution, so the database is never committed or baked into an image.
 - Keep the repository root minimal. Every root file must appear in the root table of the foundation plan.
@@ -39,7 +39,7 @@ Stage: preparation. No code exists yet. `docs/project-foundation.md` is the desi
 
 ## Docker
 
-Docker is part of the approved deployment and development architecture. None of the files below exist yet.
+Docker is part of the approved deployment and development architecture. The image is defined in `config/docker/app.Dockerfile`.
 
 - `docker-compose.yml` (tracked) is the production deployment file and references published images. `docker-compose-dev.yml` (root, ignored, machine-local) references `mashkif-app:dev` and is created from `config/docker-compose-dev.example.yml`. Never commit it.
 - Use `docker-compose-dev.yml` only through `scripts/local.sh`. CI and release must not depend on it.
@@ -54,7 +54,12 @@ Docker is part of the approved deployment and development architecture. None of 
 
 ## Verification
 
-Planned single entry point: `scripts/verify.sh`. It does not exist yet. Until it does, state plainly that nothing was verified by scripts.
+- Single entry point: `scripts/verify.sh`, run from WSL. Areas: `contracts`, `server`, `web`, `agent`, `docker`, `guards`. `--area <name>` runs one area, `--changed <base-ref>` runs the areas a change affects, and `--list-areas [base]` prints them. Area selection lives only in `scripts/lib/select-areas.sh`; CI calls `--list-areas` and must not re-implement it.
+- Exit codes: 0 pass, 1 a check failed, 2 usage or environment error. A missing area is an error, never a pass.
+- Node.js, pnpm, PostgreSQL, shellcheck, and actionlint run in containers pinned by digest. Do not install them on the host. The agent area uses the Windows .NET SDK pinned in `agent/global.json`.
+- Scratch files go under `MASHKIF_TMP_DIR`, `RUNNER_TEMP` in CI, or `/mnt/t/mashkif` locally. Use `mashkif_mktemp` from `scripts/lib/common.sh`.
+- Git worktrees use relative paths (`worktree.useRelativePaths=true`) so WSL Git can read them. Never export `GIT_DIR` or `GIT_WORK_TREE`; a test that inherited them once rewrote the shared repository config.
+- State plainly which checks ran and which did not.
 
 ## Documents
 
