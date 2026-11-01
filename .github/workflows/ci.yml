@@ -222,7 +222,7 @@ jobs:
               echo "::error::job $job: $result"
               failed=1
             fi
-          done < <(jq -r 'to_entries[] | select(.key != "detect") | [.key, .result] | @tsv' <<<"$NEEDS")
+          done < <(jq -r 'to_entries[] | select(.key != "detect") | [.key, .value.result] | @tsv' <<<"$NEEDS")
 
           while IFS= read -r area; do
             result="$(jq -r --arg a "$area" '.[$a].result // "missing"' <<<"$NEEDS")"
@@ -237,6 +237,6 @@ jobs:
             echo
             echo "| Job | Result |"
             echo "| --- | --- |"
-            jq -r 'to_entries[] | "| \(.key) | \(.result) |"' <<<"$NEEDS"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<<"$NEEDS"
           } >>"$GITHUB_STEP_SUMMARY"
           exit "$failed"
