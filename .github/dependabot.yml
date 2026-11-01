@@ -13,6 +13,10 @@ updates:
       time: "05:00"
       timezone: Asia/Jerusalem
     open-pull-requests-limit: 5
+    # Wait a week before proposing a new version, so a compromised or broken
+    # release has time to be noticed and pulled.
+    cooldown:
+      default-days: 7
     groups:
       npm-minor-patch:
         update-types: [minor, patch]
@@ -27,6 +31,10 @@ updates:
       time: "05:00"
       timezone: Asia/Jerusalem
     open-pull-requests-limit: 5
+    # Wait a week before proposing a new version, so a compromised or broken
+    # release has time to be noticed and pulled.
+    cooldown:
+      default-days: 7
     groups:
       nuget-minor-patch:
         update-types: [minor, patch]
@@ -47,6 +55,10 @@ updates:
       time: "05:00"
       timezone: Asia/Jerusalem
     open-pull-requests-limit: 5
+    # Wait a week before proposing a new version, so a compromised or broken
+    # release has time to be noticed and pulled.
+    cooldown:
+      default-days: 7
     groups:
       docker-minor-patch:
         update-types: [minor, patch]
@@ -60,6 +72,10 @@ updates:
       time: "05:00"
       timezone: Asia/Jerusalem
     open-pull-requests-limit: 5
+    # Wait a week before proposing a new version, so a compromised or broken
+    # release has time to be noticed and pulled.
+    cooldown:
+      default-days: 7
     groups:
       github-actions-minor-patch:
         update-types: [minor, patch]

@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Repository guards: Hebrew text, Compose build keys, shell scripts, line
-# endings, and the area selection tests. Sourced by scripts/verify.sh.
+# endings, the area selection tests, and CI configuration. Sourced by
+# scripts/verify.sh.
 
 # The only files that may contain Hebrew. Changing this list needs the
 # maintainer's approval and an update to docs/project-foundation.md.
