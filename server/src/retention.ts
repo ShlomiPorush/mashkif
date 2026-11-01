@@ -1,6 +1,6 @@
 import { inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./db/client.js";
-import { agentEvent, heartbeat, syncAnchor } from "./db/schema.js";
+import { agentBoot, agentEvent, heartbeat, syncAnchor } from "./db/schema.js";
 import { describeSafely } from "./errors.js";
 import { readSettings } from "./settings.js";
 
@@ -17,16 +17,21 @@ export interface RetentionResult {
   heartbeats: number;
   events: number;
   anchors: number;
+  boots: number;
   /** False when the batch limit stopped the run before everything old was gone. */
   complete: boolean;
 }
 
 /**
  * Deletes raw heartbeats and events received before the retention period
- * (an admin setting, at least 8 days), and sync anchors older than that
- * except the latest anchor of each agent and boot: an agent can stay in one
- * boot, offline, longer than the retention period and then send events that
- * refer to its last sync. It deletes in batches that each commit, so an
+ * (an admin setting, at least 8 days); the boots, with their anchors and
+ * dropped counts, that were last active before it, except each agent's most
+ * recent boot (an event that refers to a deleted boot's sync is time
+ * uncertain); and older anchors of the remaining boots, except the anchor
+ * the agent last confirmed receiving in that boot and every newer one,
+ * because the agent may still hold them: it can stay in one boot, offline,
+ * longer than the retention period, and its newest response may have been
+ * lost. A boot with no confirmed anchor keeps its newest one. It deletes in batches that each commit, so an
  * interrupted run loses nothing and the next run continues. Outage
  * summaries, which keep their own history, do not exist yet.
  */
@@ -71,9 +76,12 @@ export async function runRetention(
           inArray(
             syncAnchor.id,
             sql`(select a.id from ${syncAnchor} a
+              join ${agentBoot} b on b.agent_id = a.agent_id and b.boot_id = a.boot_id
               where a.server_time < ${cutoff.toISOString()}::timestamptz
-                and exists (select 1 from ${syncAnchor} b
-                  where b.agent_id = a.agent_id and b.boot_id = a.boot_id and b.id > a.id)
+                and case when b.confirmed_anchor_id is null
+                  then exists (select 1 from ${syncAnchor} n
+                    where n.agent_id = a.agent_id and n.boot_id = a.boot_id and n.id > a.id)
+                  else a.id < b.confirmed_anchor_id end
               order by a.id limit ${batchSize})`,
           ),
         )
@@ -87,10 +95,31 @@ export async function runRetention(
     return total;
   };
 
+  const purgeBoots = async (): Promise<number> => {
+    let total = 0;
+    for (let batch = 0; batch < maxBatches; batch++) {
+      const deleted = await db.execute<{ agent_id: string }>(sql`delete from ${agentBoot}
+        where (agent_id, boot_id) in (
+          select b.agent_id, b.boot_id from ${agentBoot} b
+          where b.last_activity_at < ${cutoff.toISOString()}::timestamptz
+            and exists (select 1 from ${agentBoot} n
+              where n.agent_id = b.agent_id and n.last_activity_at > b.last_activity_at)
+          limit ${batchSize})
+        returning agent_id`);
+      total += deleted.length;
+      if (deleted.length < batchSize) {
+        return total;
+      }
+    }
+    complete = false;
+    return total;
+  };
+
   const heartbeats = await purge(heartbeat);
   const events = await purge(agentEvent);
+  const boots = await purgeBoots();
   const anchors = await purgeAnchors();
-  return { cutoff, heartbeats, events, anchors, complete };
+  return { cutoff, heartbeats, events, anchors, boots, complete };
 }
 
 /**
@@ -110,9 +139,12 @@ export function scheduleRetention(
     running = true;
     try {
       const result = await runRetention(db);
-      if (result.heartbeats + result.events + result.anchors > 0 || !result.complete) {
+      if (
+        result.heartbeats + result.events + result.anchors + result.boots > 0 ||
+        !result.complete
+      ) {
         console.log(
-          `retention: deleted ${result.heartbeats} heartbeats, ${result.events} events, and ${result.anchors} sync anchors from before ${result.cutoff.toISOString()}${result.complete ? "" : "; more remain for the next run"}`,
+          `retention: deleted ${result.heartbeats} heartbeats, ${result.events} events, ${result.boots} boots, and ${result.anchors} sync anchors from before ${result.cutoff.toISOString()}${result.complete ? "" : "; more remain for the next run"}`,
         );
       }
     } catch (error) {

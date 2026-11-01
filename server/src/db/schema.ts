@@ -8,6 +8,7 @@ import {
   boolean,
   check,
   cidr,
+  foreignKey,
   index,
   inet,
   integer,
@@ -341,46 +342,57 @@ export const heartbeat = pgTable(
 );
 
 /**
+ * One row per boot an agent reported: when it was last active, the newest
+ * sync anchor the agent confirmed it received in that boot, and the
+ * cumulative count of events it dropped from its queue in that boot (the
+ * largest count seen, so a retry counts once). An agent keeps at most
+ * MAX_BOOTS_PER_AGENT boots; retention deletes boots inactive for longer
+ * than the retention period except the agent's most recent one, and a
+ * revoke deletes them all. Deleting a boot deletes its anchors.
+ */
+export const agentBoot = pgTable(
+  "agent_boot",
+  {
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agent.id, { onDelete: "cascade" }),
+    bootId: uuid("boot_id").notNull(),
+    lastActivityAt: ts("last_activity_at").notNull(),
+    /** The newest anchor of this boot the agent reported receiving. */
+    confirmedAnchorId: bigint("confirmed_anchor_id", { mode: "number" }),
+    droppedEvents: bigint("dropped_events", { mode: "number" }).notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.bootId] }),
+    index("agent_boot_activity_idx").on(t.agentId, t.lastActivityAt),
+  ],
+);
+
+/**
  * One row per heartbeat response: the sync ID returned to the agent and the
  * server time it was anchored at. Events compute their time from it. Every
  * heartbeat request gets a new anchor, also a retry of the same sequence.
- * Retention deletes old anchors but never the latest one of an agent's
- * boot, so an agent that stays offline in one boot longer than the
- * retention period can still place its events.
+ * Retention never deletes the newest anchor the agent confirmed in a boot,
+ * nor any newer one, because the agent may still hold it.
  */
 export const syncAnchor = pgTable(
   "sync_anchor",
   {
     id: bigserial("id", { mode: "number" }).primaryKey(),
     syncId: text("sync_id").notNull().unique(),
-    agentId: uuid("agent_id")
-      .notNull()
-      .references(() => agent.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull(),
     bootId: uuid("boot_id").notNull(),
     serverTime: ts("server_time").notNull(),
   },
   (t) => [
+    foreignKey({
+      name: "sync_anchor_boot_fk",
+      columns: [t.agentId, t.bootId],
+      foreignColumns: [agentBoot.agentId, agentBoot.bootId],
+    }).onDelete("cascade"),
     index("sync_anchor_agent_boot_idx").on(t.agentId, t.bootId, t.id),
     index("sync_anchor_server_time_idx").on(t.serverTime),
   ],
-);
-
-/**
- * Events an agent dropped from its queue, as the cumulative count per boot it
- * reports. The largest count seen per agent and boot is kept, so a retry
- * counts once.
- */
-export const agentDroppedEvents = pgTable(
-  "agent_dropped_events",
-  {
-    agentId: uuid("agent_id")
-      .notNull()
-      .references(() => agent.id, { onDelete: "cascade" }),
-    bootId: uuid("boot_id").notNull(),
-    count: bigint("count", { mode: "number" }).notNull(),
-    updatedAt: ts("updated_at").notNull(),
-  },
-  (t) => [primaryKey({ columns: [t.agentId, t.bootId] })],
 );
 
 /** Raw agent events, deleted after the retention period. */

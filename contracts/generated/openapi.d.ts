@@ -205,6 +205,14 @@ export interface components {
             /** @description Time to resolve the server name for this request, or null when unknown. */
             dnsMs: number | null;
             agentVersion?: components["schemas"]["Version"];
+            /**
+             * @description Sync ID of the last heartbeat response the agent received in this
+             *     boot, or null when none was received since the PC started. The
+             *     server keeps this sync and every newer one, so events that refer
+             *     to them can still be placed after a long time offline. Agents
+             *     should always send it.
+             */
+            syncId?: components["schemas"]["SyncId"] | null;
         };
         HeartbeatResponse: {
             syncId: components["schemas"]["SyncId"];

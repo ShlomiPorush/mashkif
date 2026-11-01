@@ -3,11 +3,12 @@ import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   agent,
-  agentDroppedEvents,
+  agentBoot,
   agentEvent,
   syncAnchor,
   type TimeUncertainReason,
 } from "../db/schema.js";
+import { confirmAnchors, touchBoot } from "./boots.js";
 import { type DroppedEvents, type EventInput, parseEvent } from "./parse.js";
 import { guardAgentWrite, type WriteRefusal } from "./write-guard.js";
 
@@ -85,6 +86,8 @@ export async function recordEvents(
     if (refusal !== undefined) {
       return { ok: false as const, error: refusal };
     }
+    // The agent holds these sync IDs: retention must keep them.
+    await confirmAnchors(tx, agentId, syncIds);
     const syncs = new Map<string, Sync>();
     if (syncIds.length > 0) {
       const rows = await tx
@@ -176,16 +179,11 @@ export async function recordEvents(
     }
     if (droppedEvents !== undefined) {
       // A cumulative count per boot: the largest one seen counts, so a retry counts once.
+      await touchBoot(tx, agentId, droppedEvents.bootId, receivedAt);
       await tx
-        .insert(agentDroppedEvents)
-        .values({ agentId, ...droppedEvents, updatedAt: receivedAt })
-        .onConflictDoUpdate({
-          target: [agentDroppedEvents.agentId, agentDroppedEvents.bootId],
-          set: {
-            count: sql`greatest(${agentDroppedEvents.count}, excluded.count)`,
-            updatedAt: receivedAt,
-          },
-        });
+        .update(agentBoot)
+        .set({ droppedEvents: sql`greatest(${agentBoot.droppedEvents}, ${droppedEvents.count})` })
+        .where(and(eq(agentBoot.agentId, agentId), eq(agentBoot.bootId, droppedEvents.bootId)));
     }
     return { ok: true as const, results: results as EventResult[] };
   });

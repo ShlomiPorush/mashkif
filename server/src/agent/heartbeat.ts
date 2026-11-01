@@ -3,6 +3,7 @@ import { and, eq, isNull, lte, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agent, heartbeat, syncAnchor } from "../db/schema.js";
 import type { AsnInfo } from "../geoip.js";
+import { confirmAnchors, touchBoot } from "./boots.js";
 import type { HeartbeatInput } from "./parse.js";
 import { guardAgentWrite, type WriteRefusal } from "./write-guard.js";
 
@@ -39,7 +40,8 @@ export function silenceInterval(reportedSeconds: number, sentSeconds: number): n
  * values, also a retry of the same heartbeat whose answer was lost: the
  * agent measures elapsed time from the answer it receives, so an old anchor
  * would place its events too early. A retry (same boot ID and sequence) is
- * stored once as a heartbeat sample.
+ * stored once as a heartbeat sample. The sync ID the agent reports receiving
+ * becomes its boot's confirmed anchor, which retention keeps.
  */
 export async function recordHeartbeat(
   db: Db,
@@ -74,6 +76,10 @@ export async function recordHeartbeat(
       })
       .onConflictDoNothing({ target: [heartbeat.agentId, heartbeat.bootId, heartbeat.sequence] });
 
+    await touchBoot(tx, agentId, input.bootId, now);
+    if (input.syncId !== null) {
+      await confirmAnchors(tx, agentId, [input.syncId]);
+    }
     const syncId = randomBytes(16).toString("base64url");
     await tx.insert(syncAnchor).values({ syncId, agentId, bootId: input.bootId, serverTime: now });
 

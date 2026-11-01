@@ -38,8 +38,18 @@ export const REGISTER_RATE_LIMIT: RateLimitRule = { window: 600, max: 10 };
 export const HEARTBEAT_RATE_LIMIT: RateLimitRule = { window: 60, max: 10 };
 /** Events requests per agent: a backlog of batches after a long time offline. */
 export const EVENTS_RATE_LIMIT: RateLimitRule = { window: 60, max: 30 };
-/** Requests with a missing, malformed, or unknown token, per client address. */
-export const UNKNOWN_TOKEN_RATE_LIMIT: RateLimitRule = { window: 60, max: 20 };
+/**
+ * Heartbeat and events requests per client address, counted before the
+ * token is looked up: generous enough for an office of agents behind one
+ * address.
+ */
+export const ADDRESS_RATE_LIMIT: RateLimitRule = { window: 60, max: 1200 };
+/**
+ * What a missing, malformed, or unknown token costs against the address
+ * limit: 20 of them use up an address's minute, after which requests from
+ * that address get 429 without reaching the database.
+ */
+export const INVALID_TOKEN_COST = 60;
 
 export interface AgentDeps {
   db: Db;
@@ -97,10 +107,12 @@ function clientAddress(deps: AgentDeps, c: Context): string | undefined {
 type Authenticated = { agentId: string; address: string };
 
 /**
- * The client address, the bearer token, and the agent's rate limit. The
- * token is looked up first, so limiter entries exist only per agent and, for
- * missing or unknown tokens, per client address. The agent's state and the
- * blocked ranges are checked again inside the write transaction.
+ * The client address and its limit, the bearer token, and the agent's limit.
+ * The address limit comes before the token lookup, so a flood of bogus
+ * tokens stops reaching the database; a missing or unknown token costs
+ * INVALID_TOKEN_COST. Limiter entries exist only per address and per agent.
+ * The agent's state and the blocked ranges are checked again inside the
+ * write transaction.
  */
 async function authenticate(
   deps: AgentDeps,
@@ -115,6 +127,11 @@ async function authenticate(
   }
   const match = /^Bearer\s+(\S+)$/.exec(c.req.header("authorization") ?? "");
   const token = match?.[1];
+  const addressKey = `agent:address:${address}`;
+  const throttled = await limited(deps.rateLimits, c, addressKey, ADDRESS_RATE_LIMIT);
+  if (throttled !== undefined) {
+    return throttled;
+  }
   const [row] =
     token === undefined || !TOKEN_PATTERN.test(token)
       ? []
@@ -123,13 +140,8 @@ async function authenticate(
           .from(agent)
           .where(eq(agent.tokenHash, hashToken(token)));
   if (row === undefined) {
-    const refusal = await limited(
-      deps.rateLimits,
-      c,
-      `agent:unknown:${address}`,
-      UNKNOWN_TOKEN_RATE_LIMIT,
-    );
-    return refusal ?? refuse(c, 401, "token_invalid");
+    await deps.rateLimits.consume(addressKey, ADDRESS_RATE_LIMIT, INVALID_TOKEN_COST - 1);
+    return refuse(c, 401, "token_invalid");
   }
   const refusal = await limited(deps.rateLimits, c, `agent:${scope}:${row.id}`, rule);
   if (refusal !== undefined) {

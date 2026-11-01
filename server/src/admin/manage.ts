@@ -7,7 +7,7 @@ import type { AdminSession } from "../auth/session-policy.js";
 import type { Tx } from "../db/client.js";
 import {
   agent,
-  agentDroppedEvents,
+  agentBoot,
   blockedRange,
   enrollmentKey,
   provider,
@@ -296,7 +296,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
           lastEventKind: agent.lastEventKind,
           lastEventAt: agent.lastEventAt,
           droppedEvents:
-            sql<number>`coalesce((select sum(d.count) from ${agentDroppedEvents} d where d.agent_id = ${agent.id}), 0)`.mapWith(
+            sql<number>`coalesce((select sum(d.dropped_events) from ${agentBoot} d where d.agent_id = ${agent.id}), 0)`.mapWith(
               Number,
             ),
         })
@@ -415,6 +415,8 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
             outcome: exists === undefined ? fail(404, "not_found") : fail(409, "agent_revoked"),
           };
         }
+        // Its boots, anchors, and dropped counts are of no further use.
+        await tx.delete(agentBoot).where(eq(agentBoot.agentId, id));
         return {
           outcome: { status: 200, body: { ok: true } },
           audits: [{ action: "agent.revoked", details: { agentId: id, label: row.label } }],

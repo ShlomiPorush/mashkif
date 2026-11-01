@@ -31,12 +31,22 @@ info:
     recorded for that sync ID, so wall-clock changes on the PC do not move
     events.
 
+    Each heartbeat also names the sync ID of the last response the agent
+    received in the same boot. The server keeps that sync ID and every newer
+    one of the boot, so an agent that stays offline in one boot for a long
+    time can still place its events. The server keeps at most 10 boots per
+    agent, and drops a boot that has been inactive for longer than its
+    retention period unless it is the agent's most recent boot; an event that
+    refers to a dropped boot is stored as time uncertain.
+
     ## Limits
 
     A request body is at most 64 KB, and an events request holds at most 500
     events, whichever limit comes first: about 350 events with sync IDs fit
-    in 64 KB. Requests are rate limited per token, and `registerAgent` per
-    client address; a limited request gets 429 with `Retry-After` in seconds.
+    in 64 KB. Heartbeat and events requests are rate limited per client
+    address (a missing or unknown token counts heavily) and per agent;
+    `registerAgent` is limited per client address. A limited request gets
+    429 with `Retry-After` in seconds.
   license:
     name: MIT
     identifier: MIT
@@ -559,6 +569,16 @@ components:
           description: Time to resolve the server name for this request, or null when unknown.
         agentVersion:
           $ref: "#/components/schemas/Version"
+        syncId:
+          description: |
+            Sync ID of the last heartbeat response the agent received in this
+            boot, or null when none was received since the PC started. The
+            server keeps this sync and every newer one, so events that refer
+            to them can still be placed after a long time offline. Agents
+            should always send it.
+          oneOf:
+            - $ref: "#/components/schemas/SyncId"
+            - type: "null"
     HeartbeatResponse:
       type: object
       additionalProperties: false

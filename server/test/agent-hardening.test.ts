@@ -1,6 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { UNKNOWN_TOKEN_RATE_LIMIT } from "../src/agent/routes.js";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { ADDRESS_RATE_LIMIT, INVALID_TOKEN_COST } from "../src/agent/routes.js";
 import { MemoryRateLimitStore } from "../src/auth/rate-limit.js";
 import { runRetention } from "../src/retention.js";
 import { fullAdmin, insertKey, TestAgent } from "./support/agent.js";
@@ -76,26 +75,138 @@ describe("revoking or blocking while an agent request is under way", () => {
 });
 
 describe("sync anchors and retention", () => {
-  it("keeps the latest anchor of a boot past retention, so a long offline boot places its events", async () => {
+  const now = new Date("2026-11-01T12:00:00.000Z");
+  const ago = (days: number) => new Date(now.getTime() - days * DAY);
+
+  async function retainEightDays() {
+    await database.sql`insert into setting (key, value, updated_by)
+      values ('retention_days', '8'::jsonb, 'shlomi')`;
+  }
+
+  async function anchorIds(): Promise<string[]> {
+    const rows = await database.sql`select sync_id from sync_anchor order by id`;
+    return rows.map((row) => String(row.sync_id));
+  }
+
+  it("keeps the anchor the agent holds when its newer response was lost", async () => {
+    const agent = await new TestAgent(harness).enroll(database);
+    harness.now = ago(20);
+    await agent.heartbeat(); // A1 received
+    const held = agent.syncId as string;
+    harness.now = ago(19);
+    const lost = await agent.heartbeat({}, { lose: true }); // A2 created, never received
+    await retainEightDays();
+
+    await runRetention(database.db, now);
+    // A1 is the agent's confirmed anchor (reported in the second heartbeat); A2 is newer.
+    expect(await anchorIds()).toEqual([held, String(lost.body.syncId)]);
+
+    // Nineteen days later the agent, still in that boot, uploads an event timed by A1.
+    harness.now = now;
+    const reply = await agent.events([agent.event("connectivity_restored", 20 * DAY - 60_000)]);
+    expect(reply.body.results).toMatchObject([{ status: "accepted", timeUncertain: false }]);
+  });
+
+  it("keeps the anchor the agent holds when its reconnect heartbeat comes before the event upload", async () => {
+    const agent = await new TestAgent(harness).enroll(database);
+    harness.now = ago(20);
+    await agent.heartbeat();
+    harness.now = ago(15);
+    await agent.heartbeat(); // A2: the last answer before going offline
+    const held = agent.syncId as string;
+    // Back online: the first heartbeat reports A2 and creates A3 before the backlog is sent.
+    harness.now = new Date(now.getTime() - 60_000);
+    const reconnect = await agent.heartbeat({}, { lose: true });
+    await retainEightDays();
+
+    const result = await runRetention(database.db, now);
+    expect(result.anchors).toBe(1); // only A1, older than the confirmed A2
+    expect(await anchorIds()).toEqual([held, String(reconnect.body.syncId)]);
+
+    harness.now = now;
+    agent.syncId = held;
+    const reply = await agent.events([agent.event("connectivity_lost", 15 * DAY - 120_000)]);
+    expect(reply.body.results).toMatchObject([{ status: "accepted", timeUncertain: false }]);
+  });
+
+  it("keeps the newest anchor of a boot nobody confirmed", async () => {
+    const agent = await new TestAgent(harness).enroll(database);
+    harness.now = ago(20);
+    await agent.post("/heartbeat", agent.heartbeatBody({ sequence: 1 }));
+    harness.now = ago(15);
+    const second = await agent.post("/heartbeat", agent.heartbeatBody({ sequence: 2 }));
+    await retainEightDays();
+    await runRetention(database.db, now);
+    expect(await anchorIds()).toEqual([String(second.body.syncId)]);
+  });
+});
+
+describe("boot lifecycle", () => {
+  async function boots(): Promise<number> {
+    return count("agent_boot");
+  }
+
+  it("keeps at most 10 boots per agent, the most recent ones", async () => {
+    const agent = await new TestAgent(harness).enroll(database);
+    const start = Date.parse("2026-11-01T08:00:00.000Z");
+    const bootIds: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      agent.reboot();
+      bootIds.push(agent.bootId);
+      harness.now = new Date(start + i * 60_000);
+      harness.agentRateLimits.clear(); // not what this test is about
+      expect((await agent.heartbeat()).status).toBe(200);
+    }
+    expect(await boots()).toBe(10);
+    const kept = await database.sql`select boot_id from agent_boot`;
+    expect(new Set(kept.map((row) => String(row.boot_id)))).toEqual(new Set(bootIds.slice(2)));
+    // The anchors of the two oldest boots went with them.
+    const anchorBoots = await database.sql`select distinct boot_id from sync_anchor`;
+    expect(anchorBoots).toHaveLength(10);
+
+    // Dropped counts with fresh boot IDs are bounded too.
+    for (let i = 0; i < 5; i++) {
+      agent.reboot();
+      await agent.events([], { bootId: agent.bootId, count: 1 });
+    }
+    expect(await boots()).toBe(10);
+  });
+
+  it("deletes boots inactive for longer than retention, except the most recent one", async () => {
     const now = new Date("2026-11-01T12:00:00.000Z");
     const agent = await new TestAgent(harness).enroll(database);
+    harness.now = new Date(now.getTime() - 30 * DAY);
+    await agent.heartbeat();
+    const oldSync = agent.syncId as string;
+    const oldBoot = agent.bootId;
+    agent.reboot();
     harness.now = new Date(now.getTime() - 20 * DAY);
-    await agent.heartbeat();
-    harness.now = new Date(now.getTime() - 15 * DAY);
-    await agent.heartbeat();
-    const lastSync = agent.syncId;
+    await agent.heartbeat(); // the most recent boot, inactive for 20 days
     await database.sql`insert into setting (key, value, updated_by)
       values ('retention_days', '8'::jsonb, 'shlomi')`;
 
     const result = await runRetention(database.db, now);
-    expect(result).toMatchObject({ heartbeats: 2, anchors: 1, complete: true });
-    const anchors = await database.sql`select sync_id from sync_anchor`;
-    expect(anchors.map((row) => row.sync_id)).toEqual([lastSync]);
+    expect(result.boots).toBe(1);
+    const left = await database.sql`select boot_id from agent_boot`;
+    expect(left.map((row) => String(row.boot_id))).toEqual([agent.bootId]);
 
-    // Fifteen days later, still in the same boot, the agent reports an event of a minute ago.
+    // An event that refers to the deleted boot is time uncertain.
     harness.now = now;
-    const reply = await agent.events([agent.event("connectivity_restored", 15 * DAY - 60_000)]);
-    expect(reply.body.results).toMatchObject([{ status: "accepted", timeUncertain: false }]);
+    const reply = await agent.events([
+      { ...agent.event("shutdown", 60_000), bootId: oldBoot, syncId: oldSync },
+    ]);
+    expect(reply.body.results).toMatchObject([{ status: "accepted", timeUncertain: true }]);
+  });
+
+  it("deletes the boots, anchors, and dropped counts of a revoked agent", async () => {
+    const browser = await fullAdmin(database, harness);
+    const agent = await new TestAgent(harness).enroll(database);
+    await agent.heartbeat();
+    await agent.events([], { bootId: agent.bootId, count: 4 });
+    expect(await boots()).toBe(1);
+    expect((await browser.post(`/api/admin/agents/${agent.agentId}/revoke`)).status).toBe(200);
+    expect(await boots()).toBe(0);
+    expect(await count("sync_anchor")).toBe(0);
   });
 });
 
@@ -174,27 +285,44 @@ describe("32-bit ASNs", () => {
   });
 });
 
-describe("rate limits of unknown tokens", () => {
-  it("limits unknown tokens by address with one limiter entry, and never blocks a real agent there", async () => {
-    const agent = await new TestAgent(harness, "203.0.113.20").enroll(database);
+describe("rate limits before the token lookup", () => {
+  it("stops a repeated bogus token from reaching the database", async () => {
     const stranger = new TestAgent(harness, "203.0.113.20");
-    let last: Awaited<ReturnType<TestAgent["heartbeat"]>> | undefined;
-    for (let i = 0; i < UNKNOWN_TOKEN_RATE_LIMIT.max + 5; i++) {
-      stranger.token = randomBytes(32).toString("base64url");
-      last = await stranger.heartbeat();
+    const select = vi.spyOn(database.db, "select");
+    const statuses: number[] = [];
+    const lookups: number[] = [];
+    for (let i = 0; i < 25; i++) {
+      statuses.push((await stranger.heartbeat()).status);
+      lookups.push(select.mock.calls.length);
     }
-    expect(last).toMatchObject({ status: 429, body: { error: "rate_limited" } });
-    expect(Number(last?.headers.get("retry-after"))).toBeGreaterThan(0);
-    // One entry for the address, not one per token.
+    const limit = ADDRESS_RATE_LIMIT.max / INVALID_TOKEN_COST;
+    expect(statuses.slice(0, limit)).toEqual(new Array(limit).fill(401));
+    expect(statuses.slice(limit)).toEqual(new Array(25 - limit).fill(429));
+    // Once the address is limited, no request queries the database.
+    expect(lookups.slice(limit - 1).every((n) => n === lookups[limit - 1])).toBe(true);
+    expect(lookups[limit - 1]).toBe(limit);
+    // One limiter entry, for the address.
     expect(harness.agentRateLimits.size).toBe(1);
-    // The enrolled agent at the same address is limited by its own ID.
-    expect((await agent.heartbeat()).status).toBe(200);
-    expect(harness.agentRateLimits.size).toBe(2);
+    select.mockRestore();
+  });
+
+  it("lets an office of agents behind one address through, each limited by its own ID", async () => {
+    const office = [
+      await new TestAgent(harness, "203.0.113.30").enroll(database),
+      await new TestAgent(harness, "203.0.113.30").enroll(database),
+    ];
+    for (const agent of office) {
+      expect((await agent.heartbeat()).status).toBe(200);
+    }
+    // One entry for the address and one per agent; another address is untouched.
+    expect(harness.agentRateLimits.size).toBe(3);
+    const elsewhere = await new TestAgent(harness, "203.0.113.31").enroll(database);
+    expect((await elsewhere.heartbeat()).status).toBe(200);
     // Registration has its own limiter.
-    expect((await new TestAgent(harness, "203.0.113.20").register("x".repeat(32))).status).toBe(
+    expect((await new TestAgent(harness, "203.0.113.30").register("x".repeat(32))).status).toBe(
       403,
     );
-    expect(harness.registerRateLimits.size).toBe(1);
+    expect(harness.registerRateLimits.size).toBe(2);
   });
 
   it("prunes expired entries from the oldest end without scanning the whole map", async () => {
@@ -207,7 +335,6 @@ describe("rate limits of unknown tokens", () => {
     now = 61_000;
     await store.consume("new", { window: 60, max: 5 });
     expect(store.size).toBe(1);
-    // A key whose window restarted moves to the young end and survives pruning.
     await store.consume("new", { window: 60, max: 5 });
     expect(store.size).toBe(1);
   });

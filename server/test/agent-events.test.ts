@@ -36,7 +36,7 @@ async function storedEvents() {
 
 async function agentState(id: string | undefined) {
   const [row] = await database.sql`select last_event_kind, last_event_at, last_seen_at,
-    (select coalesce(sum(count), 0)::int from agent_dropped_events d where d.agent_id = agent.id)
+    (select coalesce(sum(dropped_events), 0)::int from agent_boot d where d.agent_id = agent.id)
     as dropped_events from agent where id = ${id ?? ""}`;
   return row;
 }

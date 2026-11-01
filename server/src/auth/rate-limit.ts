@@ -21,7 +21,8 @@ export class MemoryRateLimitStore {
 
   constructor(private readonly clock: () => number = Date.now) {}
 
-  async consume(key: string, rule: RateLimitRule): Promise<RateLimitDecision> {
+  /** Counts a request of the given cost (1 by default) and decides whether it is allowed. */
+  async consume(key: string, rule: RateLimitRule, cost = 1): Promise<RateLimitDecision> {
     const now = this.clock();
     const windowMs = rule.window * 1000;
     const entry = this.#entries.get(key);
@@ -29,13 +30,13 @@ export class MemoryRateLimitStore {
       // Deleted and set again, so the map stays ordered by window start.
       this.#entries.delete(key);
       this.#prune(now);
-      this.#entries.set(key, { start: now, count: 1, window: windowMs });
+      this.#entries.set(key, { start: now, count: cost, window: windowMs });
       return { allowed: true, retryAfter: null };
     }
     if (entry.count >= rule.max) {
       return { allowed: false, retryAfter: Math.ceil((entry.start + windowMs - now) / 1000) };
     }
-    entry.count += 1;
+    entry.count += cost;
     return { allowed: true, retryAfter: null };
   }
 
