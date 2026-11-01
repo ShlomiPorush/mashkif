@@ -39,6 +39,12 @@ export function SetupPage({ onDone }: { onDone: () => Promise<void> }) {
       rememberPassword(account.password);
       await onDone();
     } catch (caught) {
+      if (caught instanceof AdminApiError && caught.code === "already_set_up") {
+        // The admin exists, for example because the answer to an earlier
+        // attempt was lost: the app moves on to sign-in.
+        await onDone();
+        return;
+      }
       setError(
         caught instanceof AdminApiError ? errorKey(caught.code, caught.status) : ERROR_KEYS.network,
       );

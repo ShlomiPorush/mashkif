@@ -250,7 +250,8 @@
 
 .admin-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+  max-inline-size: 40rem;
   gap: 1.5rem;
   align-items: start;
 }
@@ -262,10 +263,6 @@
   border: 1px solid var(--line);
   border-radius: 1.25rem;
   background: var(--card);
-}
-
-.admin-card-wide {
-  grid-column: 1 / -1;
 }
 
 .card-heading {
@@ -305,41 +302,6 @@
 .form-inline {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
-}
-
-.table-scroll {
-  overflow-x: auto;
-}
-
-.activity-table {
-  inline-size: 100%;
-  border-collapse: collapse;
-  font-size: 0.9375rem;
-}
-
-.activity-table th,
-.activity-table td {
-  padding-block: 0.625rem;
-  padding-inline: 0.5rem;
-  border-block-end: 1px solid var(--line);
-  text-align: start;
-  vertical-align: top;
-}
-
-.activity-table th {
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.activity-address {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-@media (max-width: 52rem) {
-  .admin-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 40rem) {

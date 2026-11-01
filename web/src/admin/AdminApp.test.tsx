@@ -57,7 +57,6 @@ function boot(setupRequired: boolean, session: unknown, extra: Routes = {}): Rou
   return {
     "/api/admin/status": { setupRequired },
     "/api/admin/session": session,
-    "/api/admin/audit": { entries: [] },
     "/api/auth/passkey/list-user-passkeys": [],
     ...extra,
   };
@@ -195,6 +194,36 @@ describe("sign-in", () => {
   });
 });
 
+describe("setup", () => {
+  it("moves on to sign-in when the admin exists already, for example after a lost answer", async () => {
+    let setupRequired = true;
+    serve({
+      get "/api/admin/status"() {
+        return { setupRequired };
+      },
+      "/api/admin/session": { state: "none" },
+      get "POST /api/admin/setup"() {
+        // The first attempt created the admin, but its answer never arrived.
+        setupRequired = false;
+        return new Response(JSON.stringify({ error: "already_set_up" }), { status: 409 });
+      },
+    });
+    renderAdmin(createI18n("en"));
+    await screen.findByRole("heading", { level: 1, name: en.setup.heading });
+    fireEvent.change(screen.getByLabelText(en.setup.token), { target: { value: "token" } });
+    fireEvent.change(screen.getByLabelText(en.setup.username), { target: { value: "shlomi" } });
+    fireEvent.change(screen.getByLabelText(en.setup.password), {
+      target: { value: "a long password" },
+    });
+    fireEvent.change(screen.getByLabelText(en.setup.confirm), {
+      target: { value: "a long password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.setup.submit }));
+    expect(await screen.findByRole("heading", { level: 1, name: en.signIn.heading })).toBeTruthy();
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/sign-in"));
+  });
+});
+
 describe("TOTP enrollment", () => {
   it("shows a QR code drawn locally and the manual key", async () => {
     rememberPassword("a long password");
@@ -257,7 +286,6 @@ describe("sign-in flow", () => {
       get "/api/admin/session"() {
         return session;
       },
-      "/api/admin/audit": { entries: [] },
       "/api/auth/passkey/list-user-passkeys": [],
       "POST /api/auth/sign-in/username": { twoFactorRedirect: true },
       get "POST /api/auth/two-factor/verify-totp"() {

@@ -43,12 +43,3 @@ export type SessionInfo =
       maxAgeAt: string;
       idleAt: string;
     };
-
-export interface AuditEntry {
-  id: number;
-  at: string;
-  actor: string;
-  action: string;
-  ipAddress: string | null;
-  details: Record<string, unknown> | null;
-}

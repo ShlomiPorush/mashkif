@@ -82,36 +82,6 @@
     "add": "Add a passkey",
     "remove": "Remove"
   },
-  "password": {
-    "heading": "Password",
-    "current": "Current password",
-    "new": "New password",
-    "confirm": "Repeat the new password",
-    "submit": "Change the password",
-    "changed": "The password was changed. Other sessions were signed out."
-  },
-  "activity": {
-    "heading": "Recent security activity",
-    "empty": "No activity yet.",
-    "time": "Time",
-    "event": "Event",
-    "address": "Address",
-    "adminSetupTokenCreated": "Setup token created on the server",
-    "adminCreated": "Admin account created",
-    "adminReset": "Admin reset on the server",
-    "signInSucceeded": "Signed in",
-    "signInFailed": "Failed sign-in",
-    "signInRateLimited": "Sign-in blocked: too many attempts",
-    "signOut": "Signed out",
-    "totpEnrolled": "Two-step verification set up",
-    "passkeyAdded": "Passkey added",
-    "passkeyRemoved": "Passkey removed",
-    "passwordChanged": "Password changed",
-    "wayPassword": "password only, to set up a code",
-    "wayPasswordTotp": "password and code",
-    "wayPasskey": "passkey",
-    "wayTotp": "code"
-  },
   "errors": {
     "invalidCredentials": "The username or password is wrong.",
     "invalidCode": "The code is wrong. Enter the current code from your app.",
