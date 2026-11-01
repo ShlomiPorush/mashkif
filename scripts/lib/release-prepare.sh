@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # The REL_* variables set here are read by release-core.sh.
 # The prepare command of scripts/release.sh. Source this file; do not run it.
 #
 # prepare opens the release pull request: one commit on a fresh
@@ -234,8 +235,8 @@ release_prepare_pr() {
   body="$REL_RUN_DIR/pr-body.md"
   {
     printf 'Release %s %s.\n\n' "$REL_TARGET" "$REL_VERSION"
-    printf 'This pull request changes only `%s` and `%s`. ' "$REL_VERSION_FILE" "$REL_CHANGELOG"
-    printf 'After CI passes, merge it; when CI on `%s` has passed for the merge commit, publish with:\n\n' "$RELEASE_MAIN"
+    printf 'This pull request changes only %s and %s. ' "$REL_VERSION_FILE" "$REL_CHANGELOG"
+    printf 'After CI passes, merge it; when CI on %s has passed for the merge commit, publish with:\n\n' "$RELEASE_MAIN"
     printf '    scripts/release.sh %s publish --version %s\n' "$REL_TARGET" "$REL_VERSION"
   } >"$body" || return 1
   url=""

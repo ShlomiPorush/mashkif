@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # The REL_* variables set here are read by release-core.sh.
 # GitHub reads and writes for scripts/release.sh: the repository identity,
 # release pull requests, and CI evidence. Source this file; do not run it.
 #
@@ -93,7 +94,7 @@ release_find_open_pr() {
   other="$(awk -F '\t' -v sha="$sha" '$2 == "open" && $6 != sha { print $10 " (head " $6 ")" }' <<<"$prs")"
   if [[ -n "$other" ]]; then
     fail "an open release pull request has another head commit than $sha:"
-    sed 's/^/    /' <<<"$other" >&2
+    awk '{ print "    " $0 }' <<<"$other" >&2
     return 3
   fi
   [[ -n "$match" ]] || return 1
