@@ -34,7 +34,8 @@ info:
     ## Limits
 
     A request body is at most 64 KB, and an events request holds at most 500
-    events. Requests are rate limited per token, and `registerAgent` per
+    events, whichever limit comes first: about 350 events with sync IDs fit
+    in 64 KB. Requests are rate limited per token, and `registerAgent` per
     client address; a limited request gets 429 with `Retry-After` in seconds.
   license:
     name: MIT

@@ -2,9 +2,12 @@ import { randomBytes } from "node:crypto";
 import type { Hono } from "hono";
 import { expect } from "vitest";
 import { createSetupToken } from "../../src/admin/setup.js";
+import type { RegisterHooks } from "../../src/agent/register.js";
 import { createApp } from "../../src/app.js";
 import { type Auth, type AuthOptions, createAuth } from "../../src/auth/auth.js";
 import { MemoryRateLimitStore } from "../../src/auth/rate-limit.js";
+import type { AsnInfo, AsnLookup, GeoipStatus } from "../../src/geoip.js";
+import { clientAddressResolver } from "../../src/http/client-address.js";
 import type { TestDatabase } from "./database.js";
 import { secretFromUri, totpCode } from "./totp.js";
 
@@ -14,20 +17,52 @@ export const PASSWORD = "correct horse battery";
 
 const ok = async () => {};
 
+/** An ASN table for tests: exact addresses or prefixes ending in "." or ":". */
+export class FakeAsn implements AsnLookup {
+  readonly table = new Map<string, AsnInfo>();
+  lookup(address: string): AsnInfo | undefined {
+    for (const [prefix, info] of this.table) {
+      if (
+        address === prefix ||
+        ((prefix.endsWith(".") || prefix.endsWith(":")) && address.startsWith(prefix))
+      ) {
+        return info;
+      }
+    }
+    return undefined;
+  }
+  status(): GeoipStatus {
+    return { state: "ok", buildDate: "2026-10-28T00:00:00.000Z", stale: false };
+  }
+}
+
 export interface Harness {
   app: Hono;
   auth: Auth;
   rateLimits: MemoryRateLimitStore;
-  /** The client address the next requests come from. */
+  agentRateLimits: MemoryRateLimitStore;
+  asn: FakeAsn;
+  /** The TCP peer of the next requests; a request may set its own with x-test-client. */
   address: string;
+  /** The server clock of the agent API; undefined means the real time. */
+  now: Date | undefined;
+}
+
+export interface HarnessOptions {
+  registerHooks?: RegisterHooks;
+  /** MASHKIF_TRUSTED_PROXIES; the peer is x-test-client or harness.address. */
+  trustedProxies?: string[];
 }
 
 export function createHarness(
   database: TestDatabase,
   testHooks?: AuthOptions["testHooks"],
   bodyTimeoutMs?: number,
+  options: HarnessOptions = {},
 ): Harness {
   const rateLimits = new MemoryRateLimitStore();
+  const agentRateLimits = new MemoryRateLimitStore();
+  const asn = new FakeAsn();
   const auth = createAuth({
     db: database.db,
     appKey: randomBytes(32),
@@ -39,17 +74,33 @@ export function createHarness(
     app: undefined as unknown as Hono,
     auth,
     rateLimits,
+    agentRateLimits,
+    asn,
     address: "198.51.100.10",
+    now: undefined,
   };
+  // The server's resolver, with the TCP peer taken from x-test-client.
+  const clientAddress = clientAddressResolver(
+    options.trustedProxies ?? [],
+    (c) => c.req.header("x-test-client") ?? harness.address,
+  );
   harness.app = createApp({
     readiness: { database: ok, geoip: ok },
     admin: {
       db: database.db,
       auth,
       publicOrigin: ORIGIN,
-      // A test may give a request its own address with this header.
-      clientAddress: (c) => c.req.header("x-test-client") ?? harness.address,
+      clientAddress,
+      asn,
       ...(bodyTimeoutMs === undefined ? {} : { bodyTimeoutMs }),
+    },
+    agent: {
+      db: database.db,
+      asn,
+      rateLimits: agentRateLimits,
+      clientAddress,
+      now: () => harness.now ?? new Date(),
+      ...(options.registerHooks === undefined ? {} : { testHooks: options.registerHooks }),
     },
   });
   return harness;
