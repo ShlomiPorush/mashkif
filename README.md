@@ -31,7 +31,7 @@ Run the scripts from WSL, in the repository root:
 | `scripts/verify.sh` | Run every check. Use `--area <name>` for one area, or `--changed <base-ref>` for the areas affected by a change. |
 | `scripts/local.sh` | Build and run the local development environment. Run it without arguments for usage. |
 | `scripts/try-pr.sh` | Try a pull request in the local environment, and restore the previous state afterwards. |
-| `scripts/release.sh` | Release the agent or the server. Maintainers only. |
+| `scripts/release.sh` | Release the agent or the server through a pull request: `prepare` opens the release pull request, and `publish` tags and publishes its merge commit after CI passes. Maintainers only. |
 
 ## Contributing
 
