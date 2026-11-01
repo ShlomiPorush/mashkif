@@ -179,7 +179,7 @@ t_check "  previous image recorded" test "$(state_get previous_image)" = "$dev_i
 t_check "  previous migrations recorded" test "$(state_get previous_migrations)" = 1700000003000
 t_check "  app runs the PR image" test "$(app_image)" = "$pr1_image" -a -n "$pr1_image"
 t_check "  db was created once and never replaced" test "$(cat "$S/db-created")" = 1
-t_check "  only app was started" grep -qE 'try-pr.compose.yml up -d --wait --wait-timeout [0-9]+ --no-deps app$' "$S/calls.log"
+t_check "  only app was started" grep -qE 'try-pr.compose.yml up -d --wait --wait-timeout [0-9]+ --no-deps --force-recreate app$' "$S/calls.log"
 t_check "  the worktree is at the pinned commit" test "$(git -C "$(state_get worktree)" rev-parse HEAD)" = "$pr1"
 t_check "  the image was built from the worktree" grep -qF "build -f $(state_get worktree)/config/docker/app.Dockerfile" "$S/calls.log"
 t_check "  mashkif-app:dev still names the previous image" test "$(cat "$S/tags/mashkif-app_dev")" = "$dev_id"

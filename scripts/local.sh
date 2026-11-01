@@ -111,6 +111,12 @@ cmd_up() {
   mashkif_data_prepare "$DATA_DIR" || return
   log "starting $MASHKIF_DEV_PROJECT"
   mashkif_dev_compose_up --remove-orphans || return
+  # Compose does not always notice that the mashkif-app:dev tag moved to a new
+  # image while app is running; recreate app (never db) when it did not.
+  if [[ "$(docker inspect -f '{{.Image}}' "$(mashkif_container_id app)" 2>/dev/null)" != "$BUILT_IMAGE_ID" ]]; then
+    log "recreating app with the image just built"
+    mashkif_dev_compose_up --no-deps --force-recreate app || return
+  fi
   mashkif_dev_check_running "$BUILT_IMAGE_ID" "app runs the image just built" || return
   port="$(mashkif_dev_compose port app 8080 2>/dev/null || true)"
   log "Mashkif is running: http://${port:-127.0.0.1:<port>}"
@@ -201,6 +207,8 @@ cmd_nuke() {
   log "  $dir"
   printf 'Type %s to confirm: ' "$MASHKIF_DEV_PROJECT_ID" >&2
   read -r answer || true
+  # End the prompt line when the answer was piped in.
+  [[ -t 0 ]] || log ""
   if [[ "$answer" != "$MASHKIF_DEV_PROJECT_ID" ]]; then
     fail "not confirmed; nothing was deleted"
     return "$MASHKIF_EXIT_REFUSED"

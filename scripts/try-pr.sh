@@ -476,7 +476,7 @@ cmd_start() {
     } >"$OVERRIDE_FILE"
     MASHKIF_DEV_COMPOSE_EXTRA=("$OVERRIDE_FILE")
     log "replacing app with pull request $number (db is not touched)"
-    if ! mashkif_dev_compose_up --no-deps app; then
+    if ! mashkif_dev_compose_up --no-deps --force-recreate app; then
       S_PHASE=active
       write_state
       fail "the pull request's app is not healthy; inspect it, then run scripts/try-pr.sh restore"

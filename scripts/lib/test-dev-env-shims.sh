@@ -14,6 +14,8 @@
 #   unhealthy       compose up --wait reports an unhealthy app
 #   root-process    docker top shows a process running as UID 0
 #   stale-image     compose up starts app from an unrelated image
+#   keep-running-app compose up without --force-recreate keeps a running app
+#                   container on its old image, as real Compose sometimes does
 #   chown-fail      the one-shot ownership container fails
 #   chown-noop      the ownership container succeeds but ownership is not kept
 #   kill-on-app-up  compose up of app with the try-pr override kills the caller's
@@ -116,6 +118,11 @@ compose() {
             fi
             ;;
           app)
+            # Real Compose may keep a running app when only the tag moved.
+            if behave keep-running-app && [[ -d "$(container_dir mashkif-dev-app-1)" ]] &&
+              [[ " $* " != *" --force-recreate "* ]]; then
+              continue
+            fi
             if behave kill-on-app-up && [[ -n "$override" ]]; then
               rm -f "$S/behave/kill-on-app-up"
               kill -KILL 0

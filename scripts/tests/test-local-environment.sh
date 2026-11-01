@@ -104,6 +104,14 @@ reset_shims
 t_run "$LOCAL" up -d
 t_expect "up again after down" 0 "app runs the image just built"
 t_check "prepared data directory is not re-owned" calls_exclude "--entrypoint chown"
+db_before="$(cat "$S/db-created")"
+touch "$S/behave/keep-running-app"
+t_run "$LOCAL" up -d
+t_expect "rebuild while running: app is recreated on the new image" 0 \
+  "recreating app with the image just built" "app runs the image just built"
+t_check "  only app was force-recreated" calls_include "--no-deps --force-recreate app"
+t_check "  db was not recreated" test "$(cat "$S/db-created")" = "$db_before"
+rm -f "$S/behave/keep-running-app"
 
 log "local.sh: failures after start"
 reset_shims
