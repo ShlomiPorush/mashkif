@@ -1,0 +1,65 @@
+# Weekly dependency updates. Minor and patch updates are grouped per
+# ecosystem; major updates arrive as separate pull requests. Nothing is
+# merged automatically.
+version: 2
+
+updates:
+  # JavaScript workspace (pnpm): root package.json, contracts, server, web.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Asia/Jerusalem
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  # Agent: central package management and NuGet lock files under agent/,
+  # plus the WixToolset.Sdk MSBuild SDK in agent/global.json "msbuild-sdks".
+  - package-ecosystem: nuget
+    directory: /agent
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Asia/Jerusalem
+    open-pull-requests-limit: 5
+    groups:
+      nuget-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # WiX 6 and later require accepting the Open Source Maintenance Fee
+      # EULA. That is a maintainer decision, never an automatic update, so
+      # WiX stays on 5.x until it is made.
+      - dependency-name: "WixToolset.*"
+        versions: [">= 6"]
+
+  # Application image: config/docker/app.Dockerfile (Dependabot matches any
+  # file name containing "Dockerfile").
+  - package-ecosystem: docker
+    directory: /config/docker
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Asia/Jerusalem
+    open-pull-requests-limit: 5
+    groups:
+      docker-minor-patch:
+        update-types: [minor, patch]
+
+  # Actions pinned by commit SHA in .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Asia/Jerusalem
+    open-pull-requests-limit: 5
+    groups:
+      github-actions-minor-patch:
+        update-types: [minor, patch]
