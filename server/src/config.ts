@@ -69,6 +69,15 @@ export function parsePublicUrl(text: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Whether passkeys can work with this origin. Browsers refuse an IP address
+ * as the WebAuthn relying-party ID, so passkeys need a host name.
+ */
+export function passkeysSupported(publicOrigin: string): boolean {
+  const host = new URL(publicOrigin).hostname;
+  return !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) && !host.startsWith("[");
+}
+
 /** Reads and validates the server settings. Throws ConfigError naming every problem. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const problems: string[] = [];

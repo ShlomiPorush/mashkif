@@ -38,7 +38,7 @@ Run the scripts from WSL, in the repository root:
 The server reads its settings from `.env` (template: `.env.example`). Besides the database settings it needs:
 
 - `MASHKIF_APP_KEY`: a secret of at least 32 random bytes in base64. Generate one with `openssl rand -base64 32` and back it up together with `.env`. A new key signs the admin out and makes the enrolled TOTP unusable; run `reset-admin` afterwards.
-- `MASHKIF_PUBLIC_URL`: the origin of the web app, for example `https://mashkif.co.il`. Passkeys are bound to its host name.
+- `MASHKIF_PUBLIC_URL`: the origin of the web app, for example `https://mashkif.co.il`. Passkeys are bound to its host name, so use `http://localhost:8180` for local development: browsers refuse passkeys on an IP address such as 127.0.0.1.
 
 The admin panel is at `/admin`. Mashkif has one admin. Run these commands next to the Compose file on the server:
 

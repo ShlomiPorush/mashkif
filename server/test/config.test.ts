@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { ConfigError, DEFAULT_PORT, loadConfig } from "../src/config.js";
+import { ConfigError, DEFAULT_PORT, loadConfig, passkeysSupported } from "../src/config.js";
 
 const appKey = randomBytes(32);
 
@@ -115,5 +115,16 @@ describe("MASHKIF_PUBLIC_URL", () => {
     expect(() => loadConfig({ ...valid, MASHKIF_PUBLIC_URL: value })).toThrow(
       /MASHKIF_PUBLIC_URL must be an https:\/\/ origin without a path/,
     );
+  });
+});
+
+describe("passkeysSupported", () => {
+  it.each([
+    ["https://mashkif.co.il", true],
+    ["http://localhost:8180", true],
+    ["http://127.0.0.1:8180", false],
+    ["http://[::1]:8180", false],
+  ])("%s: %s", (origin, supported) => {
+    expect(passkeysSupported(origin)).toBe(supported);
   });
 });

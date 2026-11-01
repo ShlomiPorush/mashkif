@@ -31,6 +31,8 @@
 
 .admin-main {
   display: grid;
+  /* minmax(0, ...): wide content, such as the code field, must not widen the page. */
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   justify-items: center;
   padding-block: clamp(2rem, 6vh, 5rem);
@@ -82,6 +84,8 @@
 }
 
 .field-input {
+  inline-size: 100%;
+  min-inline-size: 0;
   min-block-size: 3rem;
   padding-inline: 0.875rem;
   border: 2px solid var(--line);

@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import postgres from "postgres";
 import { createApp } from "./app.js";
 import { createAuth } from "./auth/auth.js";
-import { ConfigError, loadConfig, type ServerConfig } from "./config.js";
+import { ConfigError, loadConfig, passkeysSupported, type ServerConfig } from "./config.js";
 import { createDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
 import { databaseCheck, readableFileCheck } from "./readiness.js";
@@ -51,6 +51,11 @@ async function main(): Promise<void> {
     console.warn(`web assets not found at ${WEB_ROOT}; serving the API only`);
   }
 
+  if (!passkeysSupported(config.publicOrigin)) {
+    console.warn(
+      "MASHKIF_PUBLIC_URL uses an IP address, so passkeys cannot work (browsers need a host name); use http://localhost:<port> in development",
+    );
+  }
   const db = createDb(sql);
   const auth = createAuth({ db, appKey: config.appKey, publicOrigin: config.publicOrigin });
 
