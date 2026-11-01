@@ -12,7 +12,7 @@ export type ClientAddressResolver = (c: Context) => string | undefined;
  */
 export const peerAddress: ClientAddressResolver = (c) => {
   try {
-    return normalizeAddress(getConnInfo(c).remote.address);
+    return getConnInfo(c).remote.address;
   } catch {
     return undefined;
   }

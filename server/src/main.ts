@@ -6,15 +6,12 @@ import { createAuth } from "./auth/auth.js";
 import { ConfigError, loadConfig, passkeysSupported, type ServerConfig } from "./config.js";
 import { createDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
+import { describeSafely } from "./errors.js";
 import { databaseCheck, readableFileCheck } from "./readiness.js";
 import { hasWebAssets } from "./static.js";
 
 /** web/dist, resolved from server/dist/main.js. */
 const WEB_ROOT = fileURLToPath(new URL("../../web/dist", import.meta.url));
-
-function describe(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-}
 
 function readConfig(): ServerConfig {
   try {
@@ -40,7 +37,7 @@ async function main(): Promise<void> {
   try {
     await runMigrations(sql);
   } catch (error) {
-    console.error(`database migration failed: ${describe(error)}`);
+    console.error(`database migration failed: ${describeSafely(error)}`);
     await sql.end({ timeout: 5 });
     process.exit(1);
   }
@@ -90,6 +87,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(`server failed to start: ${describe(error)}`);
+  console.error(`server failed to start: ${describeSafely(error)}`);
   process.exit(1);
 });

@@ -1,28 +1,19 @@
-import { count, desc } from "drizzle-orm";
+import { count } from "drizzle-orm";
 import { Hono } from "hono";
 import { SIGN_IN_RATE_LIMIT } from "../auth/auth.js";
-import {
-  type AdminSession,
-  checkSession,
-  sessionDeadlines,
-  touchSession,
-} from "../auth/session-policy.js";
-import { auditLog, user } from "../db/schema.js";
+import { checkSession, sessionDeadlines, touchSession } from "../auth/session-policy.js";
+import { user } from "../db/schema.js";
 import { fromOwnOrigin, isMutation } from "../http/request-guards.js";
 import { type AdminDeps, requestMeta } from "./context.js";
 import { completeSetup, validateSetupInput } from "./setup.js";
 
-type AdminEnv = { Variables: { admin: AdminSession } };
-
-const AUDIT_PAGE_SIZE = 50;
-
 /**
  * The admin API (/api/admin/*). Every mutation must come from Mashkif's own
- * origin. Routes other than status, setup, and session need a full session:
- * password plus TOTP, or a passkey with user verification.
+ * origin. Later steps add routes that need a full session (password plus
+ * TOTP, or a passkey with user verification) through checkSession.
  */
-export function adminRoutes(deps: AdminDeps): Hono<AdminEnv> {
-  const app = new Hono<AdminEnv>();
+export function adminRoutes(deps: AdminDeps): Hono {
+  const app = new Hono();
 
   app.use("*", async (c, next) => {
     c.header("Cache-Control", "no-store");
@@ -87,40 +78,6 @@ export function adminRoutes(deps: AdminDeps): Hono<AdminEnv> {
       maxAgeAt: deadlines.maxAgeAt.toISOString(),
       idleAt: deadlines.idleAt.toISOString(),
     });
-  });
-
-  // Everything below needs a full session.
-  app.use("*", async (c, next) => {
-    const check = await checkSession(deps.auth, deps.db, c.req.raw.headers);
-    if (check.state === "none") {
-      return c.json(
-        { error: check.ended === undefined ? "session_required" : "session_ended" },
-        401,
-      );
-    }
-    if (check.state !== "full") {
-      return c.json({ error: "totp_required" }, 403);
-    }
-    await touchSession(deps.db, check);
-    c.set("admin", check);
-    return next();
-  });
-
-  /** Recent security events, newest first. */
-  app.get("/audit", async (c) => {
-    const rows = await deps.db
-      .select({
-        id: auditLog.id,
-        at: auditLog.at,
-        actor: auditLog.actor,
-        action: auditLog.action,
-        ipAddress: auditLog.ipAddress,
-        details: auditLog.details,
-      })
-      .from(auditLog)
-      .orderBy(desc(auditLog.id))
-      .limit(AUDIT_PAGE_SIZE);
-    return c.json({ entries: rows.map((row) => ({ ...row, at: row.at.toISOString() })) });
   });
 
   app.all("*", (c) => c.json({ error: "not_found" }, 404));

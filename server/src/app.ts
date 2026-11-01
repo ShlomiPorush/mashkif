@@ -1,9 +1,11 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { secureHeaders } from "hono/secure-headers";
 import type { AdminDeps } from "./admin/context.js";
 import { adminRoutes } from "./admin/routes.js";
 import { AUTH_BASE_PATH } from "./auth/auth.js";
 import { authRoutes } from "./auth/routes.js";
+import { describeSafely } from "./errors.js";
 import { agentRoutes } from "./protocol.js";
 import {
   DEFAULT_READINESS_TIMEOUT_MS,
@@ -23,6 +25,9 @@ export interface AppOptions {
   /** Admin sign-in and the admin API. When undefined, those routes are 404. */
   admin?: AdminDeps;
 }
+
+/** Largest request body the admin and auth routes accept. */
+export const ADMIN_BODY_LIMIT_BYTES = 16 * 1024;
 
 export function createApp(options: AppOptions): Hono {
   const app = new Hono();
@@ -64,6 +69,15 @@ export function createApp(options: AppOptions): Hono {
 
   app.route("/api/agent", agentRoutes());
   if (options.admin !== undefined) {
+    // Read with a byte limit before anything parses the body, also without a
+    // Content-Length. The largest legitimate body, a passkey registration,
+    // is about 2 KB.
+    const limit = bodyLimit({
+      maxSize: ADMIN_BODY_LIMIT_BYTES,
+      onError: (c) => c.json({ error: "payload_too_large" }, 413),
+    });
+    app.use(`${AUTH_BASE_PATH}/*`, limit);
+    app.use("/api/admin/*", limit);
     app.route(AUTH_BASE_PATH, authRoutes(options.admin));
     app.route("/api/admin", adminRoutes(options.admin));
   }
@@ -75,7 +89,7 @@ export function createApp(options: AppOptions): Hono {
 
   app.notFound((c) => c.json({ error: "not_found" }, 404));
   app.onError((error, c) => {
-    console.error(`request failed: ${c.req.method} ${c.req.path}: ${error.name}: ${error.message}`);
+    console.error(`request failed: ${c.req.method} ${c.req.path}: ${describeSafely(error)}`);
     return c.json({ error: "internal_error" }, 500);
   });
 

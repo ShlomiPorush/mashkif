@@ -7,6 +7,7 @@ import { resetAdmin } from "./admin/reset.js";
 import { createSetupToken, SETUP_TOKEN_TTL_MS } from "./admin/setup.js";
 import { createDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
+import { describeSafely } from "./errors.js";
 
 const USAGE = `Usage: node server/dist/cli.js <command>
 
@@ -16,10 +17,6 @@ Commands:
   reset-admin   Give the admin a new random password, printed once, and remove
                 TOTP, passkeys, sessions, and pending sign-ins. After signing in
                 with the new password, TOTP must be set up again.`;
-
-function describe(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-}
 
 async function main(argv: string[]): Promise<number> {
   const command = argv[0];
@@ -61,7 +58,7 @@ async function main(argv: string[]): Promise<number> {
     console.log("Sign in at /admin with the new password, then set up TOTP again.");
     return 0;
   } catch (error) {
-    console.error(`command failed: ${describe(error)}`);
+    console.error(`command failed: ${describeSafely(error)}`);
     return 1;
   } finally {
     await sql.end({ timeout: 5 });

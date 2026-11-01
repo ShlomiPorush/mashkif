@@ -14,6 +14,9 @@ import {
 import { totpCode } from "./support/totp.js";
 import { SoftwareAuthenticator } from "./support/webauthn.js";
 
+/** A route only a full session may call. */
+const FULL_ONLY = "/api/auth/passkey/list-user-passkeys";
+
 let database: TestDatabase;
 let harness: Harness;
 
@@ -154,10 +157,51 @@ describe("reset-admin", () => {
     expect(signIn.status).toBe(200);
     expect(signIn.body.twoFactorRedirect).toBeUndefined();
     expect(await browser.sessionState()).toBe("enrollment");
-    expect((await browser.get("/api/admin/audit")).status).toBe(403);
+    expect((await browser.get(FULL_ONLY)).status).toBe(403);
     expect((await browser.get("/api/auth/passkey/generate-register-options")).status).toBe(403);
     const secret = await enrollTotp(browser, result.password);
     expect(secret.equals(admin.secret)).toBe(false);
     expect(await browser.sessionState()).toBe("full");
+  });
+
+  it("a credential change that passed its session check cannot finish after a reset", async () => {
+    await setUpAdmin(database, harness);
+    // A session before TOTP exists: TOTP enrollment is its credential change.
+    const browser = new Browser(harness);
+    expect((await browser.signIn()).status).toBe(200);
+
+    // The reset makes every change and then waits, holding the admin lock,
+    // before it commits.
+    let commit = () => {};
+    let ready = () => {};
+    const changed = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const reset = resetAdmin(database.db, {
+      beforeCommit: () =>
+        new Promise<void>((resolve) => {
+          commit = resolve;
+          ready();
+        }),
+    });
+    await changed;
+
+    // The request passes its session check (the reset is not committed yet)
+    // and then waits for the lock.
+    const request = browser.post("/api/auth/two-factor/enable", { password: PASSWORD });
+    const waiting = async () => {
+      const [row] = await database.sql`select count(*)::int as n from pg_locks
+        where locktype = 'advisory' and not granted`;
+      return row?.n === 1;
+    };
+    for (let i = 0; i < 40 && !(await waiting()); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    commit();
+    expect((await reset).ok).toBe(true);
+
+    const reply = await request;
+    expect(reply).toMatchObject({ status: 401, body: { error: "session_ended" } });
+    expect(await counts()).toMatchObject({ totp: 0, sessions: 0, totpEnabled: false });
   });
 });

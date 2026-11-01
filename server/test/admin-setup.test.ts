@@ -84,6 +84,14 @@ describe("setup route", () => {
     expect(audit[1]).toMatchObject({ actor: "shlomi", ip_address: harness.address });
   });
 
+  it("stores an IPv4-mapped client address as plain IPv4", async () => {
+    harness.address = "::ffff:198.51.100.10";
+    expect((await setup(new Browser(harness), await newToken())).status).toBe(201);
+    const [row] =
+      await database.sql`select ip_address from audit_log where action = 'admin.created'`;
+    expect(row?.ip_address).toBe("198.51.100.10");
+  });
+
   it("requires a token", async () => {
     const reply = await setup(new Browser(harness), "");
     expect(reply).toMatchObject({ status: 400, body: { error: "setup_token_invalid" } });

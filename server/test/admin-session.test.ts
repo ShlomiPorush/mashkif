@@ -6,12 +6,16 @@ import {
   createHarness,
   enrollTotp,
   type Harness,
+  ORIGIN,
   PASSWORD,
   setUpAdmin,
   signInWithTotp,
   USERNAME,
 } from "./support/harness.js";
-import { totpCode } from "./support/totp.js";
+import { secretFromUri, totpCode } from "./support/totp.js";
+
+/** A route only a full session may call. */
+const FULL_ONLY = "/api/auth/passkey/list-user-passkeys";
 
 let database: TestDatabase;
 let harness: Harness;
@@ -43,6 +47,7 @@ describe("blocked Better Auth routes", () => {
   it.each([
     ["POST", "/api/auth/sign-up/email"],
     ["POST", "/api/auth/sign-in/email"],
+    ["POST", "/api/auth/change-password"],
     ["POST", "/api/auth/two-factor/disable"],
     ["POST", "/api/auth/two-factor/verify-backup-code"],
     ["POST", "/api/auth/two-factor/generate-backup-codes"],
@@ -89,20 +94,12 @@ describe("session states", () => {
   it("without a session, nothing but sign-in is allowed", async () => {
     const browser = new Browser(harness);
     expect(await browser.sessionState()).toBe("none");
-    expect((await browser.get("/api/admin/audit")).body).toEqual({ error: "session_required" });
+    expect((await browser.get(FULL_ONLY)).body).toMatchObject({ error: "session_required" });
     expect((await browser.post("/api/auth/two-factor/enable", { password: PASSWORD })).status).toBe(
       401,
     );
     expect((await browser.get("/api/auth/passkey/generate-register-options")).status).toBe(401);
     expect((await browser.get("/api/auth/passkey/list-user-passkeys")).status).toBe(401);
-    expect(
-      (
-        await browser.post("/api/auth/change-password", {
-          currentPassword: PASSWORD,
-          newPassword: "x".repeat(20),
-        })
-      ).status,
-    ).toBe(401);
   });
 
   it("before TOTP is enrolled, a password session may only enroll TOTP", async () => {
@@ -111,19 +108,11 @@ describe("session states", () => {
     expect(signIn.status).toBe(200);
     expect(signIn.body.twoFactorRedirect).toBeUndefined();
     expect(await browser.sessionState()).toBe("enrollment");
-    expect((await browser.get("/api/admin/audit")).body).toEqual({ error: "totp_required" });
+    expect((await browser.get(FULL_ONLY)).body).toMatchObject({ error: "totp_required" });
     expect((await browser.get("/api/auth/passkey/generate-register-options")).body).toMatchObject({
       error: "totp_required",
     });
     expect((await browser.get("/api/auth/passkey/list-user-passkeys")).status).toBe(403);
-    expect(
-      (
-        await browser.post("/api/auth/change-password", {
-          currentPassword: PASSWORD,
-          newPassword: "y".repeat(20),
-        })
-      ).status,
-    ).toBe(403);
     expect(await auditActions()).toContain("sign_in.succeeded");
 
     const enable = await browser.post("/api/auth/two-factor/enable", { password: PASSWORD });
@@ -141,7 +130,7 @@ describe("session states", () => {
     const browser = new Browser(harness);
     await enrollTotp(browser);
     expect(await browser.sessionState()).toBe("full");
-    expect((await browser.get("/api/admin/audit")).status).toBe(200);
+    expect((await browser.get(FULL_ONLY)).status).toBe(200);
     expect(await sessionRows()).toEqual([expect.objectContaining({ assurance: "totp" })]);
     // The password-only session from the other browser is gone.
     expect(await other.sessionState()).toBe("none");
@@ -158,7 +147,7 @@ describe("session states", () => {
     expect(signIn.body).toMatchObject({ twoFactorRedirect: true });
     expect([...browser.cookies.keys()]).toEqual(["__Host-mashkif.two_factor"]);
     expect(await browser.sessionState()).toBe("none");
-    expect((await browser.get("/api/admin/audit")).status).toBe(401);
+    expect((await browser.get(FULL_ONLY)).status).toBe(401);
 
     const wrong = await browser.post("/api/auth/two-factor/verify-totp", {
       code: totpCode(secret, Date.now(), 10),
@@ -235,7 +224,7 @@ describe("session limits", () => {
       state: "none",
       ended: "max_age",
     });
-    expect((await browser.get("/api/admin/audit")).status).toBe(401);
+    expect((await browser.get(FULL_ONLY)).status).toBe(401);
   });
 
   it("Better Auth's own expiry is 12 hours and is never extended", async () => {
@@ -251,38 +240,26 @@ describe("session limits", () => {
     const browser = new Browser(harness);
     await enrollTotp(browser);
     await database.sql`update auth_session set last_active_at = now() - interval '50 minutes'`;
-    expect((await browser.get("/api/admin/audit")).status).toBe(200);
+    expect((await browser.get(FULL_ONLY)).status).toBe(200);
     const [row] =
       await database.sql`select now() - last_active_at < interval '1 minute' as fresh from auth_session`;
     expect(row?.fresh).toBe(true);
   });
 
-  it("changing the password keeps the session full and its sign-in time", async () => {
+  it("TOTP enrollment replaces the session but keeps its sign-in time", async () => {
     const browser = new Browser(harness);
-    const secret = await enrollTotp(browser);
+    expect((await browser.signIn()).status).toBe(200);
     await database.sql`update auth_session set authenticated_at = now() - interval '3 hours'`;
-    const other = new Browser(harness);
-    await signInWithTotp(other, secret);
-
-    const newPassword = "a brand new passphrase";
-    const reply = await browser.post("/api/auth/change-password", {
-      currentPassword: PASSWORD,
-      newPassword,
-      revokeOtherSessions: true,
+    const enable = await browser.post("/api/auth/two-factor/enable", { password: PASSWORD });
+    const secret = secretFromUri(String(enable.body.totpURI));
+    const verify = await browser.post("/api/auth/two-factor/verify-totp", {
+      code: totpCode(secret),
     });
-    expect(reply.status).toBe(200);
+    expect(verify.status).toBe(200);
     expect(await browser.sessionState()).toBe("full");
-    expect(await other.sessionState()).toBe("none");
     const [row] = await database.sql`select assurance,
       now() - authenticated_at > interval '2 hours' as kept from auth_session`;
     expect(row).toMatchObject({ assurance: "totp", kept: true });
-    expect(await auditActions()).toContain("password.changed");
-
-    const fresh = new Browser(harness);
-    expect((await fresh.signIn(USERNAME, PASSWORD)).status).toBe(401);
-    expect((await fresh.signIn(USERNAME, newPassword)).body).toMatchObject({
-      twoFactorRedirect: true,
-    });
   });
 });
 
@@ -398,5 +375,88 @@ describe("rate limits", () => {
       headers: { "x-mashkif-client-address": "192.0.2.99", "x-forwarded-for": "192.0.2.98" },
     });
     expect(spoofed.status).toBe(429);
+  });
+});
+
+describe("interrupted TOTP enrollment", () => {
+  // Better Auth sets two_factor_enabled before it marks the secret verified,
+  // without a transaction. These tests stop in between.
+  async function interruptedEnrollment(): Promise<Browser> {
+    const browser = new Browser(harness);
+    expect((await browser.signIn()).status).toBe(200);
+    expect((await browser.post("/api/auth/two-factor/enable", { password: PASSWORD })).status).toBe(
+      200,
+    );
+    await database.sql`update auth_user set two_factor_enabled = true`;
+    return browser;
+  }
+
+  it("does not lock the admin out at the next sign-in", async () => {
+    const stale = await interruptedEnrollment();
+    expect(await stale.sessionState()).toBe("enrollment");
+
+    const browser = new Browser(harness);
+    const signIn = await browser.signIn();
+    expect(signIn.status).toBe(200);
+    expect(signIn.body.twoFactorRedirect).toBeUndefined();
+    const [row] = await database.sql`select two_factor_enabled,
+      (select count(*)::int from auth_two_factor) as secrets from auth_user`;
+    expect(row).toEqual({ two_factor_enabled: false, secrets: 0 });
+    expect(await browser.sessionState()).toBe("enrollment");
+
+    const enable = await browser.post("/api/auth/two-factor/enable", { password: PASSWORD });
+    const secret = secretFromUri(String(enable.body.totpURI));
+    expect(
+      (await browser.post("/api/auth/two-factor/verify-totp", { code: totpCode(secret) })).status,
+    ).toBe(200);
+    expect(await browser.sessionState()).toBe("full");
+  });
+
+  it("lets the same session enroll again", async () => {
+    const browser = await interruptedEnrollment();
+    const enable = await browser.post("/api/auth/two-factor/enable", { password: PASSWORD });
+    expect(enable.status).toBe(200);
+    const secret = secretFromUri(String(enable.body.totpURI));
+    expect(
+      (await browser.post("/api/auth/two-factor/verify-totp", { code: totpCode(secret) })).status,
+    ).toBe(200);
+    expect(await browser.sessionState()).toBe("full");
+  });
+});
+
+describe("request size", () => {
+  const oversized = JSON.stringify({ username: USERNAME, password: "x".repeat(20 * 1024) });
+  const headers = { origin: ORIGIN, "content-type": "application/json" };
+  const stream = (text: string) =>
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(text));
+        controller.close();
+      },
+    });
+  const send = (path: string, init: RequestInit & { duplex?: "half" }) =>
+    harness.app.request(`${ORIGIN}${path}`, { method: "POST", ...init });
+
+  it.each(["/api/auth/sign-in/username", "/api/auth/two-factor/verify-totp", "/api/admin/setup"])(
+    "refuses an oversized body to %s, with and without Content-Length",
+    async (path) => {
+      const declared = await send(path, {
+        headers: { ...headers, "content-length": String(oversized.length) },
+        body: oversized,
+      });
+      expect(declared.status).toBe(413);
+      const streamed = await send(path, { headers, body: stream(oversized), duplex: "half" });
+      expect(streamed.status).toBe(413);
+      expect(await streamed.json()).toEqual({ error: "payload_too_large" });
+    },
+  );
+
+  it("accepts a streamed body under the limit", async () => {
+    const reply = await send("/api/auth/sign-in/username", {
+      headers,
+      body: stream(JSON.stringify({ username: USERNAME, password: PASSWORD })),
+      duplex: "half",
+    });
+    expect(reply.status).toBe(200);
   });
 });

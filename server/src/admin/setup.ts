@@ -1,9 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { hashPassword } from "better-auth/crypto";
-import { and, count, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, count, eq, gt, isNull } from "drizzle-orm";
 import { writeAudit } from "../audit.js";
 import type { Db, Tx } from "../db/client.js";
 import { account, adminSetupToken, user } from "../db/schema.js";
+import { lockAdminInTransaction } from "./lock.js";
 
 /** How long a setup token printed by the CLI stays valid. */
 export const SETUP_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -21,11 +22,6 @@ export function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-/** Serializes setup-token creation and admin creation across processes. */
-async function lockSetup(tx: Tx): Promise<void> {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtext('mashkif:admin-setup'))`);
-}
-
 async function adminExists(tx: Tx): Promise<boolean> {
   const [row] = await tx.select({ n: count() }).from(user);
   return (row?.n ?? 0) > 0;
@@ -39,7 +35,7 @@ export type SetupTokenResult = { ok: true; token: string; expiresAt: Date } | { 
  */
 export async function createSetupToken(db: Db, now = new Date()): Promise<SetupTokenResult> {
   return db.transaction(async (tx) => {
-    await lockSetup(tx);
+    await lockAdminInTransaction(tx);
     if (await adminExists(tx)) {
       return { ok: false };
     }
@@ -107,7 +103,7 @@ export async function completeSetup(
   // Hash outside the transaction: scrypt is slow and the lock is shared.
   const passwordHash = await hashPassword(input.password);
   return db.transaction(async (tx) => {
-    await lockSetup(tx);
+    await lockAdminInTransaction(tx);
     if (await adminExists(tx)) {
       return { ok: false, error: "already_set_up" };
     }

@@ -14,5 +14,5 @@ All notable changes to this component are recorded here. The format follows
 - Admin sign-in at `/admin`, in Hebrew and English: one admin with a password and mandatory TOTP, plus passkeys that verify the user. Sessions end 12 hours after sign-in or after 1 hour without activity. Sign-in attempts are limited to 5 per 5 minutes.
 - First admin through a single-use setup token valid for 15 minutes: `node server/dist/cli.js setup-token`.
 - Recovery with `node server/dist/cli.js reset-admin`: a new random password, and TOTP, passkeys, and sessions removed.
-- Audit log of setup, sign-ins, failed sign-ins, sign-outs, credential changes, and resets, shown on the admin page.
+- Audit log of setup, sign-ins, failed sign-ins, sign-outs, credential changes, and resets.
 - New required settings: `MASHKIF_APP_KEY` (secret, at least 32 random bytes in base64) and `MASHKIF_PUBLIC_URL` (the origin of the web app). The server refuses to start without them.

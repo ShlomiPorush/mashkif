@@ -1,7 +1,11 @@
 import type { Context } from "hono";
 import type { Auth } from "../auth/auth.js";
 import type { Db } from "../db/client.js";
-import { type ClientAddressResolver, peerAddress } from "../http/request-guards.js";
+import {
+  type ClientAddressResolver,
+  normalizeAddress,
+  peerAddress,
+} from "../http/request-guards.js";
 
 /** Everything the admin and auth routes need. */
 export interface AdminDeps {
@@ -20,7 +24,7 @@ export interface RequestMeta {
 
 export function requestMeta(deps: AdminDeps, c: Context): RequestMeta {
   return {
-    ipAddress: (deps.clientAddress ?? peerAddress)(c),
+    ipAddress: normalizeAddress((deps.clientAddress ?? peerAddress)(c)),
     userAgent: c.req.header("user-agent"),
   };
 }

@@ -1,12 +1,14 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { type AdminDeps, requestMeta } from "../admin/context.js";
+import { withAdminLock } from "../admin/lock.js";
 import { type AuditEntry, writeAudit } from "../audit.js";
 import { fromOwnOrigin, isMutation } from "../http/request-guards.js";
 import { AUTH_BASE_PATH, CLIENT_ADDRESS_HEADER, priorSession } from "./auth.js";
 import {
   type AdminSession,
   checkSession,
+  repairInterruptedEnrollment,
   type SessionCheck,
   touchSession,
 } from "./session-policy.js";
@@ -41,7 +43,6 @@ export const AUTH_ROUTES: Readonly<Record<string, RouteRule>> = {
   "/passkey/verify-registration": { method: "POST", access: "full" },
   "/passkey/list-user-passkeys": { method: "GET", access: "full" },
   "/passkey/delete-passkey": { method: "POST", access: "full" },
-  "/change-password": { method: "POST", access: "full" },
   "/get-session": { method: "GET", access: "any" },
   "/sign-out": { method: "POST", access: "any" },
 };
@@ -117,6 +118,12 @@ async function auditFor(
           action: "sign_in.failed" as const,
           details: { step, status: response.status },
         };
+  // The outcome of a credential change whose start was audited.
+  const changeFailed = () => ({
+    actor,
+    action: "credential_change.failed" as const,
+    details: { route: path, status: response.status },
+  });
   switch (path) {
     case "/sign-in/username": {
       if (!ok) {
@@ -134,7 +141,7 @@ async function auditFor(
     }
     case "/two-factor/verify-totp":
       if (before.state === "enrollment") {
-        return ok ? { actor, action: "totp.enrolled" } : undefined;
+        return ok ? { actor, action: "totp.enrolled" } : changeFailed();
       }
       if (!ok) {
         return failure("totp");
@@ -155,11 +162,9 @@ async function auditFor(
       };
     }
     case "/passkey/verify-registration":
-      return ok ? { actor, action: "passkey.added" } : undefined;
+      return ok ? { actor, action: "passkey.added" } : changeFailed();
     case "/passkey/delete-passkey":
-      return ok ? { actor, action: "passkey.removed" } : undefined;
-    case "/change-password":
-      return ok ? { actor, action: "password.changed" } : undefined;
+      return ok ? { actor, action: "passkey.removed" } : changeFailed();
     case "/sign-out":
       return ok && before.state !== "none" ? { actor, action: "sign_out" } : undefined;
     default:
@@ -182,9 +187,24 @@ async function requireUserVerification(response: Response): Promise<Response> {
 }
 
 /**
+ * Whether the request changes the admin's credentials. Such requests run under
+ * the admin lock, with their session checked again inside it, so reset-admin
+ * and setup cannot interleave with them.
+ */
+function changesCredentials(path: string, before: SessionCheck): boolean {
+  return (
+    path === "/two-factor/enable" ||
+    path === "/passkey/verify-registration" ||
+    path === "/passkey/delete-passkey" ||
+    (path === "/two-factor/verify-totp" && before.state === "enrollment")
+  );
+}
+
+/**
  * The single entry to Better Auth (/api/auth/*): the route allowlist, the
- * origin check on every mutation, Mashkif's session policy, the client
- * address Better Auth sees, and the audit log.
+ * origin check on every mutation, Mashkif's session policy, the admin lock
+ * for credential changes, the client address Better Auth sees, and the audit
+ * log.
  */
 export function authRoutes(deps: AdminDeps): Hono {
   const app = new Hono();
@@ -210,6 +230,10 @@ export function authRoutes(deps: AdminDeps): Hono {
         );
       }
     }
+    if (path === "/sign-in/username") {
+      // Otherwise Better Auth would ask for a TOTP code that cannot be verified.
+      await repairInterruptedEnrollment(deps.db);
+    }
 
     // Signing in starts over; any old session is left to its own limits.
     const before: SessionCheck =
@@ -231,7 +255,41 @@ export function authRoutes(deps: AdminDeps): Hono {
       before.state === "none"
         ? undefined
         : { assurance: before.assurance, authenticatedAt: before.authenticatedAt };
-    let response = await priorSession.run(prior, () => deps.auth.handler(request));
+    const run = () => priorSession.run(prior, () => deps.auth.handler(request));
+
+    let response: Response;
+    if (before.state !== "none" && changesCredentials(path, before)) {
+      const locked = await withAdminLock(deps.db, async () => {
+        // The session may have ended while this request waited, for example
+        // by reset-admin.
+        const again = await checkSession(deps.auth, deps.db, c.req.raw.headers);
+        if (
+          again.state === "none" ||
+          again.sessionId !== before.sessionId ||
+          !allowed(rule.access, again)
+        ) {
+          return undefined;
+        }
+        if (path === "/two-factor/enable") {
+          await repairInterruptedEnrollment(deps.db, true);
+        } else {
+          // Committed before the change, so an interrupted change stays visible.
+          await writeAudit(deps.db, {
+            actor: before.username,
+            action: "credential_change.started",
+            details: { route: path },
+            ...meta,
+          });
+        }
+        return run();
+      });
+      if (locked === undefined) {
+        return refuse(c, 401, "session_ended");
+      }
+      response = locked;
+    } else {
+      response = await run();
+    }
 
     if (
       before.state !== "none" &&

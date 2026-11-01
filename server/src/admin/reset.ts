@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { hashPassword } from "better-auth/crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { writeAudit } from "../audit.js";
 import type { Db, Tx } from "../db/client.js";
 import { account, passkey, session, twoFactor, user, verification } from "../db/schema.js";
+import { lockAdminInTransaction } from "./lock.js";
 
 export type ResetResult = { ok: true; username: string; password: string } | { ok: false };
 
@@ -23,7 +24,7 @@ export async function resetAdmin(db: Db, options: ResetOptions = {}): Promise<Re
   const password = randomBytes(18).toString("base64url");
   const passwordHash = await hashPassword(password);
   const username = await db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('mashkif:admin-setup'))`);
+    await lockAdminInTransaction(tx);
     const [admin] = await tx
       .select({ id: user.id, username: user.username, name: user.name })
       .from(user)

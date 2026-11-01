@@ -19,6 +19,9 @@ import { SoftwareAuthenticator } from "./support/webauthn.js";
 
 const RP_ID = new URL(ORIGIN).hostname;
 
+/** A route only a full session may call. */
+const FULL_ONLY = "/api/auth/passkey/list-user-passkeys";
+
 let database: TestDatabase;
 let harness: Harness;
 let admin: Browser;
@@ -81,6 +84,11 @@ async function authenticate(
 
 const passkeyCount = async () => (await database.sql`select 1 from auth_passkey`).length;
 
+async function lastActions(count: number): Promise<string[]> {
+  const rows = await database.sql`select action from audit_log order by id desc limit ${count}`;
+  return rows.map((row) => String(row.action)).reverse();
+}
+
 describe("passkey registration", () => {
   it("adds a passkey that verified the user, from a full session", async () => {
     const reply = await register(admin, new SoftwareAuthenticator(), true);
@@ -88,14 +96,15 @@ describe("passkey registration", () => {
     expect(await passkeyCount()).toBe(1);
     const list = await admin.get("/api/auth/passkey/list-user-passkeys");
     expect(list.status).toBe(200);
-    const actions = await database.sql`select action from audit_log where action = 'passkey.added'`;
-    expect(actions).toHaveLength(1);
+    // The start of the change is committed before it, the outcome after it.
+    expect(await lastActions(2)).toEqual(["credential_change.started", "passkey.added"]);
   });
 
   it("refuses a passkey that did not verify the user", async () => {
     const reply = await register(admin, new SoftwareAuthenticator(), false);
     expect(reply.status).toBe(401);
     expect(reply.body.code).toBe("PASSKEY_USER_VERIFICATION_REQUIRED");
+    expect(await lastActions(2)).toEqual(["credential_change.started", "credential_change.failed"]);
     expect(await passkeyCount()).toBe(0);
   });
 
@@ -133,7 +142,7 @@ describe("passkey sign-in", () => {
       state: "full",
       method: "passkey",
     });
-    expect((await browser.get("/api/admin/audit")).status).toBe(200);
+    expect((await browser.get(FULL_ONLY)).status).toBe(200);
     const [row] = await database.sql`select details from audit_log
       where action = 'sign_in.succeeded' order by id desc limit 1`;
     expect(row?.details).toEqual({ method: "passkey" });

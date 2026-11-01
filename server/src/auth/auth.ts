@@ -9,6 +9,7 @@ import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { SessionAssurance } from "../db/schema.js";
 import * as schema from "../db/schema.js";
+import { describeSafely } from "../errors.js";
 import { MemoryRateLimitStore } from "./rate-limit.js";
 
 /** Better Auth routes live under this path on the public origin. */
@@ -52,6 +53,22 @@ export interface AuthOptions {
 /** Derives the Better Auth secret from MASHKIF_APP_KEY, so the key itself is never used directly. */
 export function deriveAuthSecret(appKey: Buffer): string {
   return Buffer.from(hkdfSync("sha256", appKey, "mashkif", "better-auth", 32)).toString("base64");
+}
+
+/**
+ * Better Auth's log lines. Errors passed along are reduced by describeSafely,
+ * because database errors carry SQL parameters such as session tokens.
+ */
+export function logAuthEvent(level: string, message: string, ...args: unknown[]): void {
+  const errors = args.filter((arg) => arg instanceof Error).map(describeSafely);
+  const line = `[Better Auth] ${level.toUpperCase()}: ${message}${errors.length > 0 ? ` (${errors.join("; ")})` : ""}`;
+  if (level === "error") {
+    console.error(line);
+  } else if (level === "warn") {
+    console.warn(line);
+  } else {
+    console.log(line);
+  }
 }
 
 function userVerificationRequired(): APIError {
@@ -117,6 +134,7 @@ export function createAuth(options: AuthOptions) {
     basePath: AUTH_BASE_PATH,
     trustedOrigins: [publicOrigin],
     telemetry: { enabled: false },
+    logger: { log: logAuthEvent },
     database: drizzleAdapter(db, {
       provider: "pg",
       schema: {

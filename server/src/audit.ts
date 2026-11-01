@@ -16,7 +16,8 @@ export const AUDIT_ACTIONS = [
   "totp.enrolled",
   "passkey.added",
   "passkey.removed",
-  "password.changed",
+  "credential_change.started",
+  "credential_change.failed",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
