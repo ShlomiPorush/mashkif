@@ -37,6 +37,25 @@
       <ComponentGroupRef Id="ServiceComponents" />
       <ComponentGroupRef Id="TrayComponents" />
     </Feature>
+
+    <!--
+      Close the tray app in every user session before its files are removed.
+      Restart Manager closes it only in the session that runs msiexec, so a
+      GPO or Intune uninstall running as SYSTEM would leave it running and
+      schedule the file for deletion at the next reboot. This deferred action
+      runs as LocalSystem; the tray keeps no state, so ending it is safe.
+      Exit code 128 (no such process) is expected and ignored.
+    -->
+    <StandardDirectory Id="System64Folder" />
+    <CustomAction Id="CloseTrayApps"
+                  Directory="System64Folder"
+                  ExeCommand="&quot;[System64Folder]taskkill.exe&quot; /F /IM Mashkif.Tray.exe"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="CloseTrayApps" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
   </Package>
 
   <Fragment>
