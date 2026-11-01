@@ -1,0 +1,39 @@
+# Build context filter for config/docker/app.Dockerfile. Deny by default:
+# only the manifests, lockfile, and sources the image build needs are sent.
+# Docker reads this file because it sits next to the Dockerfile and shares
+# its name; there is no root .dockerignore.
+#
+# Known limit: everything under web/public/ is copied into web/dist by Vite by
+# design, so an untracked file placed there reaches the image. Keep web/public/
+# limited to tracked public assets.
+
+*
+
+!package.json
+!pnpm-workspace.yaml
+!pnpm-lock.yaml
+
+!contracts/package.json
+!contracts/generated/
+
+!server/package.json
+!server/tsconfig.json
+!server/tsconfig.build.json
+!server/src/
+!server/drizzle/
+
+!web/package.json
+!web/index.html
+!web/tsconfig.json
+!web/vite.config.ts
+!web/public/
+!web/src/
+
+# Never send these, even when they sit inside an allowed directory.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/*.mmdb
+**/*.tsbuildinfo
+**/coverage

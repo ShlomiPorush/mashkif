@@ -1,0 +1,74 @@
+# Template for the machine-local development Compose file.
+#
+# Create it once per machine, in the root of the main checkout (not in an
+# additional worktree):
+#
+#   cp config/docker-compose-dev.example.yml docker-compose-dev.yml
+#   cp .env.example .env    # then replace every placeholder
+#
+# Both files are ignored by Git. Use them only through scripts/local.sh, which
+# builds mashkif-app:dev explicitly, prepares the data directory, and checks
+# health and runtime identity after startup. Every Mashkif checkout and
+# worktree on the machine shares this one environment.
+#
+# MASHKIF_DATA_DIR must be an absolute path on the WSL ext4 file system, for
+# example /home/<user>/mashkif-data. Paths under /mnt (Windows drives) do not
+# work: PostgreSQL needs real file ownership and mode 700 on its data.
+# MASHKIF_GEOIP_DIR is a directory containing GeoLite2-ASN.mmdb; it is mounted
+# read-only and may live on a Windows drive.
+
+name: mashkif-dev
+
+services:
+  app:
+    image: mashkif-app:dev
+    env_file: .env
+    environment:
+      MASHKIF_GEOIP_ASN_PATH: /geoip/GeoLite2-ASN.mmdb
+      PORT: "8080"
+    ports:
+      # Published on localhost only. Change the host port if 8180 is taken.
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - type: bind
+        source: ${MASHKIF_GEOIP_DIR:?set MASHKIF_GEOIP_DIR in .env}
+        target: /geoip
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:18.6-bookworm@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8
+    # The official image's postgres user. scripts/local.sh gives the data
+    # directory to this UID:GID before the first start.
+    user: "999:999"
+    env_file: .env
+    volumes:
+      # PostgreSQL 18 keeps PGDATA at /var/lib/postgresql/18/docker.
+      - type: bind
+        source: ${MASHKIF_DATA_DIR:?set MASHKIF_DATA_DIR in .env}/postgres
+        target: /var/lib/postgresql
+        bind:
+          create_host_path: false
+    shm_size: 128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      start_interval: 2s
+      retries: 5
