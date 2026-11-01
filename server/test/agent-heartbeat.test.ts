@@ -25,7 +25,8 @@ beforeEach(async () => {
 });
 
 async function agentRow(id: string | undefined) {
-  const [row] = await database.sql`select host(address) as address, site_key, asn, as_organization,
+  const [row] =
+    await database.sql`select host(address) as address, site_key, asn::int as asn, as_organization,
     reported_cell, infrastructure, interval_reported_seconds, interval_sent_seconds,
     silence_interval_seconds, last_seen_at, last_sequence, agent_version
     from agent where id = ${id ?? ""}`;
@@ -54,8 +55,8 @@ describe("heartbeat", () => {
       serverTime: "2026-11-01T10:00:00.000Z",
       nextIntervalSeconds: 60,
     });
-    const [stored] = await database.sql`select sync_id, received_at, host(address) as address,
-      site_key, asn, area_cell, infrastructure, round_trip_ms, dns_ms, interval_reported_seconds,
+    const [stored] = await database.sql`select (select sync_id from sync_anchor) as sync_id,
+      received_at, host(address) as address, site_key, asn::int as asn, area_cell, infrastructure, round_trip_ms, dns_ms, interval_reported_seconds,
       interval_sent_seconds from heartbeat`;
     expect(stored).toMatchObject({
       sync_id: reply.body.syncId,
@@ -80,17 +81,34 @@ describe("heartbeat", () => {
     });
   });
 
-  it("stores a retry of the same heartbeat once and answers it the same way (lost response)", async () => {
+  it("anchors a retry after a lost response at its own receive time, storing one sample", async () => {
     const agent = await new TestAgent(harness).enroll(database);
+    const t0 = new Date("2026-11-01T08:00:00.000Z");
+    harness.now = t0;
     const first = await agent.heartbeat({}, { lose: true });
-    // The agent never saw the answer and sends the same heartbeat again.
+    // Ten minutes later, from a new address, the agent sends the same heartbeat again.
+    const t1 = new Date(t0.getTime() + 10 * 60_000);
+    harness.now = t1;
+    agent.address = "198.51.100.77";
     const retry = await agent.post("/heartbeat", agent.heartbeatBody());
-    expect(retry).toMatchObject({ status: 200, body: first.body });
+    expect(retry.status).toBe(200);
+    expect(retry.body.syncId).not.toBe(first.body.syncId);
+    expect(retry.body.serverTime).toBe(t1.toISOString());
     expect(await database.sql`select 1 from heartbeat`).toHaveLength(1);
-    // The next heartbeat is new.
-    const next = await agent.heartbeat();
-    expect(next.body.syncId).not.toBe(first.body.syncId);
-    expect(await database.sql`select 1 from heartbeat`).toHaveLength(2);
+    const [row] = await database.sql`select last_seen_at, host(address) as address, site_key
+      from agent`;
+    expect(new Date(String(row?.last_seen_at)).toISOString()).toBe(t1.toISOString());
+    expect(row).toMatchObject({ address: "198.51.100.77", site_key: "198.51.100.77" });
+
+    // An event 30 seconds after the answer the agent received is placed at 08:10:30.
+    agent.syncId = String(retry.body.syncId);
+    harness.now = new Date(t1.getTime() + 60_000);
+    const reply = await agent.events([agent.event("connectivity_lost", 30_000)]);
+    expect((reply.body.results as { timeUncertain: boolean }[])[0]?.timeUncertain).toBe(false);
+    const [event] = await database.sql`select occurred_at from agent_event`;
+    expect(new Date(String(event?.occurred_at)).toISOString()).toBe(
+      new Date(t1.getTime() + 30_000).toISOString(),
+    );
   });
 
   it.each([

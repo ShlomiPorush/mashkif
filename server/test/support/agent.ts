@@ -45,7 +45,6 @@ export interface EventBody {
   bootId: string;
   syncId: string | null;
   elapsedMs: number | null;
-  agentTime?: string;
 }
 
 export interface AgentReply {
@@ -159,7 +158,7 @@ export class TestAgent {
     };
   }
 
-  events(events: unknown[], droppedEvents?: number) {
+  events(events: unknown[], droppedEvents?: { bootId: string; count: number }) {
     return this.post(
       "/events",
       droppedEvents === undefined ? { events } : { events, droppedEvents },

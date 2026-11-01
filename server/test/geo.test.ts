@@ -9,6 +9,7 @@ import { inServiceArea } from "../src/geo/service-area.js";
 import { siteKeyOf } from "../src/geo/site.js";
 import { GeoLiteAsn } from "../src/geoip.js";
 import { clientAddressResolver, parseTrustedProxies } from "../src/http/client-address.js";
+import { canonicalAddress, canonicalRange } from "../src/http/ip.js";
 import { writeAsnDatabase } from "./support/mmdb.js";
 
 describe("site of an address", () => {
@@ -21,6 +22,9 @@ describe("site of an address", () => {
     ["::1", "0:0:0:0::/64"],
     ["fe80::1%eth0", "fe80:0:0:0::/64"],
     ["64:ff9b::198.51.100.7", "64:ff9b:0:0::/64"],
+    ["::ffff:203.0.113.5", "203.0.113.5"],
+    ["::ffff:cb00:7105", "203.0.113.5"],
+    ["::FFFF:CB00:7105", "203.0.113.5"],
   ])("%s is site %s", (address, site) => {
     expect(siteKeyOf(address)).toBe(site);
   });
@@ -29,6 +33,42 @@ describe("site of an address", () => {
     expect(siteKeyOf("example.com")).toBeUndefined();
     expect(siteKeyOf("300.1.1.1")).toBeUndefined();
   });
+});
+
+describe("address normalization", () => {
+  it.each([
+    ["::ffff:203.0.113.5", "203.0.113.5"],
+    ["::ffff:cb00:7105", "203.0.113.5"],
+    ["0:0:0:0:0:ffff:cb00:7105", "203.0.113.5"],
+    ["2001:DB8:0:0:0:0:0:1", "2001:db8::1"],
+    ["fe80::1%eth0", "fe80::1"],
+    ["203.0.113.5", "203.0.113.5"],
+  ])("writes %s as %s", (input, output) => {
+    expect(canonicalAddress(input)).toBe(output);
+  });
+
+  it.each(["1.2.3", "010.1.1.1", "example.com", "", "1.2.3.4/32"])("refuses %s", (input) => {
+    expect(canonicalAddress(input)).toBeUndefined();
+  });
+
+  it.each([
+    ["192.0.2.77/24", "192.0.2.0/24"],
+    ["192.0.2.7", "192.0.2.7/32"],
+    ["::ffff:203.0.113.5/128", "203.0.113.5/32"],
+    ["::ffff:cb00:7100/120", "203.0.113.0/24"],
+    ["::ffff:0:0/96", "0.0.0.0/0"],
+    ["2001:db8::1/32", "2001:db8::/32"],
+    ["2001:db8::1", "2001:db8::1/128"],
+  ])("writes the range %s as %s", (input, output) => {
+    expect(canonicalRange(input)).toBe(output);
+  });
+
+  it.each(["1.2.3.4/33", "2001:db8::/129", "1.2.3/8", "1.2.3.4/x", "1.2.3.4/8/8"])(
+    "refuses the range %s",
+    (input) => {
+      expect(canonicalRange(input)).toBeUndefined();
+    },
+  );
 });
 
 describe("service area", () => {
@@ -81,7 +121,7 @@ describe("trusted proxies", () => {
     expect(parseTrustedProxies("")).toEqual({ ok: true, entries: [] });
     expect(parseTrustedProxies(" 172.18.0.0/16, 10.0.0.1 fd00::/8 ")).toEqual({
       ok: true,
-      entries: ["172.18.0.0/16", "10.0.0.1", "fd00::/8"],
+      entries: ["172.18.0.0/16", "10.0.0.1/32", "fd00::/8"],
     });
     expect(parseTrustedProxies("10.0.0.0/8,10.0.0.0/33")).toEqual({
       ok: false,

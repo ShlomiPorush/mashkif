@@ -24,6 +24,13 @@ const SYNC_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const WORD = /^[a-z_]{1,32}$/;
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
+/**
+ * Longest monotonic time an event may report since its sync: 400 days. An
+ * agent may stay in one boot, offline, for a long time; anything longer is
+ * not a real measurement and would not make a valid date.
+ */
+export const MAX_ELAPSED_MS = 400 * 24 * 60 * 60 * 1000;
+
 export const TOKEN_PATTERN = TOKEN;
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -137,7 +144,6 @@ export interface EventInput {
   bootId: string;
   syncId: string | null;
   elapsedMs: number | null;
-  agentTime: Date | null;
 }
 
 export type EventParse =
@@ -152,7 +158,7 @@ export function parseEvent(value: unknown): EventParse {
     return { ok: false, id, error: "event_invalid" };
   }
   const bootId = uuid(fields.bootId);
-  const { kind, syncId, elapsedMs, agentTime } = fields;
+  const { kind, syncId, elapsedMs } = fields;
   if (bootId === undefined) {
     return { ok: false, id, error: "event_invalid" };
   }
@@ -163,17 +169,10 @@ export function parseEvent(value: unknown): EventParse {
     return { ok: false, id, error: "event_kind_unknown" };
   }
   const withSync =
-    typeof syncId === "string" && SYNC_ID.test(syncId) && int(elapsedMs, 0, MAX_SAFE);
+    typeof syncId === "string" && SYNC_ID.test(syncId) && int(elapsedMs, 0, MAX_ELAPSED_MS);
   const withoutSync = syncId === null && elapsedMs === null;
   if (!withSync && !withoutSync) {
     return { ok: false, id, error: "event_invalid" };
-  }
-  let wallClock: Date | null = null;
-  if (agentTime !== undefined) {
-    wallClock = typeof agentTime === "string" ? new Date(agentTime) : new Date(Number.NaN);
-    if (Number.isNaN(wallClock.getTime()) || Math.abs(wallClock.getFullYear()) > 9999) {
-      return { ok: false, id, error: "event_invalid" };
-    }
   }
   return {
     ok: true,
@@ -183,22 +182,32 @@ export function parseEvent(value: unknown): EventParse {
       bootId,
       syncId: withSync ? syncId : null,
       elapsedMs: withSync ? elapsedMs : null,
-      agentTime: wallClock,
     },
   };
 }
 
-/** The events array and dropped count of an events request. */
+/** Events dropped in one boot so far, as the agent counts them. */
+export interface DroppedEvents {
+  bootId: string;
+  count: number;
+}
+
+/** The events array and the dropped-events count of an events request. */
 export function parseEventsRequest(
   body: unknown,
-): Parsed<{ events: unknown[]; droppedEvents: number }> {
+): Parsed<{ events: unknown[]; droppedEvents: DroppedEvents | undefined }> {
   const fields = object(body);
   if (fields === undefined || !Array.isArray(fields.events)) {
     return { ok: false, field: "events" };
   }
-  const dropped = fields.droppedEvents;
-  if (dropped !== undefined && !int(dropped, 0, 1_000_000_000)) {
-    return { ok: false, field: "droppedEvents" };
+  let droppedEvents: DroppedEvents | undefined;
+  if (fields.droppedEvents !== undefined) {
+    const dropped = object(fields.droppedEvents);
+    const bootId = uuid(dropped?.bootId);
+    if (dropped === undefined || bootId === undefined || !int(dropped.count, 0, 1_000_000_000)) {
+      return { ok: false, field: "droppedEvents" };
+    }
+    droppedEvents = { bootId, count: dropped.count };
   }
-  return { ok: true, value: { events: fields.events, droppedEvents: dropped ?? 0 } };
+  return { ok: true, value: { events: fields.events, droppedEvents } };
 }

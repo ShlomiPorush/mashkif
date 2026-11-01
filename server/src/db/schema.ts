@@ -13,6 +13,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -281,7 +282,8 @@ export const agent = pgTable(
     address: inet("address"),
     /** IPv4 address, or the IPv6 /64, of the latest heartbeat. */
     siteKey: text("site_key"),
-    asn: integer("asn"),
+    /** 32-bit unsigned, so bigint. */
+    asn: bigint("asn", { mode: "number" }),
     asOrganization: text("as_organization"),
     /** The cell the agent reported; null when unknown or outside the service area. */
     reportedCell: text("reported_cell"),
@@ -299,8 +301,6 @@ export const agent = pgTable(
     /** Latest event with a certain time later than the latest heartbeat at the time. */
     lastEventKind: text("last_event_kind").$type<EventKind>(),
     lastEventAt: ts("last_event_at"),
-    /** Events the agent reported it dropped from its queue, in total. */
-    droppedEvents: bigint("dropped_events", { mode: "number" }).notNull().default(0),
   },
   (t) => [
     index("agent_site_key_idx").on(t.siteKey),
@@ -317,15 +317,13 @@ export const heartbeat = pgTable(
     agentId: uuid("agent_id")
       .notNull()
       .references(() => agent.id, { onDelete: "cascade" }),
-    /** Returned to the agent; events refer to it to compute their time. */
-    syncId: text("sync_id").notNull().unique(),
-    /** Server time when the heartbeat was received: the time of the sync. */
+    /** Server time when the heartbeat was first received. */
     receivedAt: ts("received_at").notNull(),
     bootId: uuid("boot_id").notNull(),
     sequence: bigint("sequence", { mode: "number" }).notNull(),
     address: inet("address").notNull(),
     siteKey: text("site_key").notNull(),
-    asn: integer("asn"),
+    asn: bigint("asn", { mode: "number" }),
     asOrganization: text("as_organization"),
     areaCell: text("area_cell"),
     infrastructure: text("infrastructure").$type<Infrastructure>().notNull(),
@@ -340,6 +338,49 @@ export const heartbeat = pgTable(
     index("heartbeat_received_at_idx").on(t.receivedAt),
     index("heartbeat_agent_received_at_idx").on(t.agentId, t.receivedAt),
   ],
+);
+
+/**
+ * One row per heartbeat response: the sync ID returned to the agent and the
+ * server time it was anchored at. Events compute their time from it. Every
+ * heartbeat request gets a new anchor, also a retry of the same sequence.
+ * Retention deletes old anchors but never the latest one of an agent's
+ * boot, so an agent that stays offline in one boot longer than the
+ * retention period can still place its events.
+ */
+export const syncAnchor = pgTable(
+  "sync_anchor",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    syncId: text("sync_id").notNull().unique(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agent.id, { onDelete: "cascade" }),
+    bootId: uuid("boot_id").notNull(),
+    serverTime: ts("server_time").notNull(),
+  },
+  (t) => [
+    index("sync_anchor_agent_boot_idx").on(t.agentId, t.bootId, t.id),
+    index("sync_anchor_server_time_idx").on(t.serverTime),
+  ],
+);
+
+/**
+ * Events an agent dropped from its queue, as the cumulative count per boot it
+ * reports. The largest count seen per agent and boot is kept, so a retry
+ * counts once.
+ */
+export const agentDroppedEvents = pgTable(
+  "agent_dropped_events",
+  {
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agent.id, { onDelete: "cascade" }),
+    bootId: uuid("boot_id").notNull(),
+    count: bigint("count", { mode: "number" }).notNull(),
+    updatedAt: ts("updated_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.agentId, t.bootId] })],
 );
 
 /** Raw agent events, deleted after the retention period. */
@@ -360,8 +401,6 @@ export const agentEvent = pgTable(
     occurredAt: ts("occurred_at"),
     timeUncertain: boolean("time_uncertain").notNull(),
     uncertainReason: text("uncertain_reason").$type<TimeUncertainReason>(),
-    /** The PC's wall clock, for display only. */
-    agentTime: ts("agent_time"),
     receivedAt: ts("received_at").notNull(),
   },
   (t) => [
@@ -392,7 +431,8 @@ export const provider = pgTable("provider", {
 export const providerAsn = pgTable(
   "provider_asn",
   {
-    asn: integer("asn").primaryKey(),
+    /** 32-bit unsigned, so bigint. */
+    asn: bigint("asn", { mode: "number" }).primaryKey(),
     providerId: bigint("provider_id", { mode: "number" })
       .notNull()
       .references(() => provider.id, { onDelete: "cascade" }),

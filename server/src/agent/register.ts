@@ -5,6 +5,7 @@ import { writeAudit } from "../audit.js";
 import type { Db } from "../db/client.js";
 import { agent, enrollmentKey } from "../db/schema.js";
 import type { RegisterRequest } from "./parse.js";
+import { addressBlocked, lockBlocklistShared } from "./write-guard.js";
 
 export type RegisterError =
   | "enrollment_key_invalid"
@@ -12,6 +13,7 @@ export type RegisterError =
   | "enrollment_key_revoked"
   | "enrollment_key_used"
   | "agent_revoked"
+  | "address_blocked"
   | "install_id_conflict";
 
 export type RegisterOutcome =
@@ -51,6 +53,11 @@ export async function registerAgent(
   const tokenHash = hashToken(input.token);
   try {
     return await db.transaction(async (tx): Promise<RegisterOutcome> => {
+      // Checked again under the shared blocklist lock, like agent writes.
+      await lockBlocklistShared(tx);
+      if (await addressBlocked(tx, ipAddress)) {
+        return { ok: false, error: "address_blocked" };
+      }
       const [used] = await tx
         .update(enrollmentKey)
         .set({ usedAt: now })

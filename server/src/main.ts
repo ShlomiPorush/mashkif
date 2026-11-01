@@ -73,7 +73,13 @@ async function main(): Promise<void> {
       geoip: readableFileCheck(config.geoipAsnPath),
     },
     admin: { db, auth, publicOrigin: config.publicOrigin, clientAddress, asn },
-    agent: { db, asn, rateLimits: new MemoryRateLimitStore(), clientAddress },
+    agent: {
+      db,
+      asn,
+      rateLimits: new MemoryRateLimitStore(),
+      registerRateLimits: new MemoryRateLimitStore(),
+      clientAddress,
+    },
     ...(webRoot === undefined ? {} : { webRoot }),
     onReadinessFailure: (name, reason) => console.warn(`readiness check ${name} failed: ${reason}`),
   });

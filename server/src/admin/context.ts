@@ -20,6 +20,8 @@ export interface AdminDeps {
   clientAddress?: ClientAddressResolver;
   /** For the GeoLite2-ASN status in the settings. */
   asn?: AsnLookup;
+  /** Test seams. */
+  testHooks?: { afterSettingsRead?: () => Promise<void> };
 }
 
 export interface RequestMeta {

@@ -1,5 +1,6 @@
 import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Context } from "hono";
+import { canonicalAddress } from "./ip.js";
 
 /** Resolves the client address of a request, or undefined when unknown. */
 export type ClientAddressResolver = (c: Context) => string | undefined;
@@ -17,13 +18,12 @@ export const peerAddress: ClientAddressResolver = (c) => {
   }
 };
 
-/** An IPv4 address the socket reports as IPv4-mapped IPv6 (::ffff:a.b.c.d) becomes plain IPv4. */
+/**
+ * The canonical client address (see ip.ts): every IPv4-mapped IPv6 spelling
+ * becomes IPv4. Undefined when the value is not an IP address.
+ */
 export function normalizeAddress(address: string | undefined): string | undefined {
-  if (address === undefined || address === "") {
-    return undefined;
-  }
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
-  return mapped?.[1] ?? address;
+  return canonicalAddress(address);
 }
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);

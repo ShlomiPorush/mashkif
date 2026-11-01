@@ -72,8 +72,11 @@ export interface paths {
          *     server records the time it received the heartbeat and the client
          *     address it came from; the address decides the agent's site.
          *
-         *     A retry of the same heartbeat (same `bootId` and `sequence`) is not
-         *     stored twice and gets the original answer.
+         *     Every request, also a retry of the same heartbeat (same `bootId` and
+         *     `sequence`) after a lost answer, gets a new sync ID anchored at the
+         *     time the server received that request, and moves the agent to the
+         *     address it came from. A retry is stored once as a heartbeat sample.
+         *     The agent uses the sync ID of the answer it actually received.
          *
          *     Until the agent reports the interval the server last sent in
          *     `intervalSeconds`, the server judges silence by the larger of the two,
@@ -226,19 +229,24 @@ export interface components {
             syncId: components["schemas"]["SyncId"] | null;
             /**
              * @description Milliseconds on the monotonic clock from receiving that response
-             *     to the event; null exactly when `syncId` is null.
+             *     to the event, at most 400 days; null exactly when `syncId` is
+             *     null. An event with a larger value is rejected on its own.
              */
             elapsedMs: number | null;
-            /**
-             * Format: date-time
-             * @description The PC's wall-clock time of the event, for display only; never used for timing.
-             */
-            agentTime?: string;
         };
         EventsRequest: {
             events: components["schemas"]["Event"][];
-            /** @description Events the agent dropped from its queue (age or size) since its last report. */
-            droppedEvents?: number;
+            droppedEvents?: components["schemas"]["DroppedEvents"];
+        };
+        /**
+         * @description Events the agent dropped from its queue (by age or size) since the PC
+         *     started, as a cumulative count for that boot. The server keeps the
+         *     largest count it has seen per boot, so sending the same count again
+         *     changes nothing.
+         */
+        DroppedEvents: {
+            bootId: components["schemas"]["Uuid"];
+            count: number;
         };
         EventResult: {
             /** @description The event's ID, or null when it had no valid ID. */

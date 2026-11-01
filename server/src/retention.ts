@@ -1,6 +1,6 @@
-import { inArray, lt } from "drizzle-orm";
+import { inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./db/client.js";
-import { agentEvent, heartbeat } from "./db/schema.js";
+import { agentEvent, heartbeat, syncAnchor } from "./db/schema.js";
 import { describeSafely } from "./errors.js";
 import { readSettings } from "./settings.js";
 
@@ -16,14 +16,17 @@ export interface RetentionResult {
   cutoff: Date;
   heartbeats: number;
   events: number;
+  anchors: number;
   /** False when the batch limit stopped the run before everything old was gone. */
   complete: boolean;
 }
 
 /**
  * Deletes raw heartbeats and events received before the retention period
- * (an admin setting, at least 8 days, so the 7-day backfill window always
- * finds its syncs). It deletes in batches that each commit, so an
+ * (an admin setting, at least 8 days), and sync anchors older than that
+ * except the latest anchor of each agent and boot: an agent can stay in one
+ * boot, offline, longer than the retention period and then send events that
+ * refer to its last sync. It deletes in batches that each commit, so an
  * interrupted run loses nothing and the next run continues. Outage
  * summaries, which keep their own history, do not exist yet.
  */
@@ -59,9 +62,35 @@ export async function runRetention(
     return total;
   };
 
+  const purgeAnchors = async (): Promise<number> => {
+    let total = 0;
+    for (let batch = 0; batch < maxBatches; batch++) {
+      const deleted = await db
+        .delete(syncAnchor)
+        .where(
+          inArray(
+            syncAnchor.id,
+            sql`(select a.id from ${syncAnchor} a
+              where a.server_time < ${cutoff.toISOString()}::timestamptz
+                and exists (select 1 from ${syncAnchor} b
+                  where b.agent_id = a.agent_id and b.boot_id = a.boot_id and b.id > a.id)
+              order by a.id limit ${batchSize})`,
+          ),
+        )
+        .returning({ id: syncAnchor.id });
+      total += deleted.length;
+      if (deleted.length < batchSize) {
+        return total;
+      }
+    }
+    complete = false;
+    return total;
+  };
+
   const heartbeats = await purge(heartbeat);
   const events = await purge(agentEvent);
-  return { cutoff, heartbeats, events, complete };
+  const anchors = await purgeAnchors();
+  return { cutoff, heartbeats, events, anchors, complete };
 }
 
 /**
@@ -81,9 +110,9 @@ export function scheduleRetention(
     running = true;
     try {
       const result = await runRetention(db);
-      if (result.heartbeats > 0 || result.events > 0 || !result.complete) {
+      if (result.heartbeats + result.events + result.anchors > 0 || !result.complete) {
         console.log(
-          `retention: deleted ${result.heartbeats} heartbeats and ${result.events} events received before ${result.cutoff.toISOString()}${result.complete ? "" : "; more remain for the next run"}`,
+          `retention: deleted ${result.heartbeats} heartbeats, ${result.events} events, and ${result.anchors} sync anchors from before ${result.cutoff.toISOString()}${result.complete ? "" : "; more remain for the next run"}`,
         );
       }
     } catch (error) {

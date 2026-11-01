@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { and, eq, isNull, lte, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agent, heartbeat } from "../db/schema.js";
+import { agent, heartbeat, syncAnchor } from "../db/schema.js";
 import type { AsnInfo } from "../geoip.js";
 import type { HeartbeatInput } from "./parse.js";
+import { guardAgentWrite, type WriteRefusal } from "./write-guard.js";
 
 export interface HeartbeatContext {
   agentId: string;
@@ -18,11 +19,9 @@ export interface HeartbeatContext {
   now: Date;
 }
 
-export interface HeartbeatReply {
-  syncId: string;
-  serverTime: Date;
-  nextIntervalSeconds: number;
-}
+export type HeartbeatOutcome =
+  | { ok: true; syncId: string; serverTime: Date; nextIntervalSeconds: number }
+  | { ok: false; error: WriteRefusal };
 
 /**
  * The interval silence is judged by. Until the agent reports the interval
@@ -34,51 +33,30 @@ export function silenceInterval(reportedSeconds: number, sentSeconds: number): n
 }
 
 /**
- * Stores a heartbeat and moves the agent to its site and values. A retry of
- * the same heartbeat (same boot ID and sequence) is stored once and gets the
- * original answer.
+ * Records a heartbeat in one transaction that first checks, under the agent
+ * row lock, that the agent may still write. Every request gets a new sync
+ * anchored at its own receive time and moves the agent to its site and
+ * values, also a retry of the same heartbeat whose answer was lost: the
+ * agent measures elapsed time from the answer it receives, so an old anchor
+ * would place its events too early. A retry (same boot ID and sequence) is
+ * stored once as a heartbeat sample.
  */
 export async function recordHeartbeat(
   db: Db,
   input: HeartbeatInput,
   context: HeartbeatContext,
-): Promise<HeartbeatReply> {
+): Promise<HeartbeatOutcome> {
   const { agentId, now } = context;
-  return db.transaction(async (tx) => {
-    const original = async () => {
-      const [row] = await tx
-        .select({
-          syncId: heartbeat.syncId,
-          receivedAt: heartbeat.receivedAt,
-          intervalSentSeconds: heartbeat.intervalSentSeconds,
-        })
-        .from(heartbeat)
-        .where(
-          and(
-            eq(heartbeat.agentId, agentId),
-            eq(heartbeat.bootId, input.bootId),
-            eq(heartbeat.sequence, input.sequence),
-          ),
-        );
-      return row === undefined
-        ? undefined
-        : {
-            syncId: row.syncId,
-            serverTime: row.receivedAt,
-            nextIntervalSeconds: row.intervalSentSeconds,
-          };
-    };
-    const repeated = await original();
-    if (repeated !== undefined) {
-      return repeated;
+  return db.transaction(async (tx): Promise<HeartbeatOutcome> => {
+    const refusal = await guardAgentWrite(tx, agentId, context.address);
+    if (refusal !== undefined) {
+      return { ok: false, error: refusal };
     }
 
-    const syncId = randomBytes(16).toString("base64url");
-    const inserted = await tx
+    await tx
       .insert(heartbeat)
       .values({
         agentId,
-        syncId,
         receivedAt: now,
         bootId: input.bootId,
         sequence: input.sequence,
@@ -94,16 +72,10 @@ export async function recordHeartbeat(
         dnsMs: input.dnsMs,
         agentVersion: input.agentVersion ?? null,
       })
-      .onConflictDoNothing({ target: [heartbeat.agentId, heartbeat.bootId, heartbeat.sequence] })
-      .returning({ id: heartbeat.id });
-    if (inserted.length === 0) {
-      // The same heartbeat arrived twice at once; the other copy was stored.
-      const other = await original();
-      if (other === undefined) {
-        throw new Error("a conflicting heartbeat is not readable");
-      }
-      return other;
-    }
+      .onConflictDoNothing({ target: [heartbeat.agentId, heartbeat.bootId, heartbeat.sequence] });
+
+    const syncId = randomBytes(16).toString("base64url");
+    await tx.insert(syncAnchor).values({ syncId, agentId, bootId: input.bootId, serverTime: now });
 
     // A heartbeat received earlier but committed later never moves the agent back.
     await tx
@@ -125,6 +97,6 @@ export async function recordHeartbeat(
       })
       .where(and(eq(agent.id, agentId), or(isNull(agent.lastSeenAt), lte(agent.lastSeenAt, now))));
 
-    return { syncId, serverTime: now, nextIntervalSeconds: context.intervalSentSeconds };
+    return { ok: true, syncId, serverTime: now, nextIntervalSeconds: context.intervalSentSeconds };
   });
 }

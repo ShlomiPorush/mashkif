@@ -1,8 +1,15 @@
 import type { components } from "@mashkif/contracts";
 import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agent, agentEvent, heartbeat, type TimeUncertainReason } from "../db/schema.js";
-import { type EventInput, parseEvent } from "./parse.js";
+import {
+  agent,
+  agentDroppedEvents,
+  agentEvent,
+  syncAnchor,
+  type TimeUncertainReason,
+} from "../db/schema.js";
+import { type DroppedEvents, type EventInput, parseEvent } from "./parse.js";
+import { guardAgentWrite, type WriteRefusal } from "./write-guard.js";
 
 export type EventResult = components["schemas"]["EventResult"];
 
@@ -10,21 +17,20 @@ export type EventResult = components["schemas"]["EventResult"];
 export const BACKFILL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface Sync {
-  receivedAt: Date;
+  serverTime: Date;
   bootId: string;
 }
 
-export interface EventTime {
-  occurredAt: Date | null;
-  uncertain: TimeUncertainReason | null;
-}
+type ValidTime = { occurredAt: Date | null; uncertain: TimeUncertainReason | null };
+export type EventTime = ValidTime | { invalid: true };
 
 /**
  * The time of an event: the server time recorded for its sync ID plus the
  * monotonic time elapsed since. It is uncertain when the event has no sync
  * in its own boot (a reboot while offline), names an unknown sync, would be
  * later than the moment the server received it, or is older than the
- * backfill window. Uncertain events do not refine history.
+ * backfill window. Uncertain events do not refine history. A time that is
+ * not a valid date makes the event invalid on its own.
  */
 export function eventTime(event: EventInput, sync: Sync | undefined, receivedAt: Date): EventTime {
   if (event.syncId === null || event.elapsedMs === null) {
@@ -37,7 +43,11 @@ export function eventTime(event: EventInput, sync: Sync | undefined, receivedAt:
     // The elapsed time was measured on another boot's monotonic clock.
     return { occurredAt: null, uncertain: "other_boot" };
   }
-  const occurredAt = new Date(sync.receivedAt.getTime() + event.elapsedMs);
+  const occurredAt = new Date(sync.serverTime.getTime() + event.elapsedMs);
+  if (!Number.isFinite(occurredAt.getTime())) {
+    // Not a real time; the parser bounds elapsedMs, this guards the date itself.
+    return { invalid: true };
+  }
   if (occurredAt.getTime() > receivedAt.getTime()) {
     return { occurredAt, uncertain: "in_future" };
   }
@@ -52,15 +62,17 @@ export function eventTime(event: EventInput, sync: Sync | undefined, receivedAt:
  * per event in request order. The latest event with a certain time becomes
  * the agent's current state only when it is later than both the agent's
  * latest heartbeat and its current event, so a late event never changes the
- * state of an agent that has reported since.
+ * state of an agent that has reported since. The transaction first checks,
+ * under the agent row lock, that the agent may still write.
  */
 export async function recordEvents(
   db: Db,
   agentId: string,
+  address: string,
   rawEvents: unknown[],
-  droppedEvents: number,
+  droppedEvents: DroppedEvents | undefined,
   receivedAt: Date,
-): Promise<EventResult[]> {
+): Promise<{ ok: true; results: EventResult[] } | { ok: false; error: WriteRefusal }> {
   const parsed = rawEvents.map(parseEvent);
   const syncIds = [
     ...new Set(
@@ -69,24 +81,28 @@ export async function recordEvents(
   ];
 
   return db.transaction(async (tx) => {
+    const refusal = await guardAgentWrite(tx, agentId, address);
+    if (refusal !== undefined) {
+      return { ok: false as const, error: refusal };
+    }
     const syncs = new Map<string, Sync>();
     if (syncIds.length > 0) {
       const rows = await tx
         .select({
-          syncId: heartbeat.syncId,
-          receivedAt: heartbeat.receivedAt,
-          bootId: heartbeat.bootId,
+          syncId: syncAnchor.syncId,
+          serverTime: syncAnchor.serverTime,
+          bootId: syncAnchor.bootId,
         })
-        .from(heartbeat)
-        .where(and(eq(heartbeat.agentId, agentId), inArray(heartbeat.syncId, syncIds)));
+        .from(syncAnchor)
+        .where(and(eq(syncAnchor.agentId, agentId), inArray(syncAnchor.syncId, syncIds)));
       for (const row of rows) {
-        syncs.set(row.syncId, { receivedAt: row.receivedAt, bootId: row.bootId });
+        syncs.set(row.syncId, { serverTime: row.serverTime, bootId: row.bootId });
       }
     }
 
     const results: (EventResult | undefined)[] = [];
     const rows: (typeof agentEvent.$inferInsert)[] = [];
-    const pending: { index: number; event: EventInput; time: EventTime }[] = [];
+    const pending: { index: number; event: EventInput; time: ValidTime }[] = [];
     const seen = new Set<string>();
     parsed.forEach((item, index) => {
       if (!item.ok) {
@@ -98,9 +114,13 @@ export async function recordEvents(
         results[index] = { id: event.id, status: "duplicate" };
         return;
       }
-      seen.add(event.id);
       const sync = event.syncId === null ? undefined : syncs.get(event.syncId);
       const time = eventTime(event, sync, receivedAt);
+      if ("invalid" in time) {
+        results[index] = { id: event.id, status: "rejected", error: "event_invalid" };
+        return;
+      }
+      seen.add(event.id);
       pending.push({ index, event, time });
       rows.push({
         agentId,
@@ -112,7 +132,6 @@ export async function recordEvents(
         occurredAt: time.occurredAt,
         timeUncertain: time.uncertain !== null,
         uncertainReason: time.uncertain,
-        agentTime: event.agentTime,
         receivedAt,
       });
     });
@@ -155,12 +174,19 @@ export async function recordEvents(
           ),
         );
     }
-    if (droppedEvents > 0) {
+    if (droppedEvents !== undefined) {
+      // A cumulative count per boot: the largest one seen counts, so a retry counts once.
       await tx
-        .update(agent)
-        .set({ droppedEvents: sql`${agent.droppedEvents} + ${droppedEvents}` })
-        .where(eq(agent.id, agentId));
+        .insert(agentDroppedEvents)
+        .values({ agentId, ...droppedEvents, updatedAt: receivedAt })
+        .onConflictDoUpdate({
+          target: [agentDroppedEvents.agentId, agentDroppedEvents.bootId],
+          set: {
+            count: sql`greatest(${agentDroppedEvents.count}, excluded.count)`,
+            updatedAt: receivedAt,
+          },
+        });
     }
-    return results as EventResult[];
+    return { ok: true as const, results: results as EventResult[] };
   });
 }

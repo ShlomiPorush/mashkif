@@ -41,6 +41,7 @@ export interface Harness {
   auth: Auth;
   rateLimits: MemoryRateLimitStore;
   agentRateLimits: MemoryRateLimitStore;
+  registerRateLimits: MemoryRateLimitStore;
   asn: FakeAsn;
   /** The TCP peer of the next requests; a request may set its own with x-test-client. */
   address: string;
@@ -50,6 +51,10 @@ export interface Harness {
 
 export interface HarnessOptions {
   registerHooks?: RegisterHooks;
+  /** Runs in an agent request after authentication, before the write transaction. */
+  beforeWrite?: () => Promise<void>;
+  /** Runs in a settings update after it read the current values, under its lock. */
+  afterSettingsRead?: () => Promise<void>;
   /** MASHKIF_TRUSTED_PROXIES; the peer is x-test-client or harness.address. */
   trustedProxies?: string[];
 }
@@ -62,6 +67,7 @@ export function createHarness(
 ): Harness {
   const rateLimits = new MemoryRateLimitStore();
   const agentRateLimits = new MemoryRateLimitStore();
+  const registerRateLimits = new MemoryRateLimitStore();
   const asn = new FakeAsn();
   const auth = createAuth({
     db: database.db,
@@ -75,6 +81,7 @@ export function createHarness(
     auth,
     rateLimits,
     agentRateLimits,
+    registerRateLimits,
     asn,
     address: "198.51.100.10",
     now: undefined,
@@ -93,6 +100,9 @@ export function createHarness(
       clientAddress,
       asn,
       ...(bodyTimeoutMs === undefined ? {} : { bodyTimeoutMs }),
+      ...(options.afterSettingsRead === undefined
+        ? {}
+        : { testHooks: { afterSettingsRead: options.afterSettingsRead } }),
     },
     agent: {
       db: database.db,
@@ -100,7 +110,11 @@ export function createHarness(
       rateLimits: agentRateLimits,
       clientAddress,
       now: () => harness.now ?? new Date(),
-      ...(options.registerHooks === undefined ? {} : { testHooks: options.registerHooks }),
+      registerRateLimits: registerRateLimits,
+      testHooks: {
+        ...options.registerHooks,
+        ...(options.beforeWrite === undefined ? {} : { beforeWrite: options.beforeWrite }),
+      },
     },
   });
   return harness;

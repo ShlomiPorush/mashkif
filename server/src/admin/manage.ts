@@ -1,11 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
+import { lockBlocklistExclusive } from "../agent/write-guard.js";
 import { type AuditAction, writeAudit } from "../audit.js";
 import type { AdminSession } from "../auth/session-policy.js";
 import type { Tx } from "../db/client.js";
 import {
   agent,
+  agentDroppedEvents,
   blockedRange,
   enrollmentKey,
   provider,
@@ -15,6 +17,7 @@ import {
 } from "../db/schema.js";
 import { classifyAreaCell } from "../geo/area.js";
 import { NO_ASN } from "../geoip.js";
+import { canonicalRange } from "../http/ip.js";
 import { parseSettingsUpdate, readSettings, SETTING_RULES, writeSettings } from "../settings.js";
 import { type AdminDeps, type RequestMeta, requestMeta } from "./context.js";
 import {
@@ -292,7 +295,10 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
           silenceIntervalSeconds: agent.silenceIntervalSeconds,
           lastEventKind: agent.lastEventKind,
           lastEventAt: agent.lastEventAt,
-          droppedEvents: agent.droppedEvents,
+          droppedEvents:
+            sql<number>`coalesce((select sum(d.count) from ${agentDroppedEvents} d where d.agent_id = ${agent.id}), 0)`.mapWith(
+              Number,
+            ),
         })
         .from(agent)
         .leftJoin(providerAsn, eq(providerAsn.asn, agent.asn))
@@ -440,25 +446,22 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
     "/blocked-ranges",
     guarded(async (c, admin) => {
       const fields = await jsonFields(c);
-      const text = typeof fields.range === "string" ? fields.range.trim() : "";
-      if (!/^[0-9A-Fa-f:.]{2,45}(?:\/\d{1,3})?$/.test(text)) {
+      // The same normalization as client addresses: host bits cleared
+      // (192.0.2.7/24 is 192.0.2.0/24), and an IPv4-mapped range is IPv4.
+      const range =
+        typeof fields.range === "string" && fields.range.length <= 64
+          ? canonicalRange(fields.range)
+          : undefined;
+      if (range === undefined) {
         return c.json({ error: "range_invalid", field: "range" }, 400);
       }
       const note = label(fields.note, false);
       if (note === undefined) {
         return c.json({ error: "note_invalid", field: "note" }, 400);
       }
-      // PostgreSQL parses the address and clears host bits: 192.0.2.7/24 is 192.0.2.0/24.
-      let range: string;
-      try {
-        const [row] = await deps.db.execute<{ range: string }>(
-          sql`select network(cast(${text} as inet))::text as range`,
-        );
-        range = String(row?.range);
-      } catch {
-        return c.json({ error: "range_invalid", field: "range" }, 400);
-      }
       return change(deps, c, admin, async (tx) => {
+        // Waits for agent writes that checked the list, and makes later ones see this range.
+        await lockBlocklistExclusive(tx);
         const inserted = await tx
           .insert(blockedRange)
           .values({ range, note: note ?? "", createdBy: admin.username })
@@ -680,7 +683,12 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
         return c.json({ error: "setting_invalid", field: parsed.field }, 400);
       }
       return change(deps, c, admin, async (tx) => {
+        // One update at a time, also before a setting's row exists, so the
+        // value read here is the one this update replaces and every change
+        // is audited.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext('mashkif:settings'))`);
         const before = await readSettings(tx);
+        await deps.testHooks?.afterSettingsRead?.();
         const changes: Record<string, { from: number; to: number }> = {};
         for (const [name, value] of Object.entries(parsed.update)) {
           const from = before[name as keyof typeof before];

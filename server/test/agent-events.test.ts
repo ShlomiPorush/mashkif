@@ -31,12 +31,13 @@ beforeEach(async () => {
 
 async function storedEvents() {
   return database.sql`select event_id, kind, occurred_at, time_uncertain, uncertain_reason,
-    agent_time from agent_event order by id`;
+    received_at from agent_event order by id`;
 }
 
 async function agentState(id: string | undefined) {
   const [row] = await database.sql`select last_event_kind, last_event_at, last_seen_at,
-    dropped_events from agent where id = ${id ?? ""}`;
+    (select coalesce(sum(count), 0)::int from agent_dropped_events d where d.agent_id = agent.id)
+    as dropped_events from agent where id = ${id ?? ""}`;
   return row;
 }
 
@@ -66,13 +67,13 @@ describe("events", () => {
     ]);
   });
 
-  it("ignores wall-clock jumps on the PC", async () => {
+  it("ignores wall-clock jumps on the PC: the request carries no wall-clock time at all", async () => {
     const agent = await syncedAgent();
     harness.now = at(10 * MINUTE);
-    // The PC clock jumped a year back and a day forward; only the monotonic time counts.
+    // A wall-clock field from an older agent build is ignored, never stored.
     const reply = await agent.events([
-      agent.event("sleep", 3 * MINUTE, { agentTime: "2025-11-01T08:03:00.000Z" }),
-      agent.event("resume", 4 * MINUTE, { agentTime: "2026-11-02T08:04:00.000Z" }),
+      { ...agent.event("sleep", 3 * MINUTE), agentTime: "2025-11-01T08:03:00.000Z" },
+      agent.event("resume", 4 * MINUTE),
     ]);
     expect(reply.status).toBe(200);
     const rows = await storedEvents();
@@ -80,8 +81,29 @@ describe("events", () => {
       at(3 * MINUTE).toISOString(),
       at(4 * MINUTE).toISOString(),
     ]);
-    expect(iso(rows[0]?.agent_time)).toBe("2025-11-01T08:03:00.000Z");
     expect(rows.every((row) => row.time_uncertain === false)).toBe(true);
+    const columns = await database.sql`select column_name from information_schema.columns
+      where table_name = 'agent_event' and column_name = 'agent_time'`;
+    expect(columns).toHaveLength(0);
+  });
+
+  it("rejects an impossible elapsed time on its own, never failing the batch", async () => {
+    const agent = await syncedAgent();
+    harness.now = at(10 * MINUTE);
+    const before = agent.event("connectivity_lost", MINUTE);
+    // The largest integer the old contract allowed, with a valid sync ID.
+    const huge = agent.event("sleep", 9007199254740991);
+    const tooLong = agent.event("sleep", 400 * DAY + 1);
+    const after = agent.event("connectivity_restored", 2 * MINUTE);
+    const reply = await agent.events([before, huge, tooLong, after]);
+    expect(reply.status).toBe(200);
+    expect(reply.body.results).toEqual([
+      { id: before.id, status: "accepted", timeUncertain: false },
+      { id: huge.id, status: "rejected", error: "event_invalid" },
+      { id: tooLong.id, status: "rejected", error: "event_invalid" },
+      { id: after.id, status: "accepted", timeUncertain: false },
+    ]);
+    expect(await storedEvents()).toHaveLength(2);
   });
 
   it("marks an event later than its receipt as time uncertain (a future time)", async () => {
@@ -114,7 +136,7 @@ describe("events", () => {
     // A sync from the previous boot is no good either: the monotonic clock restarted.
     const stale = { ...agent.event("connectivity_restored", 60_000), syncId: "x" };
     const fromOldBoot = { ...agent.event("connectivity_restored", 1000) };
-    const [row] = await database.sql`select sync_id from heartbeat`;
+    const [row] = await database.sql`select sync_id from sync_anchor`;
     fromOldBoot.syncId = String(row?.sync_id);
     const reply = await agent.events([shutdown, lost, stale, fromOldBoot]);
     expect(
@@ -195,7 +217,7 @@ describe("events", () => {
     const first = agent.syncId;
     harness.now = at(11 * MINUTE);
     const late = { ...agent.event("sleep", 0), syncId: null as string | null, elapsedMs: 0 };
-    const [initial] = await database.sql`select sync_id from heartbeat order by id limit 1`;
+    const [initial] = await database.sql`select sync_id from sync_anchor order by id limit 1`;
     late.syncId = String(initial?.sync_id);
     late.elapsedMs = 3 * MINUTE;
     expect((await agent.events([late])).status).toBe(200);
@@ -214,15 +236,26 @@ describe("events", () => {
     expect((await agentState(agent.agentId))?.last_event_kind).toBe("shutdown");
   });
 
-  it("adds up the events the agent reports it dropped", async () => {
+  it("keeps the largest dropped count per boot, so a retry counts once", async () => {
     const agent = await syncedAgent();
-    await agent.events([], 3);
-    await agent.events([], 4);
-    expect(Number((await agentState(agent.agentId))?.dropped_events)).toBe(7);
-    expect((await agent.events([], -1)).body).toMatchObject({
-      error: "request_invalid",
-      field: "droppedEvents",
-    });
+    const firstBoot = agent.bootId;
+    await agent.events([], { bootId: firstBoot, count: 3 });
+    // The same request again after a lost answer.
+    await agent.events([], { bootId: firstBoot, count: 3 });
+    expect((await agentState(agent.agentId))?.dropped_events).toBe(3);
+    await agent.events([], { bootId: firstBoot, count: 5 });
+    // An older, smaller count arriving late changes nothing.
+    await agent.events([], { bootId: firstBoot, count: 4 });
+    expect((await agentState(agent.agentId))?.dropped_events).toBe(5);
+    agent.reboot();
+    await agent.events([], { bootId: agent.bootId, count: 2 });
+    expect((await agentState(agent.agentId))?.dropped_events).toBe(7);
+    for (const bad of [-1, 3, { bootId: "nope", count: 1 }, { bootId: firstBoot, count: -1 }]) {
+      expect((await agent.post("/events", { events: [], droppedEvents: bad })).body).toMatchObject({
+        error: "request_invalid",
+        field: "droppedEvents",
+      });
+    }
   });
 
   it("refuses a body without an events array, and a revoked or blocked agent", async () => {

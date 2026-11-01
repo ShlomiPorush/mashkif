@@ -1,10 +1,10 @@
 import type { components } from "@mashkif/contracts";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { hashToken } from "../admin/setup.js";
-import type { MemoryRateLimitStore, RateLimitRule } from "../auth/rate-limit.js";
+import { MemoryRateLimitStore, type RateLimitRule } from "../auth/rate-limit.js";
 import type { Db } from "../db/client.js";
-import { agent, blockedRange } from "../db/schema.js";
+import { agent } from "../db/schema.js";
 import { describeSafely } from "../errors.js";
 import { classifyAreaCell } from "../geo/area.js";
 import { siteKeyOf } from "../geo/site.js";
@@ -20,6 +20,7 @@ import { recordEvents } from "./events.js";
 import { recordHeartbeat } from "./heartbeat.js";
 import { parseEventsRequest, parseHeartbeat, parseRegister, TOKEN_PATTERN } from "./parse.js";
 import { type RegisterHooks, registerAgent } from "./register.js";
+import { addressBlocked } from "./write-guard.js";
 
 type Schemas = components["schemas"];
 export type AgentErrorCode = Schemas["AgentErrorCode"];
@@ -33,21 +34,29 @@ export const MAX_EVENTS_PER_REQUEST = 500;
 
 /** Registrations per client address. A retry after a lost answer fits easily. */
 export const REGISTER_RATE_LIMIT: RateLimitRule = { window: 600, max: 10 };
-/** Heartbeats per token: the shortest interval is 30 seconds, plus retries. */
+/** Heartbeats per agent: the shortest interval is 30 seconds, plus retries. */
 export const HEARTBEAT_RATE_LIMIT: RateLimitRule = { window: 60, max: 10 };
-/** Events requests per token: a backlog of 500-event batches after a long time offline. */
+/** Events requests per agent: a backlog of batches after a long time offline. */
 export const EVENTS_RATE_LIMIT: RateLimitRule = { window: 60, max: 30 };
+/** Requests with a missing, malformed, or unknown token, per client address. */
+export const UNKNOWN_TOKEN_RATE_LIMIT: RateLimitRule = { window: 60, max: 20 };
 
 export interface AgentDeps {
   db: Db;
   asn: AsnLookup;
+  /** Limits of authenticated agents (by agent ID) and of unknown tokens (by address). */
   rateLimits: MemoryRateLimitStore;
+  /** Limits of registration, by address; a store of its own by default. */
+  registerRateLimits?: MemoryRateLimitStore;
   /** Defaults to the TCP peer address. */
   clientAddress?: ClientAddressResolver;
   /** The server clock; tests replace it. */
   now?: () => Date;
   bodyTimeoutMs?: number;
-  testHooks?: RegisterHooks;
+  testHooks?: RegisterHooks & {
+    /** Runs after authentication, before the write transaction. */
+    beforeWrite?: () => Promise<void>;
+  };
 }
 
 type AgentEnv = { Variables: { protocolVersion: number } };
@@ -67,26 +76,17 @@ async function readJson(c: Context): Promise<unknown> {
 }
 
 async function limited(
-  deps: AgentDeps,
+  store: MemoryRateLimitStore,
   c: Context,
   key: string,
   rule: RateLimitRule,
 ): Promise<Response | undefined> {
-  const decision = await deps.rateLimits.consume(key, rule);
+  const decision = await store.consume(key, rule);
   if (decision.allowed) {
     return undefined;
   }
   c.header("Retry-After", String(decision.retryAfter ?? rule.window));
   return refuse(c, 429, "rate_limited");
-}
-
-async function addressBlocked(db: Db, address: string): Promise<boolean> {
-  const rows = await db
-    .select({ one: sql<number>`1` })
-    .from(blockedRange)
-    .where(sql`${address}::inet <<= ${blockedRange.range}`)
-    .limit(1);
-  return rows.length > 0;
 }
 
 function clientAddress(deps: AgentDeps, c: Context): string | undefined {
@@ -97,8 +97,10 @@ function clientAddress(deps: AgentDeps, c: Context): string | undefined {
 type Authenticated = { agentId: string; address: string };
 
 /**
- * The bearer token, its rate limit, the agent's state, and the client
- * address, in that order. Returns the refusal, or the agent and address.
+ * The client address, the bearer token, and the agent's rate limit. The
+ * token is looked up first, so limiter entries exist only per agent and, for
+ * missing or unknown tokens, per client address. The agent's state and the
+ * blocked ranges are checked again inside the write transaction.
  */
 async function authenticate(
   deps: AgentDeps,
@@ -106,22 +108,32 @@ async function authenticate(
   scope: string,
   rule: RateLimitRule,
 ): Promise<Response | Authenticated> {
+  const address = clientAddress(deps, c);
+  if (address === undefined) {
+    console.error(`agent request without a usable client address: ${c.req.path}`);
+    return refuse(c, 500, "internal_error");
+  }
   const match = /^Bearer\s+(\S+)$/.exec(c.req.header("authorization") ?? "");
   const token = match?.[1];
-  if (token === undefined || !TOKEN_PATTERN.test(token)) {
-    return refuse(c, 401, "token_invalid");
+  const [row] =
+    token === undefined || !TOKEN_PATTERN.test(token)
+      ? []
+      : await deps.db
+          .select({ id: agent.id, revokedAt: agent.revokedAt, trustTier: agent.trustTier })
+          .from(agent)
+          .where(eq(agent.tokenHash, hashToken(token)));
+  if (row === undefined) {
+    const refusal = await limited(
+      deps.rateLimits,
+      c,
+      `agent:unknown:${address}`,
+      UNKNOWN_TOKEN_RATE_LIMIT,
+    );
+    return refusal ?? refuse(c, 401, "token_invalid");
   }
-  const tokenHash = hashToken(token);
-  const refusal = await limited(deps, c, `agent:${scope}:${tokenHash}`, rule);
+  const refusal = await limited(deps.rateLimits, c, `agent:${scope}:${row.id}`, rule);
   if (refusal !== undefined) {
     return refusal;
-  }
-  const [row] = await deps.db
-    .select({ id: agent.id, revokedAt: agent.revokedAt, trustTier: agent.trustTier })
-    .from(agent)
-    .where(eq(agent.tokenHash, tokenHash));
-  if (row === undefined) {
-    return refuse(c, 401, "token_invalid");
   }
   if (row.revokedAt !== null) {
     return refuse(c, 403, "agent_revoked");
@@ -129,20 +141,13 @@ async function authenticate(
   if (row.trustTier === "blocked") {
     return refuse(c, 403, "agent_blocked");
   }
-  const address = clientAddress(deps, c);
-  if (address === undefined) {
-    console.error(`agent request without a usable client address: ${c.req.path}`);
-    return refuse(c, 500, "internal_error");
-  }
-  if (await addressBlocked(deps.db, address)) {
-    return refuse(c, 403, "address_blocked");
-  }
   return { agentId: row.id, address };
 }
 
 /** The register, heartbeat, and events operations of contracts/openapi.yaml. */
 export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
   const now = deps.now ?? (() => new Date());
+  const registerLimits = deps.registerRateLimits ?? new MemoryRateLimitStore();
   const limit = boundedBody(AGENT_BODY_LIMIT_BYTES, deps.bodyTimeoutMs ?? AGENT_BODY_TIMEOUT_MS);
   app.use("/register", limit);
   app.use("/heartbeat", limit);
@@ -154,7 +159,7 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       console.error("agent registration without a usable client address");
       return refuse(c, 500, "internal_error");
     }
-    const refusal = await limited(deps, c, `agent:register:${address}`, REGISTER_RATE_LIMIT);
+    const refusal = await limited(registerLimits, c, `register:${address}`, REGISTER_RATE_LIMIT);
     if (refusal !== undefined) {
       return refusal;
     }
@@ -198,6 +203,7 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       areaCell = area === "inside" ? input.areaCell : null;
     }
     const settings = await readSettings(deps.db);
+    await deps.testHooks?.beforeWrite?.();
     const reply = await recordHeartbeat(deps.db, input, {
       agentId: auth.agentId,
       address: auth.address,
@@ -207,6 +213,9 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       intervalSentSeconds: settings.heartbeatIntervalSeconds,
       now: now(),
     });
+    if (!reply.ok) {
+      return refuse(c, 403, reply.error);
+    }
     const body: Schemas["HeartbeatResponse"] = {
       syncId: reply.syncId,
       serverTime: reply.serverTime.toISOString(),
@@ -227,14 +236,19 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
     if (parsed.value.events.length > MAX_EVENTS_PER_REQUEST) {
       return refuse(c, 413, "too_many_events");
     }
-    const results = await recordEvents(
+    await deps.testHooks?.beforeWrite?.();
+    const recorded = await recordEvents(
       deps.db,
       auth.agentId,
+      auth.address,
       parsed.value.events,
       parsed.value.droppedEvents,
       now(),
     );
-    const body: Schemas["EventsResponse"] = { results };
+    if (!recorded.ok) {
+      return refuse(c, 403, recorded.error);
+    }
+    const body: Schemas["EventsResponse"] = { results: recorded.results };
     return c.json(body, 200);
   });
 

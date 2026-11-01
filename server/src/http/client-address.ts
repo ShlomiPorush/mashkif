@@ -1,4 +1,5 @@
 import { BlockList, isIP } from "node:net";
+import { canonicalRange } from "./ip.js";
 import { type ClientAddressResolver, normalizeAddress, peerAddress } from "./request-guards.js";
 
 /**
@@ -12,42 +13,24 @@ export function parseTrustedProxies(
     .split(/[\s,]+/)
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
+  const canonical: string[] = [];
   for (const entry of entries) {
-    if (subnetOf(entry) === undefined) {
+    const range = canonicalRange(entry);
+    if (range === undefined) {
       return { ok: false, invalid: entry };
     }
+    canonical.push(range);
   }
-  return { ok: true, entries };
-}
-
-type Subnet = { address: string; prefix: number; family: "ipv4" | "ipv6" };
-
-function subnetOf(entry: string): Subnet | undefined {
-  const [address = "", prefixText, extra] = entry.split("/");
-  if (extra !== undefined) {
-    return undefined;
-  }
-  const version = isIP(address);
-  if (version === 0) {
-    return undefined;
-  }
-  const max = version === 4 ? 32 : 128;
-  if (prefixText !== undefined && !/^\d{1,3}$/.test(prefixText)) {
-    return undefined;
-  }
-  const prefix = prefixText === undefined ? max : Number(prefixText);
-  if (prefix > max) {
-    return undefined;
-  }
-  return { address, prefix, family: version === 4 ? "ipv4" : "ipv6" };
+  return { ok: true, entries: canonical };
 }
 
 function blockListOf(entries: readonly string[]): BlockList {
   const list = new BlockList();
   for (const entry of entries) {
-    const subnet = subnetOf(entry);
-    if (subnet !== undefined) {
-      list.addSubnet(subnet.address, subnet.prefix, subnet.family);
+    const range = canonicalRange(entry);
+    if (range !== undefined) {
+      const [address = "", prefix = ""] = range.split("/");
+      list.addSubnet(address, Number(prefix), isIP(address) === 4 ? "ipv4" : "ipv6");
     }
   }
   return list;

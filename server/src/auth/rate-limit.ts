@@ -26,6 +26,8 @@ export class MemoryRateLimitStore {
     const windowMs = rule.window * 1000;
     const entry = this.#entries.get(key);
     if (entry === undefined || now - entry.start >= windowMs) {
+      // Deleted and set again, so the map stays ordered by window start.
+      this.#entries.delete(key);
       this.#prune(now);
       this.#entries.set(key, { start: now, count: 1, window: windowMs });
       return { allowed: true, retryAfter: null };
@@ -37,20 +39,27 @@ export class MemoryRateLimitStore {
     return { allowed: true, retryAfter: null };
   }
 
+  /** Entries kept, for tests. */
+  get size(): number {
+    return this.#entries.size;
+  }
+
   clear(): void {
     this.#entries.clear();
   }
 
+  /**
+   * Drops expired entries from the oldest end, then, if still full, the
+   * oldest entries. Each entry is dropped at most once, so this costs O(1)
+   * per request on average instead of a scan of the whole map.
+   */
   #prune(now: number): void {
-    if (this.#entries.size < MAX_ENTRIES) {
-      return;
-    }
     for (const [key, entry] of this.#entries) {
-      if (now - entry.start >= entry.window) {
-        this.#entries.delete(key);
+      if (now - entry.start < entry.window) {
+        break;
       }
+      this.#entries.delete(key);
     }
-    // Still full: drop the oldest entries rather than grow without bound.
     for (const key of this.#entries.keys()) {
       if (this.#entries.size < MAX_ENTRIES) {
         break;
