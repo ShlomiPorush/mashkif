@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Repository guards: Hebrew text, Compose build keys, shell scripts, line
-# endings, the area selection tests, and CI configuration. Sourced by
-# scripts/verify.sh.
+# endings, the area selection and release script tests, and CI configuration.
+# Sourced by scripts/verify.sh.
 
 # The only files that may contain Hebrew. Changing this list needs the
 # maintainer's approval and an update to docs/project-foundation.md.
@@ -160,6 +160,12 @@ guard_selection_tests() {
   bash "$MASHKIF_ROOT/scripts/tests/test-select-areas.sh"
 }
 
+# scripts/release.sh against a local bare repository standing in for origin,
+# with docker and gh replaced by shims. No network, no real release.
+guard_release_tests() {
+  bash "$MASHKIF_ROOT/scripts/tests/test-release.sh"
+}
+
 # CI configuration under .github/:
 # - every action is pinned by a full commit SHA (local ./ actions excepted,
 #   docker:// references need a sha256 digest);
@@ -273,7 +279,7 @@ urllib3==2.8.0"
 
 verify_guards() {
   local name rc failed=0 env=0
-  for name in hebrew compose_build shell line_endings selection_tests ci_config; do
+  for name in hebrew compose_build shell line_endings selection_tests release_tests ci_config; do
     set +e
     "guard_$name"
     rc=$?
