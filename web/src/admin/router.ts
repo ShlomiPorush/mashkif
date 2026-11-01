@@ -6,9 +6,28 @@ export const ADMIN_PATHS = {
   signIn: "/admin/sign-in",
   totp: "/admin/totp",
   reset: "/admin/reset",
+  agents: "/admin/agents",
+  keys: "/admin/keys",
+  blocked: "/admin/blocked",
+  providers: "/admin/providers",
+  settings: "/admin/settings",
 } as const;
 
 export type AdminPath = (typeof ADMIN_PATHS)[keyof typeof ADMIN_PATHS];
+
+/** Pages of a full admin session, in navigation order; the account page is home. */
+export const MANAGEMENT_PATHS = [
+  ADMIN_PATHS.agents,
+  ADMIN_PATHS.keys,
+  ADMIN_PATHS.blocked,
+  ADMIN_PATHS.providers,
+  ADMIN_PATHS.settings,
+  ADMIN_PATHS.home,
+] as const;
+
+export function isManagementPath(path: string): path is (typeof MANAGEMENT_PATHS)[number] {
+  return (MANAGEMENT_PATHS as readonly string[]).includes(path);
+}
 
 function subscribe(onChange: () => void): () => void {
   window.addEventListener("popstate", onChange);

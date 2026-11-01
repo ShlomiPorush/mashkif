@@ -31,8 +31,72 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown):
 
 export const adminApi = {
   get: <T>(path: string) => request<T>("GET", path),
-  post: <T>(path: string, body: unknown) => request<T>("POST", path, body),
+  post: <T>(path: string, body: unknown = {}) => request<T>("POST", path, body),
 };
+
+export type TrustTier = "trusted" | "normal" | "suspicious" | "blocked";
+export type Infrastructure =
+  | "unknown"
+  | "bezeq"
+  | "hot"
+  | "ibc"
+  | "partner_fiber"
+  | "cellcom_fiber"
+  | "other";
+
+export interface AgentSummary {
+  id: string;
+  label: string | null;
+  trustTier: TrustTier;
+  agentVersion: string;
+  osVersion: string | null;
+  registeredAt: string;
+  revokedAt: string | null;
+  lastSeenAt: string | null;
+  address: string | null;
+  siteKey: string | null;
+  asn: number | null;
+  asOrganization: string | null;
+  providerName: string | null;
+  reportedCell: string | null;
+  assignedCell: string | null;
+  infrastructure: Infrastructure;
+  silenceIntervalSeconds: number | null;
+  lastEventKind: string | null;
+  lastEventAt: string | null;
+  droppedEvents: number | string;
+}
+
+export interface EnrollmentKeySummary {
+  id: number;
+  label: string;
+  createdAt: string;
+  expiresAt: string;
+  usedAt: string | null;
+  revokedAt: string | null;
+  agentId: string | null;
+  status: "active" | "used" | "expired" | "revoked";
+}
+
+export interface BlockedRange {
+  id: number;
+  range: string;
+  note: string;
+  createdAt: string;
+  createdBy: string;
+}
+
+export interface Provider {
+  id: number;
+  name: string;
+  asns: number[];
+}
+
+export interface AdminSettings {
+  heartbeatIntervalSeconds: number;
+  retentionDays: number;
+  geoip?: { state: "ok" | "unavailable"; buildDate: string | null; stale: boolean };
+}
 
 export type SessionInfo =
   | { state: "none"; ended?: "idle" | "max_age" | "invalid" }

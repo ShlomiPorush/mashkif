@@ -5,12 +5,18 @@ import { AdminApiError, adminApi, type SessionInfo } from "./api";
 import { authClient } from "./auth-client";
 import { AdminFrame, Button, Notice } from "./components";
 import { ERROR_KEYS, type ErrorKey, errorKey } from "./errors";
+import { AdminNav } from "./manage";
+import { AgentsPage } from "./pages/AgentsPage";
+import { BlockedPage } from "./pages/BlockedPage";
 import { HomePage } from "./pages/HomePage";
+import { KeysPage } from "./pages/KeysPage";
+import { ProvidersPage } from "./pages/ProvidersPage";
 import { ResetPage } from "./pages/ResetPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { SetupPage } from "./pages/SetupPage";
 import { type SessionEnded, SignInPage } from "./pages/SignInPage";
 import { TotpPage } from "./pages/TotpPage";
-import { ADMIN_PATHS, type AdminPath, navigate, usePath } from "./router";
+import { ADMIN_PATHS, type AdminPath, isManagementPath, navigate, usePath } from "./router";
 
 interface Boot {
   setupRequired: boolean;
@@ -29,7 +35,7 @@ export function targetPath(boot: Boot, path = ""): AdminPath {
     case "enrollment":
       return ADMIN_PATHS.totp;
     case "full":
-      return ADMIN_PATHS.home;
+      return isManagementPath(path) ? path : ADMIN_PATHS.home;
   }
 }
 
@@ -116,12 +122,37 @@ export function AdminApp() {
   } else if (target === ADMIN_PATHS.totp) {
     page = <TotpPage onDone={done} />;
   } else if (boot.session.state === "full") {
+    let content: ReactNode;
+    switch (target) {
+      case ADMIN_PATHS.agents:
+        content = <AgentsPage onSessionLost={refresh} />;
+        break;
+      case ADMIN_PATHS.keys:
+        content = <KeysPage onSessionLost={refresh} />;
+        break;
+      case ADMIN_PATHS.blocked:
+        content = <BlockedPage onSessionLost={refresh} />;
+        break;
+      case ADMIN_PATHS.providers:
+        content = <ProvidersPage onSessionLost={refresh} />;
+        break;
+      case ADMIN_PATHS.settings:
+        content = <SettingsPage onSessionLost={refresh} />;
+        break;
+      default:
+        content = (
+          <HomePage
+            username={boot.session.username}
+            method={boot.session.method}
+            onSessionLost={refresh}
+          />
+        );
+    }
     page = (
-      <HomePage
-        username={boot.session.username}
-        method={boot.session.method}
-        onSessionLost={refresh}
-      />
+      <div className="admin-workspace">
+        <AdminNav current={target} />
+        {content}
+      </div>
     );
   }
 

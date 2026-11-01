@@ -382,3 +382,267 @@ describe("reset page", () => {
     expect(await screen.findByRole("heading", { level: 1, name: en.reset.heading })).toBeTruthy();
   });
 });
+
+const AGENT = {
+  id: "11111111-2222-4333-8444-555555555555",
+  label: "Office PC",
+  trustTier: "normal",
+  agentVersion: "0.1.0",
+  osVersion: "10.0.26100",
+  registeredAt: "2026-11-01T08:00:00.000Z",
+  revokedAt: null,
+  lastSeenAt: "2026-11-01T09:00:00.000Z",
+  address: "203.0.113.5",
+  siteKey: "203.0.113.5",
+  asn: 64500,
+  asOrganization: "Example Net",
+  providerName: "Example",
+  reportedCell: "872d0a3c9ffffff",
+  assignedCell: null,
+  infrastructure: "partner_fiber",
+  silenceIntervalSeconds: 60,
+  lastEventKind: "connectivity_lost",
+  lastEventAt: "2026-11-01T08:30:00.000Z",
+  droppedEvents: "2",
+};
+
+const KEY = {
+  id: 7,
+  label: "Kitchen PC",
+  createdAt: "2026-11-01T08:00:00.000Z",
+  expiresAt: "2026-11-02T08:00:00.000Z",
+  usedAt: null,
+  revokedAt: null,
+  agentId: null,
+  status: "active",
+};
+
+/** Every management resource, with data. */
+function managed(extra: Routes = {}): Routes {
+  return boot(false, FULL, {
+    "/api/admin/agents": { agents: [AGENT] },
+    "/api/admin/enrollment-keys": {
+      keys: [KEY, { ...KEY, id: 8, status: "used", usedAt: "2026-11-01T09:00:00.000Z" }],
+    },
+    "/api/admin/blocked-ranges": {
+      ranges: [
+        {
+          id: 1,
+          range: "192.0.2.0/24",
+          note: "test range",
+          createdAt: "2026-11-01T08:00:00.000Z",
+          createdBy: "shlomi",
+        },
+      ],
+    },
+    "/api/admin/providers": { providers: [{ id: 3, name: "Example", asns: [64500, 64501] }] },
+    "/api/admin/settings": {
+      heartbeatIntervalSeconds: 60,
+      retentionDays: 30,
+      geoip: { state: "ok", buildDate: "2026-10-28T00:00:00.000Z", stale: false },
+    },
+    ...extra,
+  });
+}
+
+const managementPages = [
+  ["agents", "/admin/agents", en.agents.heading],
+  ["enrollment keys", "/admin/keys", en.keys.heading],
+  ["blocked addresses", "/admin/blocked", en.blocked.heading],
+  ["providers", "/admin/providers", en.providers.heading],
+  ["settings", "/admin/settings", en.settings.heading],
+] as const;
+
+describe("management pages", () => {
+  it.each(managementPages)("render the %s page with its data", async (_, path, heading) => {
+    window.history.replaceState(null, "", path);
+    serve(managed());
+    renderAdmin(createI18n("en"));
+    expect(await screen.findByRole("heading", { level: 1, name: heading })).toBeTruthy();
+    expect(window.location.pathname).toBe(path);
+    expect(screen.getByRole("navigation", { name: en.nav.label })).toBeTruthy();
+  });
+
+  it.each(managementPages)("the %s page has only locale text besides data", async (_, path) => {
+    window.history.replaceState(null, "", path);
+    serve(managed());
+    const { container } = renderAdmin(createI18n("he", pseudoResources()));
+    await screen.findByRole("heading", { level: 1 });
+    await act(async () => {});
+    expectOnlyLocaleText(container);
+  });
+
+  it.each(managementPages)("the %s page has only locale text when empty", async (_, path) => {
+    window.history.replaceState(null, "", path);
+    serve(
+      managed({
+        "/api/admin/agents": { agents: [] },
+        "/api/admin/enrollment-keys": { keys: [] },
+        "/api/admin/blocked-ranges": { ranges: [] },
+        "/api/admin/providers": { providers: [] },
+      }),
+    );
+    const { container } = renderAdmin(createI18n("he", pseudoResources()));
+    await screen.findByRole("heading", { level: 1 });
+    await act(async () => {});
+    expectOnlyLocaleText(container);
+  });
+
+  it("are not shown without a full session", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    serve(boot(false, ENROLLMENT));
+    renderAdmin(createI18n("en"));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/totp"));
+  });
+
+  it("show the site address, network, provider, area, and infrastructure of an agent", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    serve(managed());
+    renderAdmin(createI18n("en"));
+    expect(await screen.findByText("203.0.113.5")).toBeTruthy();
+    expect(screen.getByText("AS64500 · Example Net")).toBeTruthy();
+    expect(screen.getByText("872d0a3c9ffffff")).toBeTruthy();
+    expect(screen.getByText(en.agents.areaReported)).toBeTruthy();
+    expect(screen.getByText(en.infra.partnerFiber)).toBeTruthy();
+    expect(screen.getByText(en.eventKind.connectivityLost)).toBeTruthy();
+  });
+
+  it("edit the label, tier, and area of an agent", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    const calls = serve(managed({ [`POST /api/admin/agents/${AGENT.id}`]: { ok: true } }));
+    renderAdmin(createI18n("en"));
+    fireEvent.click(await screen.findByRole("button", { name: en.common.edit }));
+    fireEvent.change(screen.getByLabelText(en.agents.labelField), { target: { value: "Den" } });
+    fireEvent.change(screen.getByLabelText(en.agents.tierField), { target: { value: "trusted" } });
+    fireEvent.change(screen.getByLabelText(en.agents.areaField), {
+      target: { value: " 872D0A3C9FFFFFF " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.common.save }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.path === `/api/admin/agents/${AGENT.id}`)?.body).toEqual({
+        label: "Den",
+        trustTier: "trusted",
+        assignedCell: "872d0a3c9ffffff",
+      }),
+    );
+  });
+
+  it("revoke an agent only after a second click", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    const calls = serve(managed({ [`POST /api/admin/agents/${AGENT.id}/revoke`]: { ok: true } }));
+    renderAdmin(createI18n("en"));
+    fireEvent.click(await screen.findByRole("button", { name: en.agents.revoke }));
+    expect(calls.some((call) => call.path.endsWith("/revoke"))).toBe(false);
+    expect(screen.getByText(en.agents.revokeHelp)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: en.agents.revokeConfirm }));
+    await waitFor(() => expect(calls.some((call) => call.path.endsWith("/revoke"))).toBe(true));
+  });
+
+  it("show a new enrollment key once", async () => {
+    window.history.replaceState(null, "", "/admin/keys");
+    const secret = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    const calls = serve(
+      managed({ "POST /api/admin/enrollment-keys": { secret, key: { ...KEY, label: "Den PC" } } }),
+    );
+    renderAdmin(createI18n("en"));
+    fireEvent.change(await screen.findByLabelText(en.keys.label), { target: { value: "Den PC" } });
+    fireEvent.change(screen.getByLabelText(en.keys.validity), { target: { value: "72" } });
+    fireEvent.click(screen.getByRole("button", { name: en.keys.create }));
+    expect(await screen.findByText(secret)).toBeTruthy();
+    expect(calls.find((call) => call.method === "POST")?.body).toEqual({
+      label: "Den PC",
+      validHours: 72,
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.keys.done }));
+    expect(screen.queryByText(secret)).toBeNull();
+  });
+
+  it("offer revoke only for active keys", async () => {
+    window.history.replaceState(null, "", "/admin/keys");
+    serve(managed());
+    renderAdmin(createI18n("en"));
+    await screen.findAllByText("Kitchen PC");
+    expect(screen.getAllByRole("button", { name: en.keys.revoke })).toHaveLength(1);
+  });
+
+  it("refuse ASNs that are not numbers before sending", async () => {
+    window.history.replaceState(null, "", "/admin/providers");
+    const calls = serve(managed());
+    renderAdmin(createI18n("en"));
+    const [nameField] = await screen.findAllByLabelText(en.providers.name);
+    const [asnField] = screen.getAllByLabelText(en.providers.asns);
+    fireEvent.change(nameField as HTMLElement, { target: { value: "New" } });
+    fireEvent.change(asnField as HTMLElement, { target: { value: "64500, AS1" } });
+    fireEvent.click(screen.getByRole("button", { name: en.providers.add }));
+    expect((await screen.findByRole("alert")).textContent).toBe(en.errors.asnsInvalid);
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it("map a server refusal on a block to its message in Hebrew", async () => {
+    window.history.replaceState(null, "", "/admin/blocked");
+    serve(
+      managed({
+        "POST /api/admin/blocked-ranges": new Response(
+          JSON.stringify({ error: "range_invalid", field: "range" }),
+          { status: 400 },
+        ),
+      }),
+    );
+    renderAdmin(createI18n("he"));
+    fireEvent.change(await screen.findByLabelText(he.blocked.range), {
+      target: { value: "nope" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: he.blocked.add }));
+    expect((await screen.findByRole("alert")).textContent).toBe(he.errors.rangeInvalid);
+  });
+
+  it("save the settings and confirm", async () => {
+    window.history.replaceState(null, "", "/admin/settings");
+    const calls = serve(
+      managed({ "POST /api/admin/settings": { heartbeatIntervalSeconds: 120, retentionDays: 14 } }),
+    );
+    renderAdmin(createI18n("en"));
+    fireEvent.change(await screen.findByLabelText(en.settings.interval), {
+      target: { value: "120" },
+    });
+    fireEvent.change(screen.getByLabelText(en.settings.retention), { target: { value: "14" } });
+    fireEvent.click(screen.getByRole("button", { name: en.settings.save }));
+    expect(await screen.findByText(en.settings.saved)).toBeTruthy();
+    expect(calls.find((call) => call.method === "POST")?.body).toEqual({
+      heartbeatIntervalSeconds: 120,
+      retentionDays: 14,
+    });
+  });
+
+  it("warn when the GeoLite2-ASN database is missing", async () => {
+    window.history.replaceState(null, "", "/admin/settings");
+    serve(
+      managed({
+        "/api/admin/settings": {
+          heartbeatIntervalSeconds: 60,
+          retentionDays: 30,
+          geoip: { state: "unavailable", buildDate: null, stale: false },
+        },
+      }),
+    );
+    renderAdmin(createI18n("en"));
+    expect(await screen.findByText(en.settings.geoipUnavailable)).toBeTruthy();
+  });
+
+  it("go back to sign-in when the session ends", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    let session: unknown = FULL;
+    // Getters defined after the spread in managed(), so they run on each request.
+    const routes = managed();
+    Object.defineProperty(routes, "/api/admin/session", { get: () => session });
+    Object.defineProperty(routes, "/api/admin/agents", {
+      get: () => {
+        session = { state: "none", ended: "idle" };
+        return new Response(JSON.stringify({ error: "session_ended" }), { status: 401 });
+      },
+    });
+    serve(routes);
+    renderAdmin(createI18n("en"));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/sign-in"));
+  });
+});

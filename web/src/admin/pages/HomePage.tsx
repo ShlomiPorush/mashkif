@@ -3,20 +3,12 @@ import { useTranslation } from "react-i18next";
 import { authClient } from "../auth-client";
 import { Button, Field, Notice } from "../components";
 import { authErrorKey, ERROR_KEYS, type ErrorKey } from "../errors";
+import { useDateFormat } from "../manage";
 
 interface Passkey {
   id: string;
   name?: string | null;
   createdAt?: string | Date | null;
-}
-
-function useDateFormat() {
-  const { i18n } = useTranslation();
-  return (value: string | Date) =>
-    new Intl.DateTimeFormat(i18n.language === "he" ? "he-IL" : "en-GB", {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }).format(new Date(value));
 }
 
 function PasskeysSection({ onSessionLost }: { onSessionLost: () => Promise<void> }) {
