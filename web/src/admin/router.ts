@@ -5,6 +5,7 @@ export const ADMIN_PATHS = {
   setup: "/admin/setup",
   signIn: "/admin/sign-in",
   totp: "/admin/totp",
+  reset: "/admin/reset",
 } as const;
 
 export type AdminPath = (typeof ADMIN_PATHS)[keyof typeof ADMIN_PATHS];

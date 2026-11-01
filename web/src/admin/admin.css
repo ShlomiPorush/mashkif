@@ -318,3 +318,10 @@
     flex-wrap: wrap;
   }
 }
+
+.text-link {
+  justify-self: start;
+  color: var(--ink);
+  font-weight: 600;
+  text-underline-offset: 0.2em;
+}

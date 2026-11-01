@@ -308,3 +308,77 @@ describe("sign-in flow", () => {
     ).toBeTruthy();
   });
 });
+
+describe("reset page", () => {
+  const atReset = () => window.history.replaceState(null, "", "/admin/reset");
+
+  async function fillReset(language: typeof en | typeof he, password = "a brand new passphrase") {
+    await screen.findByRole("heading", { level: 1, name: language.reset.heading });
+    fireEvent.change(screen.getByLabelText(language.reset.token), { target: { value: "token" } });
+    fireEvent.change(screen.getByLabelText(language.reset.password), {
+      target: { value: password },
+    });
+    fireEvent.change(screen.getByLabelText(language.reset.confirm), {
+      target: { value: password },
+    });
+    fireEvent.click(screen.getByRole("button", { name: language.reset.submit }));
+  }
+
+  it("is reachable without a session and has only locale text", async () => {
+    atReset();
+    serve(boot(false, { state: "none" }));
+    const { container } = renderAdmin(createI18n("he", pseudoResources()));
+    await screen.findByRole("heading", { level: 1 });
+    expect(window.location.pathname).toBe("/admin/reset");
+    expectOnlyLocaleText(container);
+  });
+
+  it("sets the new password and goes to sign-in", async () => {
+    atReset();
+    const calls = serve(boot(false, { state: "none" }, { "POST /api/admin/reset": { ok: true } }));
+    renderAdmin(createI18n("en"));
+    await fillReset(en);
+    expect(await screen.findByRole("heading", { level: 1, name: en.signIn.heading })).toBeTruthy();
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/sign-in"));
+    expect(calls.find((call) => call.path === "/api/admin/reset")?.body).toEqual({
+      token: "token",
+      password: "a brand new passphrase",
+    });
+  });
+
+  it.each([
+    ["reset_token_expired", "resetTokenExpired"],
+    ["reset_token_used", "resetTokenUsed"],
+    ["reset_token_invalid", "resetTokenInvalid"],
+    ["password_too_short", "passwordTooShort"],
+  ] as const)("shows %s in Hebrew", async (code, key) => {
+    atReset();
+    serve(
+      boot(
+        false,
+        { state: "none" },
+        {
+          "POST /api/admin/reset": new Response(JSON.stringify({ error: code }), { status: 403 }),
+        },
+      ),
+    );
+    renderAdmin(createI18n("he"));
+    await fillReset(he);
+    expect((await screen.findByRole("alert")).textContent).toBe(he.errors[key]);
+  });
+
+  it("is not shown to a signed-in admin", async () => {
+    atReset();
+    serve(boot(false, FULL));
+    renderAdmin(createI18n("en"));
+    await screen.findByRole("heading", { level: 1 });
+    await waitFor(() => expect(window.location.pathname).toBe("/admin"));
+  });
+
+  it("is linked from the sign-in page", async () => {
+    serve(boot(false, { state: "none" }));
+    renderAdmin(createI18n("en"));
+    fireEvent.click(await screen.findByRole("link", { name: en.signIn.resetLink }));
+    expect(await screen.findByRole("heading", { level: 1, name: en.reset.heading })).toBeTruthy();
+  });
+});

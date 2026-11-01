@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { authClient } from "../auth-client";
 import { AuthPanel, Button, Command, Field, Notice } from "../components";
 import { authErrorKey, ERROR_KEYS, type ErrorKey } from "../errors";
-import { rememberPassword } from "../router";
+import { ADMIN_PATHS, navigate, rememberPassword } from "../router";
 
 export type SessionEnded = "idle" | "max_age" | "invalid" | undefined;
 
@@ -172,6 +172,16 @@ export function SignInPage({
       <div className="help-block">
         <p className="field-help">{t("signIn.lockedOut")}</p>
         <Command>{t("signIn.resetCommand")}</Command>
+        <a
+          className="text-link"
+          href={ADMIN_PATHS.reset}
+          onClick={(event) => {
+            event.preventDefault();
+            navigate(ADMIN_PATHS.reset);
+          }}
+        >
+          {t("signIn.resetLink")}
+        </a>
       </div>
     </AuthPanel>
   );

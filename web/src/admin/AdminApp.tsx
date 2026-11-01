@@ -6,6 +6,7 @@ import { authClient } from "./auth-client";
 import { AdminFrame, Button, Notice } from "./components";
 import { ERROR_KEYS, type ErrorKey, errorKey } from "./errors";
 import { HomePage } from "./pages/HomePage";
+import { ResetPage } from "./pages/ResetPage";
 import { SetupPage } from "./pages/SetupPage";
 import { type SessionEnded, SignInPage } from "./pages/SignInPage";
 import { TotpPage } from "./pages/TotpPage";
@@ -17,13 +18,14 @@ interface Boot {
 }
 
 /** Where the admin belongs, from the server's view of setup and the session. */
-export function targetPath(boot: Boot): AdminPath {
+export function targetPath(boot: Boot, path = ""): AdminPath {
   if (boot.setupRequired) {
     return ADMIN_PATHS.setup;
   }
   switch (boot.session.state) {
     case "none":
-      return ADMIN_PATHS.signIn;
+      // The reset page is reachable only without a session.
+      return path === ADMIN_PATHS.reset ? ADMIN_PATHS.reset : ADMIN_PATHS.signIn;
     case "enrollment":
       return ADMIN_PATHS.totp;
     case "full":
@@ -62,7 +64,7 @@ export function AdminApp() {
     void refresh();
   }, [refresh]);
 
-  const target = boot === undefined ? undefined : targetPath(boot);
+  const target = boot === undefined ? undefined : targetPath(boot, path);
   useEffect(() => {
     if (target !== undefined && path !== target) {
       navigate(target, true);
@@ -100,6 +102,15 @@ export function AdminApp() {
       );
   } else if (target === ADMIN_PATHS.setup) {
     page = <SetupPage onDone={done} />;
+  } else if (target === ADMIN_PATHS.reset) {
+    page = (
+      <ResetPage
+        onDone={async () => {
+          navigate(ADMIN_PATHS.signIn, true);
+          await done();
+        }}
+      />
+    );
   } else if (target === ADMIN_PATHS.signIn) {
     page = <SignInPage ended={ended} onDone={done} />;
   } else if (target === ADMIN_PATHS.totp) {

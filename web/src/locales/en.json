@@ -55,8 +55,9 @@
     "code": "6-digit code",
     "verify": "Sign in",
     "back": "Back",
-    "lockedOut": "Lost your password, authenticator, or passkey? On the server, run:",
+    "lockedOut": "Lost your password, authenticator, or passkey? On the server, run this command. It prints a one-time reset token:",
     "resetCommand": "docker compose exec app node server/dist/cli.js reset-admin",
+    "resetLink": "Set a new password with a reset token",
     "endedIdle": "You were signed out after an hour without activity. Sign in again.",
     "endedMaxAge": "Sessions last 12 hours. Sign in again."
   },
@@ -71,6 +72,15 @@
     "manual": "Can't scan? Enter this key in the app:",
     "code": "6-digit code",
     "verify": "Verify and finish"
+  },
+  "reset": {
+    "heading": "Set a new password",
+    "intro": "After reset-admin on the server, choose a new password with the reset token it printed. Then sign in and set up two-step verification again.",
+    "tokenHelp": "The token works once, for 15 minutes. To get one, run on the server:",
+    "token": "Reset token",
+    "password": "New password",
+    "confirm": "Repeat the new password",
+    "submit": "Set the password"
   },
   "passkeys": {
     "heading": "Passkeys",
@@ -95,6 +105,9 @@
     "usernameInvalid": "Use 3 to 30 English letters, digits, dots, or underscores.",
     "setupTokenInvalid": "The setup token is wrong, used, or expired. Create a new one on the server.",
     "alreadySetUp": "An admin account exists already. Sign in instead.",
+    "resetTokenInvalid": "The reset token is wrong or was replaced by a newer one. Use the latest token from reset-admin.",
+    "resetTokenExpired": "The reset token expired. Run reset-admin on the server again.",
+    "resetTokenUsed": "The reset token was used already. Sign in with your new password, or run reset-admin again.",
     "passkeyUserVerification": "The passkey must confirm it's you with a PIN, fingerprint, or face. Try again or use your password.",
     "passkeyCancelled": "The passkey request was cancelled.",
     "passkeyFailed": "This passkey didn't work. Try again or use your password and a code.",
