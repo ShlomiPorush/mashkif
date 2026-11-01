@@ -389,8 +389,9 @@ release_release_lease() {
 
 # release_run_child <command...>: runs a publishing command as a recorded child,
 # so the exit handler can wait for it before releasing the lease.
-# A background child in a non-interactive shell ignores SIGINT, so Ctrl-C does
-# not cut a push short; the exit handler waits for it instead.
+# Whatever a child does on Ctrl-C or TERM (Bash starts background children with
+# SIGINT ignored, but a program may install its own handler), the exit handler
+# waits for it to end before it touches the lease.
 release_run_child() {
   "$@" &
   local pid=$! rc=0
@@ -445,6 +446,8 @@ release_print_recovery() {
         ;;
       foreign)
         log "refs/tags/$REL_TAG already existed on $RELEASE_REMOTE and was not created by this run."
+        log "Check whether $RELEASE_REMOTE/$RELEASE_MAIN already holds the release commit $REL_RELEASE_COMMIT"
+        log "(the atomic push may have advanced it) before changing local $RELEASE_MAIN."
         log "This run published nothing. Inspect the tag with: git ls-remote $RELEASE_REMOTE refs/tags/$REL_TAG"
         log "If the tag is the intended release, publish it with: scripts/release.sh $REL_TARGET --resume $REL_VERSION"
         ;;
