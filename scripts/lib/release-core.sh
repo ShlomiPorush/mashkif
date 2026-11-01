@@ -1,12 +1,18 @@
 # shellcheck shell=bash
 # Release workflow for scripts/release.sh. Source this file; do not run it.
 #
-# Order of a release start:
-#   1. Preflight, read-only: nothing local or remote changes.
+# A release has two commands. `prepare` (release-prepare.sh) opens a pull
+# request with the version and changelog change; it never merges and never
+# pushes main. After that pull request is merged, `publish` releases its merge
+# commit:
+#   1. Preflight, read-only: no branch, tag, lease, or image changes. The
+#      source is the merge commit of the single merged release pull request,
+#      never the tip of main (release-github.sh), and it needs CI evidence.
 #   2. Publish lease: refs/release-leases/active on origin, created only when
 #      absent. One ref for every target and version, so only one release runs.
-#   3. Local release commit: version file and changelog, staged by name.
-#   4. Reservation: one atomic push of main and the tag.
+#   3. Recheck: the tag is still absent and the source still resolves to the
+#      same commit with the same evidence.
+#   4. Reservation: a push of the tag only, created at the source commit.
 #   5. Publish: build from the tag SHA in a fresh detached worktree, push, verify.
 # The exit handler waits for publishing children, then releases the lease with
 # a lease on its own SHA, and prints any state that needs manual action.
@@ -24,17 +30,17 @@ RELEASE_REVISION_LABEL=org.opencontainers.image.revision
 REL_TARGET=""
 REL_VERSION=""
 REL_TAG=""
-REL_MODE=""             # start | resume
+REL_MODE=""             # prepare | publish | resume
 REL_PREVIEW=0
 REL_VERSION_FILE=""
 REL_CHANGELOG=""
 REL_LEASE_REF=""
 REL_LEASE_SHA=""
 REL_LEASE_STATE=none    # none | pending | held | unknown | released | release-failed
-REL_ORIG_HEAD=""
-REL_EDITS_STARTED=0
-REL_RELEASE_COMMIT=""
-REL_RESERVED=no         # no | pending | yes | unknown | foreign
+REL_MAIN_SHA=""         # origin/main as last fetched
+REL_RESOLVED_SHA=""     # the source commit found by release_resolve_source
+REL_RESERVE_TRIED=0
+REL_RESERVED=no         # no | pending | yes | unconfirmed | unknown | foreign
 REL_MANUAL_CHECK=0
 REL_SOURCE_SHA=""
 REL_PUBLISHED=0
@@ -89,16 +95,24 @@ release_is_semver() {
   [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 }
 
-# release_version_gt <a> <b>: true when a > b. Both must be X.Y.Z.
+# release_version_gt <a> <b>: true when a > b. Both must be X.Y.Z. Components
+# are compared as digit strings (length, then lexicographically after leading
+# zeros are stripped), never as Bash integers, which overflow.
 release_version_gt() {
   local -a a b
-  local i
+  local i x y
   IFS=. read -r -a a <<<"$1"
   IFS=. read -r -a b <<<"$2"
   for i in 0 1 2; do
-    if ((10#${a[i]} > 10#${b[i]})); then
+    x="${a[i]}" y="${b[i]}"
+    while [[ ${#x} -gt 1 && "$x" == 0* ]]; do x="${x#0}"; done
+    while [[ ${#y} -gt 1 && "$y" == 0* ]]; do y="${y#0}"; done
+    if ((${#x} != ${#y})); then
+      ((${#x} > ${#y}))
+      return
+    elif [[ "$x" > "$y" ]]; then
       return 0
-    elif ((10#${a[i]} < 10#${b[i]})); then
+    elif [[ "$x" < "$y" ]]; then
       return 1
     fi
   done
@@ -157,6 +171,13 @@ release_changelog_promote() {
     $0 == "## [Unreleased]" { print; print ""; print heading; next }
     { print }
   '
+}
+
+# release_has_section <rev>: true when the changelog at <rev> has a section
+# for the release version.
+release_has_section() {
+  rgit show "$1:$REL_CHANGELOG" 2>/dev/null |
+    awk -v heading="## [$REL_VERSION]" 'index($0, heading) == 1 { found = 1 } END { exit !found }'
 }
 
 # ---------------------------------------------------------------------------
@@ -436,34 +457,35 @@ release_cleanup_worktree() {
 }
 
 release_print_recovery() {
-  local rc="$1" files="$REL_VERSION_FILE $REL_CHANGELOG"
-  if [[ -z "$REL_RELEASE_COMMIT" ]] && ((REL_EDITS_STARTED)); then
-    log ""
-    log "The release edits in $files were not committed. Inspect them with: git status"
-    log "To discard them: git restore --staged --worktree -- $files"
+  local rc="$1"
+  if [[ "$REL_MODE" == prepare ]]; then
+    release_prepare_print_recovery "$rc"
+    return
   fi
-  if [[ -n "$REL_RELEASE_COMMIT" && "$REL_RESERVED" != yes ]]; then
+  if ((REL_RESERVE_TRIED)) && [[ "$REL_RESERVED" != yes ]]; then
     log ""
     case "$REL_RESERVED" in
       unknown)
-        log "The reservation result is unknown: $RELEASE_REMOTE could not be read after the push."
-        log "Check it with: git ls-remote $RELEASE_REMOTE refs/heads/$RELEASE_MAIN refs/tags/$REL_TAG"
-        log "If refs/tags/$REL_TAG points at $REL_RELEASE_COMMIT, the reservation happened: run"
-        log "  scripts/release.sh $REL_TARGET --resume $REL_VERSION"
-        log "If refs/tags/$REL_TAG is absent, the reservation did not happen. Local $RELEASE_MAIN has the"
-        log "unpushed release commit; to discard it: git reset --keep $REL_ORIG_HEAD"
+        log "The reservation result is unknown: $RELEASE_REMOTE could not be read after the tag push."
+        log "Check it with: git ls-remote $RELEASE_REMOTE refs/tags/$REL_TAG"
+        log "If refs/tags/$REL_TAG points at $REL_SOURCE_SHA, the reservation happened: run"
+        log "  scripts/release.sh $REL_TARGET publish --resume $REL_VERSION"
+        log "If refs/tags/$REL_TAG is absent, nothing was tagged or published: run"
+        log "  scripts/release.sh $REL_TARGET publish --version $REL_VERSION"
+        ;;
+      unconfirmed)
+        log "refs/tags/$REL_TAG is at the source commit $REL_SOURCE_SHA, but this run cannot confirm that it created it."
+        log "Publish it with: scripts/release.sh $REL_TARGET publish --resume $REL_VERSION"
+        log "Resume checks the tag, the release pull request, $RELEASE_MAIN, and CI again before publishing."
         ;;
       foreign)
         log "refs/tags/$REL_TAG already existed on $RELEASE_REMOTE and was not created by this run."
-        log "Check whether $RELEASE_REMOTE/$RELEASE_MAIN already holds the release commit $REL_RELEASE_COMMIT"
-        log "(the atomic push may have advanced it) before changing local $RELEASE_MAIN."
         log "This run published nothing. Inspect the tag with: git ls-remote $RELEASE_REMOTE refs/tags/$REL_TAG"
-        log "If the tag is the intended release, publish it with: scripts/release.sh $REL_TARGET --resume $REL_VERSION"
+        log "If the tag is the intended release, publish it with: scripts/release.sh $REL_TARGET publish --resume $REL_VERSION"
         ;;
       *)
-        log "The reservation did not happen. Local $RELEASE_MAIN has the unpushed release commit"
-        log "$REL_RELEASE_COMMIT on top of $REL_ORIG_HEAD. This script never discards local commits."
-        log "To discard it: git reset --keep $REL_ORIG_HEAD"
+        log "The tag $REL_TAG was not created; this run tagged and published nothing."
+        log "Check the tag with: git ls-remote $RELEASE_REMOTE refs/tags/$REL_TAG"
         ;;
     esac
   fi
@@ -471,7 +493,7 @@ release_print_recovery() {
     [[ "$REL_RESERVED" == yes || ("$REL_MODE" == resume && "$REL_LEASE_ACQUIRED" == 1) ]]; then
     log ""
     log "The tag $REL_TAG is reserved, but its artifacts are not all published."
-    log "After fixing the cause, run: scripts/release.sh $REL_TARGET --resume $REL_VERSION"
+    log "After fixing the cause, run: scripts/release.sh $REL_TARGET publish --resume $REL_VERSION"
   fi
 }
 
@@ -504,6 +526,7 @@ release_on_exit() {
   fi
   release_cleanup_worktree
   release_print_recovery "$rc"
+  release_prepare_unlock
   exit "$rc"
 }
 
@@ -531,6 +554,11 @@ release_check_clean() {
 
 release_check_tools() {
   require_cmd git || return
+  require_cmd gh "install the GitHub CLI in WSL and sign in with: gh auth login" || return
+  if [[ "$REL_MODE" == prepare ]]; then
+    require_cmd flock "util-linux; prepare holds a local lock" || return
+    return 0
+  fi
   if [[ "$REL_TARGET" == server ]]; then
     require_cmd docker "the server target builds and pushes a container image" || return
     if ! docker buildx version >/dev/null 2>&1; then
@@ -599,43 +627,23 @@ release_obtain_version() {
   REL_TAG="$REL_TARGET-v$REL_VERSION"
 }
 
-release_preflight_start() {
-  local branch head remote_main rc current notes
-  release_signing_available "$REL_TARGET" || return 1
-  release_check_tools || return
-  release_check_clean || return
-  branch="$(rgit symbolic-ref -q --short HEAD)" || branch=""
-  if [[ "$branch" != "$RELEASE_MAIN" ]]; then
-    fail "a release starts on $RELEASE_MAIN; the current branch is ${branch:-a detached HEAD}"
-    return 1
-  fi
-  head="$(rgit rev-parse HEAD)" || return 1
-  remote_main="$(release_remote_ref "refs/heads/$RELEASE_MAIN")"
-  rc=$?
-  if ((rc == 2)); then
-    fail "cannot read $RELEASE_MAIN from $RELEASE_REMOTE"
+# release_fetch_main: fetches main from origin and sets REL_MAIN_SHA. Only the
+# remote-tracking ref changes; no local branch, index, or working tree.
+release_fetch_main() {
+  local tracking="refs/remotes/$RELEASE_REMOTE/$RELEASE_MAIN"
+  if ! rgit fetch -q --no-tags --no-write-fetch-head "$RELEASE_REMOTE" "+refs/heads/$RELEASE_MAIN:$tracking"; then
+    fail "cannot fetch $RELEASE_MAIN from $RELEASE_REMOTE"
     return "$MASHKIF_EXIT_ENV"
-  elif ((rc != 0)); then
-    fail "$RELEASE_REMOTE has no $RELEASE_MAIN branch"
-    return 1
-  elif [[ "$remote_main" != "$head" ]]; then
-    fail "local $RELEASE_MAIN ($head) is not the same as $RELEASE_REMOTE/$RELEASE_MAIN ($remote_main); pull or push first"
-    return 1
   fi
-  release_obtain_version || return
-  current="$(release_version_at HEAD)" || return 1
-  if ! release_is_semver "$current"; then
-    fail "the current $REL_TARGET version '$current' in $REL_VERSION_FILE is not X.Y.Z"
-    return 1
-  fi
-  if ! release_version_gt "$REL_VERSION" "$current"; then
-    fail "version $REL_VERSION is not greater than the current $REL_TARGET version $current"
-    return 1
-  fi
-  if ! notes="$(rgit show "HEAD:$REL_CHANGELOG" 2>/dev/null | release_changelog_check "$REL_VERSION")"; then
-    fail "$REL_CHANGELOG cannot be promoted: ${notes:-it is missing}"
-    return 1
-  fi
+  REL_MAIN_SHA="$(rgit rev-parse --verify -q "$tracking^{commit}")" || {
+    fail "cannot read $tracking after fetching"
+    return "$MASHKIF_EXIT_ENV"
+  }
+}
+
+# release_check_tag_absent: the release tag exists neither locally nor on origin.
+release_check_tag_absent() {
+  local rc
   if rgit rev-parse -q --verify "refs/tags/$REL_TAG" >/dev/null; then
     fail "the tag $REL_TAG already exists locally"
     return 1
@@ -643,36 +651,106 @@ release_preflight_start() {
   release_remote_ref "refs/tags/$REL_TAG" >/dev/null
   rc=$?
   if ((rc == 0)); then
-    fail "the tag $REL_TAG already exists on $RELEASE_REMOTE; to finish that release use --resume $REL_VERSION"
+    fail "the tag $REL_TAG already exists on $RELEASE_REMOTE; to finish that release use: scripts/release.sh $REL_TARGET publish --resume $REL_VERSION"
     return 1
   elif ((rc == 2)); then
     fail "cannot read tags from $RELEASE_REMOTE"
     return "$MASHKIF_EXIT_ENV"
   fi
-  release_refuse_if_leased || return
-  release_preflight_artifacts_absent || return
-  REL_ORIG_HEAD="$head"
-  log "Preflight passed: $REL_TARGET $current -> $REL_VERSION, tag $REL_TAG, from $RELEASE_MAIN at $head."
 }
 
-# release_recheck_after_lease: the start preflight ran before the lease was
-# held, so another run may have released in between (in this checkout or
-# elsewhere). Refuse unless the repository is still exactly as checked.
-release_recheck_after_lease() {
-  local branch head remote_main rc
-  release_check_clean || return
-  branch="$(rgit symbolic-ref -q --short HEAD)" || branch=""
-  head="$(rgit rev-parse HEAD)" || return 1
-  remote_main="$(release_remote_ref "refs/heads/$RELEASE_MAIN")"
-  rc=$?
-  if ((rc == 2)); then
-    fail "cannot read $RELEASE_MAIN from $RELEASE_REMOTE after taking the lease"
-    return "$MASHKIF_EXIT_ENV"
-  fi
-  if [[ "$branch" != "$RELEASE_MAIN" || "$head" != "$REL_ORIG_HEAD" || "$remote_main" != "$REL_ORIG_HEAD" ]]; then
-    fail "the repository changed while this run waited for the lease ($RELEASE_MAIN was $REL_ORIG_HEAD; now local ${head:-unknown}, $RELEASE_REMOTE ${remote_main:-unknown}); start the release again"
+# release_resolve_source: finds the release source and sets REL_RESOLVED_SHA.
+# - Source rule: the merge commit of the single merged release pull request,
+#   an ancestor of the freshly fetched origin/main, carrying the version and a
+#   changelog section for it. Later merges to main never change the source.
+# - Revert rule: origin/main still has that changelog section and a version
+#   not lower than the release, so a reverted release pull request refuses.
+# - CI evidence for the source commit (release_ci_evidence).
+# Runs before and after the lease.
+release_resolve_source() {
+  local sha version main_version
+  REL_RESOLVED_SHA=""
+  release_fetch_main || return
+  release_find_merged_pr || return
+  sha="$REL_PR_MERGE"
+  if ! rgit cat-file -e "$sha^{commit}" 2>/dev/null ||
+    ! rgit merge-base --is-ancestor "$sha" "$REL_MAIN_SHA" 2>/dev/null; then
+    fail "the merge commit $sha of $REL_PR_URL is not on $RELEASE_REMOTE/$RELEASE_MAIN"
     return 1
   fi
+  version="$(release_version_at "$sha")" || return 1
+  if [[ "$version" != "$REL_VERSION" ]]; then
+    fail "$REL_VERSION_FILE at the merge commit $sha of $REL_PR_URL says $version, not $REL_VERSION"
+    return 1
+  fi
+  if ! release_has_section "$sha"; then
+    fail "$REL_CHANGELOG at the merge commit $sha of $REL_PR_URL has no \"## [$REL_VERSION]\" section"
+    return 1
+  fi
+  if ! release_has_section "$REL_MAIN_SHA"; then
+    fail "$REL_CHANGELOG on $RELEASE_REMOTE/$RELEASE_MAIN ($REL_MAIN_SHA) no longer has the \"## [$REL_VERSION]\" section; the release looks reverted"
+    return 1
+  fi
+  main_version="$(release_version_at "$REL_MAIN_SHA")" || return 1
+  if ! release_is_semver "$main_version"; then
+    fail "$REL_VERSION_FILE on $RELEASE_REMOTE/$RELEASE_MAIN ($REL_MAIN_SHA) says '$main_version', which is not X.Y.Z"
+    return 1
+  fi
+  if release_version_gt "$REL_VERSION" "$main_version"; then
+    fail "$REL_VERSION_FILE on $RELEASE_REMOTE/$RELEASE_MAIN ($REL_MAIN_SHA) says $main_version, lower than $REL_VERSION; the release looks reverted"
+    return 1
+  fi
+  release_ci_evidence "$sha" || return
+  REL_RESOLVED_SHA="$sha"
+}
+
+release_preflight_publish() {
+  release_signing_available "$REL_TARGET" || return 1
+  release_check_tools || return
+  release_check_clean || return
+  release_obtain_version || return
+  release_repo_identity || return
+  release_check_tag_absent || return
+  release_refuse_if_leased || return
+  release_preflight_artifacts_absent || return
+  release_resolve_source || return
+  REL_SOURCE_SHA="$REL_RESOLVED_SHA"
+  log "Preflight passed: publish $REL_TARGET $REL_VERSION from $REL_SOURCE_SHA, the merge commit of $REL_PR_URL."
+}
+
+# release_recheck_after_lease: the preflight ran before the lease was held, so
+# another run may have released in between, the release may have been
+# reverted, or the CI evidence may have changed. Everything is read again.
+release_recheck_after_lease() {
+  local rc sha
+  if [[ "$REL_MODE" == publish ]]; then
+    release_remote_ref "refs/tags/$REL_TAG" >/dev/null
+    rc=$?
+    if ((rc == 0)); then
+      fail "the tag $REL_TAG was created on $RELEASE_REMOTE while this run waited for the lease; nothing was changed"
+      return 1
+    fi
+  else
+    sha="$(release_remote_ref "refs/tags/$REL_TAG")"
+    rc=$?
+    if ((rc == 0)) && [[ "$sha" != "$REL_SOURCE_SHA" ]]; then
+      fail "refs/tags/$REL_TAG moved from $REL_SOURCE_SHA to $sha while this run waited for the lease; stopping"
+      return 1
+    elif ((rc == 1)); then
+      fail "refs/tags/$REL_TAG disappeared from $RELEASE_REMOTE while this run waited for the lease; stopping"
+      return 1
+    fi
+  fi
+  if ((rc == 2)); then
+    fail "cannot read tags from $RELEASE_REMOTE after taking the lease"
+    return "$MASHKIF_EXIT_ENV"
+  fi
+  release_resolve_source || return
+  if [[ "$REL_RESOLVED_SHA" != "$REL_SOURCE_SHA" ]]; then
+    fail "the release source changed from $REL_SOURCE_SHA to $REL_RESOLVED_SHA while this run waited for the lease; start again"
+    return 1
+  fi
+  log "Rechecked after taking the lease: the source is still $REL_SOURCE_SHA."
 }
 
 release_preflight_artifacts_absent() {
@@ -688,12 +766,16 @@ release_preflight_artifacts_absent() {
   esac
 }
 
+# release_preflight_resume: the tag already exists on origin. It is published
+# only when it points at the release pull request's merge commit and that
+# commit passes the same source, revert, and CI checks as publish.
 release_preflight_resume() {
   local rc
   release_signing_available "$REL_TARGET" || return 1
   release_check_tools || return
   release_check_clean || return
   release_obtain_version || return
+  release_repo_identity || return
   REL_SOURCE_SHA="$(release_remote_ref "refs/tags/$REL_TAG")"
   rc=$?
   if ((rc == 1)); then
@@ -704,60 +786,37 @@ release_preflight_resume() {
     return "$MASHKIF_EXIT_ENV"
   fi
   release_refuse_if_leased || return
-  log "Preflight passed: resume $REL_TAG at $REL_SOURCE_SHA."
+  release_resolve_source || return
+  if [[ "$REL_RESOLVED_SHA" != "$REL_SOURCE_SHA" ]]; then
+    fail "refs/tags/$REL_TAG points at $REL_SOURCE_SHA, not at $REL_RESOLVED_SHA, the merge commit of $REL_PR_URL; it is not resumed"
+    return 1
+  fi
+  log "Preflight passed: resume $REL_TAG at $REL_SOURCE_SHA, the merge commit of $REL_PR_URL."
 }
 
 # ---------------------------------------------------------------------------
-# Release commit and reservation
+# Reservation
 
-# release_rewrite <path> <filter...>: rewrites a tracked file from its HEAD
-# content through a filter, keeping the exact trailing newlines.
-release_rewrite() {
-  local path="$1" content
-  shift
-  content="$(rgit show "HEAD:$path" | "$@" && printf x)" || return 1
-  printf '%s' "${content%x}" >"$MASHKIF_ROOT/$path"
-}
-
-release_make_commit() {
-  local changed expected
-  REL_EDITS_STARTED=1
-  release_rewrite "$REL_VERSION_FILE" release_write_version "$REL_TARGET" "$REL_VERSION" || return 1
-  release_rewrite "$REL_CHANGELOG" release_changelog_promote "$REL_VERSION" "$(date -u +%F)" || return 1
-  if [[ "$(release_read_version "$REL_TARGET" <"$MASHKIF_ROOT/$REL_VERSION_FILE")" != "$REL_VERSION" ]]; then
-    fail "the version update of $REL_VERSION_FILE did not produce $REL_VERSION"
-    return 1
-  fi
-  rgit add -- "$REL_VERSION_FILE" "$REL_CHANGELOG" || return 1
-  rgit commit -q -m "Release $REL_TARGET $REL_VERSION" || return 1
-  REL_RELEASE_COMMIT="$(rgit rev-parse HEAD)" || return 1
-  changed="$(rgit diff-tree --no-commit-id --name-only -r "$REL_RELEASE_COMMIT" | sort)"
-  expected="$(printf '%s\n' "$REL_VERSION_FILE" "$REL_CHANGELOG" | sort)"
-  if [[ "$changed" != "$expected" ]]; then
-    fail "the release commit changed unexpected files: $changed"
-    return 1
-  fi
-  log "Created the local release commit $REL_RELEASE_COMMIT."
-}
-
+# release_reserve: creates the tag at the source commit with a push of that
+# tag only. Only porcelain status "*" (created) counts as this run's tag.
 release_reserve() {
-  local out rc main_flag tag_flag tag_sha main_ref="refs/heads/$RELEASE_MAIN" tag_ref="refs/tags/$REL_TAG"
+  local out rc tag_flag tag_ref="refs/tags/$REL_TAG"
   out="$REL_RUN_DIR/reservation-push"
   # Until the result is parsed, the exit handler reads origin to decide.
+  REL_RESERVE_TRIED=1
   REL_RESERVED=pending
-  release_push "$out" --atomic "$RELEASE_REMOTE" "$REL_RELEASE_COMMIT:$main_ref" "$REL_RELEASE_COMMIT:$tag_ref"
+  release_push "$out" "$RELEASE_REMOTE" "$REL_SOURCE_SHA:$tag_ref"
   rc=$?
-  main_flag="$(release_flag "$out" "$main_ref")"
   tag_flag="$(release_flag "$out" "$tag_ref")"
-  if ((rc == 0)) && [[ ("$main_flag" == " " || "$main_flag" == "*") && "$tag_flag" == "*" ]]; then
+  if ((rc == 0)) && [[ "$tag_flag" == "*" ]]; then
     REL_RESERVED=yes
   elif [[ "$tag_flag" == "=" ]]; then
     REL_RESERVED=foreign
     fail "the reservation did not create $tag_ref; it already existed on $RELEASE_REMOTE"
     release_push_details "$out"
-  elif [[ "$main_flag" == "!" || "$tag_flag" == "!" ]]; then
+  elif [[ "$tag_flag" == "!" ]]; then
     REL_RESERVED=no
-    fail "$RELEASE_REMOTE rejected the reservation of $RELEASE_MAIN and $REL_TAG:"
+    fail "$RELEASE_REMOTE rejected the creation of $tag_ref:"
     release_push_details "$out"
   else
     log "The reservation push gave no clear answer (exit $rc); reading $RELEASE_REMOTE."
@@ -766,23 +825,25 @@ release_reserve() {
   fi
   rm -f -- "$out" "$out.err"
   [[ "$REL_RESERVED" == yes ]] || return 1
-  log "Reserved $tag_ref and $RELEASE_MAIN at $REL_RELEASE_COMMIT."
+  log "Reserved $tag_ref at $REL_SOURCE_SHA."
 }
 
 # release_resolve_reservation: decides the reservation from origin after a
-# lost, ambiguous, or interrupted reservation push. The release commit is
-# unique to this run, so the tag at that commit means the push happened.
+# lost, ambiguous, or interrupted tag push. The source commit is the release
+# pull request's merge commit, not unique to this run, so a tag at it may have
+# been created by hand: without porcelain "*" it is never taken as this run's
+# tag. The run stops, and --resume, which checks everything again, publishes.
 release_resolve_reservation() {
   local tag_ref="refs/tags/$REL_TAG" tag_sha
   tag_sha="$(release_remote_ref "$tag_ref")"
   case $? in
     0)
-      if [[ "$tag_sha" == "$REL_RELEASE_COMMIT" ]]; then
-        REL_RESERVED=yes
-        log "Origin shows $tag_ref at the release commit; the reservation happened."
+      if [[ "$tag_sha" == "$REL_SOURCE_SHA" ]]; then
+        REL_RESERVED=unconfirmed
+        fail "origin shows $tag_ref at the source commit, but this run has no proof that it created the tag; nothing was published"
       else
         REL_RESERVED=foreign
-        fail "$tag_ref on $RELEASE_REMOTE points at $tag_sha, not at this run's release commit"
+        fail "$tag_ref on $RELEASE_REMOTE points at $tag_sha, not at the source commit $REL_SOURCE_SHA"
       fi
       ;;
     1)
@@ -796,20 +857,17 @@ release_resolve_reservation() {
   esac
 }
 
-# release_verify_source: reads the tag SHA from origin after the lease, makes
-# sure the commit is present locally, and checks that it carries the version.
+# release_verify_source: reads the tag SHA from origin after the reservation
+# (or, for resume, after the lease), makes sure the commit is present locally,
+# and checks that it is the source commit and carries the version.
 release_verify_source() {
   local sha version
   sha="$(release_remote_ref "refs/tags/$REL_TAG")" || {
     fail "cannot read refs/tags/$REL_TAG from $RELEASE_REMOTE"
     return 1
   }
-  if [[ "$REL_MODE" == start && "$sha" != "$REL_RELEASE_COMMIT" ]]; then
-    fail "refs/tags/$REL_TAG points at $sha, not at the release commit $REL_RELEASE_COMMIT"
-    return 1
-  fi
-  if [[ "$REL_MODE" == resume && "$sha" != "$REL_SOURCE_SHA" ]]; then
-    fail "refs/tags/$REL_TAG moved from $REL_SOURCE_SHA to $sha during preflight; stopping"
+  if [[ "$sha" != "$REL_SOURCE_SHA" ]]; then
+    fail "refs/tags/$REL_TAG points at $sha, not at the source commit $REL_SOURCE_SHA; stopping"
     return 1
   fi
   if ! rgit cat-file -e "$sha^{commit}" 2>/dev/null; then
@@ -828,7 +886,6 @@ release_verify_source() {
     fail "$REL_VERSION_FILE at $sha says $version, not $REL_VERSION"
     return 1
   fi
-  REL_SOURCE_SHA="$sha"
 }
 
 # ---------------------------------------------------------------------------
@@ -951,26 +1008,17 @@ release_publish() {
 # Preview
 
 release_print_preview() {
-  local current
+  local state
   log ""
-  log "Preview only: nothing was changed."
-  if [[ "$REL_MODE" == start ]]; then
-    current="$(release_version_at HEAD)"
-    log "A release would:"
+  log "Preview only: no branch, tag, lease, pull request, or image was changed."
+  if [[ "$REL_MODE" == publish ]]; then
+    log "A publish would:"
     log "  1. create the publish lease $RELEASE_LEASE_REF on $RELEASE_REMOTE, recording $REL_TAG"
-    log "  2. commit $REL_VERSION_FILE ($current -> $REL_VERSION) and promote Unreleased in $REL_CHANGELOG"
-    log "  3. push $RELEASE_MAIN and refs/tags/$REL_TAG to $RELEASE_REMOTE in one atomic push"
+    log "  2. read the tag, the release pull request, $RELEASE_MAIN, and CI again"
+    log "  3. push refs/tags/$REL_TAG at $REL_SOURCE_SHA, the merge commit of $REL_PR_URL"
     log "  4. build and push $(release_image_ref) from the tag commit, then verify its digest"
     log "  5. release the lease"
-    log ""
-    log "Release notes for $REL_VERSION:"
-    rgit show "HEAD:$REL_CHANGELOG" | awk '
-      $0 == "## [Unreleased]" { inside = 1; next }
-      /^## / { inside = 0 }
-      inside { print "    " $0 }
-    ' >&2
   else
-    local state
     state="$(release_image_state "$REL_SOURCE_SHA")" || return
     log "A resume would build from $REL_SOURCE_SHA (refs/tags/$REL_TAG) under a new lease."
     log "  $(release_image_ref): $state"
@@ -981,9 +1029,15 @@ release_print_preview() {
 # Entry
 
 release_main() {
+  if [[ "$REL_MODE" == prepare ]]; then
+    # Called in a || list like every other step, so its expected non-zero
+    # statuses (an absent ref, for example) are handled, not fatal.
+    release_prepare_main || return
+    return 0
+  fi
   if ((REL_PREVIEW)); then
-    if [[ "$REL_MODE" == start ]]; then
-      release_preflight_start || return
+    if [[ "$REL_MODE" == publish ]]; then
+      release_preflight_publish || return
     else
       release_preflight_resume || return
     fi
@@ -993,17 +1047,16 @@ release_main() {
 
   # Installed before the lease push, so an interrupted run resolves its lease.
   release_install_traps
-  if [[ "$REL_MODE" == start ]]; then
-    release_preflight_start || return
-    release_make_run_dir || return
-    release_acquire_lease || return 1
-    release_recheck_after_lease || return
-    release_make_commit || return 1
-    release_reserve || return 1
+  if [[ "$REL_MODE" == publish ]]; then
+    release_preflight_publish || return
   else
     release_preflight_resume || return
-    release_make_run_dir || return
-    release_acquire_lease || return 1
+  fi
+  release_make_run_dir || return
+  release_acquire_lease || return 1
+  release_recheck_after_lease || return
+  if [[ "$REL_MODE" == publish ]]; then
+    release_reserve || return 1
   fi
   release_verify_source || return 1
   release_publish || return 1
@@ -1012,7 +1065,7 @@ release_main() {
   if [[ -n "$REL_IMAGE_DIGEST" ]]; then
     log "  image: $(release_image_ref)@$REL_IMAGE_DIGEST"
   fi
-  if [[ "$REL_MODE" == start ]]; then
+  if [[ "$REL_MODE" == publish ]]; then
     log "  No local tag was created; fetch it with: git fetch $RELEASE_REMOTE tag $REL_TAG"
   fi
 }
