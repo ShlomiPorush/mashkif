@@ -31,11 +31,11 @@ info:
     recorded for that sync ID, so wall-clock changes on the PC do not move
     events.
 
-    The server keeps the newest 1440 sync IDs of each agent, about one day of
-    heartbeats at the default interval. No sync ID is created while an agent
-    is offline, so the one it holds survives any time offline; after
-    reconnecting, the agent has 1440 heartbeats to upload its queue. An event
-    whose sync ID is no longer kept is stored as time uncertain.
+    The server keeps a sync ID as long as fewer than 1440 newer sync IDs exist
+    for that agent (about one day of heartbeats at the default interval),
+    counting heartbeats whose responses were lost. No sync ID is created
+    while an agent is offline, so time offline alone never removes the one it
+    holds. After that, events that refer to it are stored as time uncertain.
 
     ## Limits
 

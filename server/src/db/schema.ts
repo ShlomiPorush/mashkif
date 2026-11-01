@@ -341,11 +341,12 @@ export const heartbeat = pgTable(
 );
 
 /**
- * Sync anchors kept per agent: about one day of heartbeats at the default
- * 60-second interval. No anchor is created while an agent is offline, so the
- * anchor it holds survives any time offline; after reconnecting it has this
- * many heartbeats to upload its queue. An event whose anchor was evicted is
- * time uncertain.
+ * Sync anchors kept per agent (about one day of heartbeats at the default
+ * 60-second interval): an anchor is kept as long as fewer than this many
+ * newer anchors exist for that agent, including heartbeats whose responses
+ * were lost. No anchor is created while an agent is offline, so time offline
+ * alone never evicts the one it holds. After that, events that refer to it
+ * are time uncertain.
  */
 export const MAX_SYNC_ANCHORS_PER_AGENT = 1440;
 

@@ -194,6 +194,18 @@ describe("boot counters", () => {
     expect(rows.slice(1)).toEqual(historical.slice(2));
   });
 
+  it("protects the current boot when its counter arrives after 10 historical ones", async () => {
+    const agent = await new TestAgent(harness).enroll(database);
+    await agent.heartbeat(); // the current boot, no counter row yet
+    for (let i = 0; i < 10; i++) {
+      await agent.events([], { bootId: randomUUID(), count: 1 });
+    }
+    await agent.events([], { bootId: agent.bootId, count: 2 });
+    const rows = await bootRows();
+    expect(rows).toHaveLength(10);
+    expect(rows).toContain(agent.bootId);
+  });
+
   it("deletes the anchors and boot counters of a revoked agent", async () => {
     const browser = await fullAdmin(database, harness);
     const agent = await new TestAgent(harness).enroll(database);
