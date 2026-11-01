@@ -417,3 +417,73 @@ mashkif_http_status() {
       .then((r) => console.log(r.status), () => console.log("000"));
   ' "$2" 2>/dev/null || printf '000\n'
 }
+
+MASHKIF_WAIT_TIMEOUT="${MASHKIF_WAIT_TIMEOUT:-180}"
+
+mashkif_dev_failure_context() {
+  log "Containers:"
+  mashkif_dev_compose ps -a >&2 || true
+  log "Recent logs:"
+  mashkif_dev_compose logs --no-color --tail 40 app db >&2 || true
+}
+
+# mashkif_dev_compose_up [up-args...]: `up -d --wait` with a clear message for
+# an occupied host port or an unhealthy service.
+mashkif_dev_compose_up() {
+  local out
+  if ! out="$(mashkif_dev_compose up -d --wait --wait-timeout "$MASHKIF_WAIT_TIMEOUT" "$@" 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    if grep -qiE 'port is already allocated|address already in use|ports are not available' <<<"$out"; then
+      fail "the host port for app is in use; free it or change the published port in $MASHKIF_DEV_COMPOSE_FILE"
+    else
+      fail "the environment did not become healthy within ${MASHKIF_WAIT_TIMEOUT}s"
+    fi
+    mashkif_dev_failure_context
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+  printf '%s\n' "$out" >&2
+}
+
+# mashkif_dev_check_running <expected-app-image-id> <description>: health of
+# app and db, non-root UIDs for every process in both, /readyz, and the image
+# the app container runs. Leaves the environment running on failure.
+mashkif_dev_check_running() {
+  local expected="$1" description="$2" app db failures=0 status image service container
+  app="$(mashkif_container_id app)"
+  db="$(mashkif_container_id db)"
+  if [[ -z "$app" || -z "$db" ]]; then
+    fail "the app or db container is missing"
+    mashkif_dev_failure_context
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+  for service in app db; do
+    container="$app"
+    [[ "$service" == db ]] && container="$db"
+    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null || true)"
+    if [[ "$status" == healthy ]]; then
+      log "  ok    $service is healthy"
+    else
+      fail "$service health is ${status:-unknown}"
+      failures=$((failures + 1))
+    fi
+    mashkif_check_container_uids "$container" "$service" || failures=$((failures + 1))
+  done
+  status="$(mashkif_http_status "$app" /readyz)"
+  if [[ "$status" == 200 ]]; then
+    log "  ok    app /readyz answers 200"
+  else
+    fail "app /readyz answered $status"
+    failures=$((failures + 1))
+  fi
+  image="$(docker inspect -f '{{.Image}}' "$app" 2>/dev/null || true)"
+  if [[ "$image" == "$expected" ]]; then
+    log "  ok    $description ($image)"
+  else
+    fail "app runs image ${image:-unknown}, expected $expected"
+    failures=$((failures + 1))
+  fi
+  if ((failures)); then
+    log "The environment is left running for inspection."
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+}

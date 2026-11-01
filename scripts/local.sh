@@ -13,8 +13,6 @@ source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/dev-env.sh
 source "$SCRIPT_DIR/lib/dev-env.sh"
 
-MASHKIF_WAIT_TIMEOUT=180
-
 usage() {
   cat <<EOF
 Usage:
@@ -94,72 +92,6 @@ build_image() {
   log "built $MASHKIF_DEV_IMAGE: $BUILT_IMAGE_ID"
 }
 
-show_failure_context() {
-  log "Containers:"
-  mashkif_dev_compose ps -a >&2 || true
-  log "Recent logs:"
-  mashkif_dev_compose logs --no-color --tail 40 app db >&2 || true
-}
-
-start_detached() {
-  local out
-  log "starting $MASHKIF_DEV_PROJECT"
-  if ! out="$(mashkif_dev_compose up -d --wait --wait-timeout "$MASHKIF_WAIT_TIMEOUT" --remove-orphans 2>&1)"; then
-    printf '%s\n' "$out" >&2
-    if grep -qiE 'port is already allocated|address already in use|ports are not available' <<<"$out"; then
-      fail "the host port for app is in use; free it or change the published port in $MASHKIF_DEV_COMPOSE_FILE"
-    else
-      fail "the environment did not become healthy within ${MASHKIF_WAIT_TIMEOUT}s"
-    fi
-    show_failure_context
-    return "$MASHKIF_EXIT_FAILED"
-  fi
-  printf '%s\n' "$out" >&2
-}
-
-# post_start_checks <expected-app-image-id>: health, runtime identity, and the
-# running image. Leaves the environment running for inspection on failure.
-post_start_checks() {
-  local expected="$1" app db failures=0 status image service container
-  app="$(mashkif_container_id app)"
-  db="$(mashkif_container_id db)"
-  if [[ -z "$app" || -z "$db" ]]; then
-    fail "the app or db container is missing after startup"
-    show_failure_context
-    return "$MASHKIF_EXIT_FAILED"
-  fi
-  for service in app db; do
-    container="$app"
-    [[ "$service" == db ]] && container="$db"
-    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
-    if [[ "$status" == healthy ]]; then
-      log "  ok    $service is healthy"
-    else
-      fail "$service health is $status"
-      failures=$((failures + 1))
-    fi
-    mashkif_check_container_uids "$container" "$service" || failures=$((failures + 1))
-  done
-  status="$(mashkif_http_status "$app" /readyz)"
-  if [[ "$status" == 200 ]]; then
-    log "  ok    app /readyz answers 200"
-  else
-    fail "app /readyz answered $status"
-    failures=$((failures + 1))
-  fi
-  image="$(docker inspect -f '{{.Image}}' "$app")"
-  if [[ "$image" == "$expected" ]]; then
-    log "  ok    app runs the image just built ($image)"
-  else
-    fail "app runs image $image, expected $expected"
-    failures=$((failures + 1))
-  fi
-  if ((failures)); then
-    log "The environment is left running for inspection; scripts/local.sh down stops it."
-    return "$MASHKIF_EXIT_FAILED"
-  fi
-}
-
 cmd_build() {
   preflight || return
   mashkif_dev_lock || return
@@ -177,8 +109,9 @@ cmd_up() {
   check_settings || return
   build_image || return
   mashkif_data_prepare "$DATA_DIR" || return
-  start_detached || return
-  post_start_checks "$BUILT_IMAGE_ID" || return
+  log "starting $MASHKIF_DEV_PROJECT"
+  mashkif_dev_compose_up --remove-orphans || return
+  mashkif_dev_check_running "$BUILT_IMAGE_ID" "app runs the image just built" || return
   port="$(mashkif_dev_compose port app 8080 2>/dev/null || true)"
   log "Mashkif is running: http://${port:-127.0.0.1:<port>}"
   ((detach)) && return 0
