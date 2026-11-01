@@ -1,0 +1,58 @@
+name: Bug report
+description: Report something that does not work as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report security vulnerabilities privately, not here. See the [security policy](https://github.com/ShlomiPorush/mashkif/security/policy).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Describe the problem. Include error messages and log lines, without personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - agent
+        - server
+        - web
+        - contracts
+        - infrastructure
+        - docs
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The release version, or the commit SHA you built from.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: For example the Windows version, the browser, or the Docker version.
+    validations:
+      required: false
