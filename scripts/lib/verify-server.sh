@@ -3,8 +3,8 @@
 # readiness tests against a real PostgreSQL container. Sourced by
 # scripts/verify.sh.
 
-# shellcheck source=verify-contracts.sh
-source "$MASHKIF_ROOT/scripts/lib/verify-contracts.sh"
+# shellcheck source=node-container.sh
+source "$MASHKIF_ROOT/scripts/lib/node-container.sh"
 
 MASHKIF_POSTGRES_IMAGE="postgres:18.6-bookworm@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8"
 

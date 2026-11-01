@@ -2,8 +2,8 @@
 # Web area: format, lint, typecheck, tests, and production build of web/ in the
 # Node container. Sourced by scripts/verify.sh.
 
-# shellcheck source=verify-contracts.sh
-source "$MASHKIF_ROOT/scripts/lib/verify-contracts.sh"
+# shellcheck source=node-container.sh
+source "$MASHKIF_ROOT/scripts/lib/node-container.sh"
 
 verify_web() {
   mashkif_js_setup || return

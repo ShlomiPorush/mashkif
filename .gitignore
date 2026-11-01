@@ -29,3 +29,6 @@ TestResults/
 *.user
 .DS_Store
 Thumbs.db
+
+# Vite writes temporary bundled config files next to vite.config.ts
+vite.config.*.timestamp-*
