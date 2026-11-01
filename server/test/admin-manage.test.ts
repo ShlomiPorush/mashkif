@@ -109,7 +109,9 @@ describe("enrollment keys", () => {
       from enrollment_key`;
     expect(row?.key_hash).toBe(hashToken(secret));
     expect(row?.created_by).toBe(USERNAME.toLowerCase());
-    expect(Date.parse(String(row?.expires_at)) - Date.parse(String(row?.created_at))).toBe(2 * 60 * 60 * 1000);
+    expect(Date.parse(String(row?.expires_at)) - Date.parse(String(row?.created_at))).toBe(
+      2 * 60 * 60 * 1000,
+    );
 
     const list = await browser.get("/api/admin/enrollment-keys");
     expect(JSON.stringify(list.body)).not.toContain(secret);
