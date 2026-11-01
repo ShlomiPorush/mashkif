@@ -2,17 +2,16 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import postgres from "postgres";
 import { createApp } from "./app.js";
-import { ConfigError, loadConfig, type ServerConfig } from "./config.js";
+import { createAuth } from "./auth/auth.js";
+import { ConfigError, loadConfig, passkeysSupported, type ServerConfig } from "./config.js";
+import { createDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
+import { describeSafely } from "./errors.js";
 import { databaseCheck, readableFileCheck } from "./readiness.js";
 import { hasWebAssets } from "./static.js";
 
 /** web/dist, resolved from server/dist/main.js. */
 const WEB_ROOT = fileURLToPath(new URL("../../web/dist", import.meta.url));
-
-function describe(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-}
 
 function readConfig(): ServerConfig {
   try {
@@ -38,7 +37,7 @@ async function main(): Promise<void> {
   try {
     await runMigrations(sql);
   } catch (error) {
-    console.error(`database migration failed: ${describe(error)}`);
+    console.error(`database migration failed: ${describeSafely(error)}`);
     await sql.end({ timeout: 5 });
     process.exit(1);
   }
@@ -49,11 +48,20 @@ async function main(): Promise<void> {
     console.warn(`web assets not found at ${WEB_ROOT}; serving the API only`);
   }
 
+  if (!passkeysSupported(config.publicOrigin)) {
+    console.warn(
+      "MASHKIF_PUBLIC_URL uses an IP address, so passkeys cannot work (browsers need a host name); use http://localhost:<port> in development",
+    );
+  }
+  const db = createDb(sql);
+  const auth = createAuth({ db, appKey: config.appKey, publicOrigin: config.publicOrigin });
+
   const app = createApp({
     readiness: {
       database: databaseCheck(sql),
       geoip: readableFileCheck(config.geoipAsnPath),
     },
+    admin: { db, auth, publicOrigin: config.publicOrigin },
     ...(webRoot === undefined ? {} : { webRoot }),
     onReadinessFailure: (name, reason) => console.warn(`readiness check ${name} failed: ${reason}`),
   });
@@ -79,6 +87,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(`server failed to start: ${describe(error)}`);
+  console.error(`server failed to start: ${describeSafely(error)}`);
   process.exit(1);
 });

@@ -1,5 +1,12 @@
 import { Hono } from "hono";
+
 import { secureHeaders } from "hono/secure-headers";
+import type { AdminDeps } from "./admin/context.js";
+import { adminRoutes } from "./admin/routes.js";
+import { AUTH_BASE_PATH } from "./auth/auth.js";
+import { authRoutes } from "./auth/routes.js";
+import { describeSafely } from "./errors.js";
+import { ADMIN_BODY_LIMIT_BYTES, boundedBody } from "./http/bounded-body.js";
 import { agentRoutes } from "./protocol.js";
 import {
   DEFAULT_READINESS_TIMEOUT_MS,
@@ -16,6 +23,8 @@ export interface AppOptions {
   webRoot?: string;
   /** Called when a readiness check fails. The reason must not contain secrets. */
   onReadinessFailure?: (name: ReadinessCheckName, reason: string) => void;
+  /** Admin sign-in and the admin API. When undefined, those routes are 404. */
+  admin?: AdminDeps;
 }
 
 export function createApp(options: AppOptions): Hono {
@@ -57,6 +66,15 @@ export function createApp(options: AppOptions): Hono {
   });
 
   app.route("/api/agent", agentRoutes());
+  if (options.admin !== undefined) {
+    // Whole body first, bounded by size and time, before any route parses it
+    // or takes the admin lock.
+    const limit = boundedBody(ADMIN_BODY_LIMIT_BYTES, options.admin.bodyTimeoutMs);
+    app.use(`${AUTH_BASE_PATH}/*`, limit);
+    app.use("/api/admin/*", limit);
+    app.route(AUTH_BASE_PATH, authRoutes(options.admin));
+    app.route("/api/admin", adminRoutes(options.admin));
+  }
   app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));
 
   if (options.webRoot !== undefined) {
@@ -65,7 +83,7 @@ export function createApp(options: AppOptions): Hono {
 
   app.notFound((c) => c.json({ error: "not_found" }, 404));
   app.onError((error, c) => {
-    console.error(`request failed: ${c.req.method} ${c.req.path}: ${error.name}: ${error.message}`);
+    console.error(`request failed: ${c.req.method} ${c.req.path}: ${describeSafely(error)}`);
     return c.json({ error: "internal_error" }, 500);
   });
 

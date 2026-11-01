@@ -10,6 +10,7 @@ Inspected on 2026-11-01:
 
 - The public repository is `ShlomiPorush/mashkif`, default branch `main`. The foundation is merged into `main` (pull request #1).
 - Implemented: per-component licenses, the protocol contract with one health endpoint, the server and web shells, the Windows agent skeleton and its unsigned MSI, the container image and Compose files, `scripts/verify.sh`, `scripts/local.sh`, `scripts/try-pr.sh`, `scripts/release.sh`, path-filtered CI, and Dependabot. Evidence is in the implementation plan table below.
+- After the foundation: admin sign-in, step 1 of MVP stage 1, is implemented in pull request #8 (branch `feature/admin-auth`). Its plan and status are in [mvp-stage-1.md](mvp-stage-1.md).
 - `scripts/verify.sh` (full sweep, all six areas) passed locally from WSL on 2026-11-01.
 - The GitHub configuration (deliverable 14) is applied: labels, templates, rulesets for `main` and release tags, security settings, and CLA Assistant. No release has been made, and nothing is deployed.
 - The domain `mashkif.co.il` is registered. Hosting is an existing Linux server with Docker and Traefik that Shlomi operates; its details are not recorded in the repository.
@@ -55,7 +56,7 @@ Mashkif is a community internet outage map for Israel. It answers one question: 
 | Release artifacts | Approved | Agent: MSI published as a GitHub Release asset and downloaded from the website. Server and web: one container image in GitHub Container Registry (GHCR). | GHCR sits next to the repository and its CI and needs no extra account. |
 | Versioning | Approved | Independent SemVer for agent and server, tags `agent-vX.Y.Z` and `server-vX.Y.Z`, one changelog per component | Agent releases need signing and are rare; server releases are frequent. |
 | Code signing | Deferred | Decided before stage 2 | Stage 1 runs unsigned on Shlomi's computers. Agent release to customers is blocked until then. |
-| Admin authentication | Approved | Reuse the n8n-ops model: Better Auth, one local admin, username and password with mandatory TOTP, rate-limited sign-in, audited logins, session time limits, first-run setup wizard. Add passkey sign-in through Better Auth's passkey support; password plus TOTP stays as the fallback. | Proven in Shlomi's n8n-ops; passkeys resist phishing. Security review required when the feature is built. Not part of the foundation task. |
+| Admin authentication | Approved | Reuse the n8n-ops model: Better Auth, one local admin, username and password with mandatory TOTP, rate-limited sign-in, audited logins, session time limits, first-run setup wizard. Add passkey sign-in through Better Auth's passkey support; password plus TOTP stays as the fallback. | Proven in Shlomi's n8n-ops; passkeys resist phishing. Security review required when the feature is built. Not part of the foundation task. Built in MVP stage 1, step 1, with a setup token from the server instead of an open first-run wizard. |
 | Public IP storage | Approved | Store the full public IP address of each site, visible only to the admin, never exposed by the public site or any public API, and disclosed on the "what the agent sends" page | Site counting and trust tiers for IP addresses and ranges need the real address; a hash cannot match ranges. A retention period is set before the public stage. |
 | ASN data source | Approved | Mashkif does not download MaxMind data. The operator mounts an existing GeoLite2-ASN directory read-only (for example the one geoip-extractor maintains). The app reports the database build date and warns in the admin panel when it is stale. | Reuses Shlomi's existing MaxMind download and license key. The GeoLite2 license forbids redistribution, so the file is never committed or baked into an image. |
 
@@ -75,9 +76,9 @@ Mashkif is a community internet outage map for Israel. It answers one question: 
 | Windows agent | Background service: heartbeat, latency, local diagnosis, outage journal with retroactive reports, sleep and shutdown notices, H3 cell computed locally | `agent/` | MIT | Skeleton: starts and logs only | Contract |
 | Agent tray app | User-facing status ("home or provider"), consent for location, area selection; Hebrew and English | `agent/` | MIT | Skeleton: starts and logs only | Agent service |
 | Agent installer | MSI with silent install properties for GPO and Intune | `agent/` | MIT | Skeleton: unsigned MSI | Signing decision before stage 2 |
-| Server | Ingest API for agents, ASN lookup, site grouping, outage detection, reputation, admin API | `server/` | AGPL-3.0 | Skeleton: health and readiness only | Contract, PostgreSQL, ASN data |
-| Web | Admin panel with reputation controls and internal map now; public site later | `web/` | AGPL-3.0 | Skeleton: empty shell | Server API |
-| Database | Agents, sites, heartbeats, outages, trust tiers, detection parameters, curated provider and infrastructure table | Container | Third-party | Container defined; no tables | None |
+| Server | Ingest API for agents, ASN lookup, site grouping, outage detection, reputation, admin API | `server/` | AGPL-3.0 | Health, readiness, admin sign-in and its API, operator commands (`cli.js`) | Contract, PostgreSQL, ASN data |
+| Web | Admin panel with reputation controls and internal map now; public site later | `web/` | AGPL-3.0 | Empty public shell; admin sign-in pages under `/admin` | Server API |
+| Database | Agents, sites, heartbeats, outages, trust tiers, detection parameters, curated provider and infrastructure table | Container | Third-party | Admin, session, credential, setup token, and audit tables | None |
 | ASN data | GeoLite2-ASN file maintained outside Mashkif and mounted read-only | Host directory | MaxMind GeoLite2 license | Mount defined; file readability checked | Operator provides the directory |
 
 Load-bearing boundaries:
@@ -164,7 +165,7 @@ All scripts are Bash run inside WSL, start with `#!/usr/bin/env bash`, use LF li
 
 ## Implementation decisions
 
-Decisions made while building the foundation, within the approved plan:
+Decisions made while building the foundation and later steps, within the approved plans:
 
 | Decision | Choice | Reason |
 |---|---|---|
@@ -177,6 +178,15 @@ Decisions made while building the foundation, within the approved plan:
 | Release lock | `publish` and `--resume`: one remote ref, `refs/release-leases/active`, held for the whole publish of any target and version; any lease blocks every publish; no automatic takeover. `prepare`: a local per-user `flock` (`${XDG_STATE_HOME:-~/.local/state}/mashkif/release-prepare.lock`), held until the branch is pushed and the pull request exists | The lease prevents two machines from publishing the same version, and a crashed run is cleared manually. `prepare` changes no published state, and its rerun recovers from partial failures, so a local lock is enough |
 | Release through a pull request | `scripts/release.sh prepare` opens a pull request with the version and changelog change; after it is merged with green CI, `publish` tags its merge commit and publishes. The script never pushes `main` | `main` requires pull requests and a green `summary` check with no bypass, so a direct push of the release commit would be rejected |
 | Dependabot cooldown | New versions are proposed after seven days | Supply-chain hardening |
+| Better Auth version (MVP stage 1, step 1) | `better-auth` and `@better-auth/passkey` pinned to 1.7.12 in `server/` and `web/`; n8n-ops uses 1.7.10 | 1.7.12 is the newest release older than the seven-day cooldown on 2026-11-01. 1.7.11 and 1.7.12 add fixes; 1.7.13 to 1.7.15 change nothing Mashkif uses |
+| Public origin setting (step 1) | `MASHKIF_PUBLIC_URL`, required, not secret: an `https://` origin, or `http://` for localhost and 127.0.0.1 only | Passkeys bind to a fixed relying-party ID and origin, and the origin check of admin mutations compares against it. The step 1 plan named only `MASHKIF_APP_KEY` |
+| Admin cookies (step 1) | Every Better Auth cookie is named `__Host-mashkif.*`, with `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`, and no `Domain`; Better Auth's `__Secure-` prefix is off so the names do not stack | The plan requires `__Host-` cookies; Better Auth adds its own prefix otherwise |
+| Admin session policy (step 1) | Better Auth sessions last 12 hours and are never extended; Mashkif adds an assurance (password, TOTP, or passkey), the sign-in time, and the last activity to each session row and checks them on every admin request | Better Auth knows only one expiry. The sign-in time survives session rotation (TOTP enrollment), so the 12-hour limit cannot be restarted |
+| Admin credential changes (step 1) | Setup, `reset-admin`, the credential-changing auth routes, and the sign-in steps that create a session hold one PostgreSQL advisory lock, behind an in-process queue with a 15-second wait that also bounds the wait for a database connection; request bodies are read in full, bounded by size and time, before the lock is taken; a credential route checks its session again inside it, and sign-in steps are rate limited before they queue. Each credential change writes an audit entry before it starts and one with its outcome | Better Auth writes outside Mashkif's transactions, so a request that passed its session check could otherwise finish after a reset and undo it, and a crash would leave a change without an audit entry |
+| Error logging (step 1) | Database errors are logged by name and PostgreSQL SQLSTATE only, in the server, the CLI,; Better Auth's log writes only an allowlist of fixed messages and names errors without their messages, and Better Auth hands errors other than API errors to the server's handler instead of printing them | Their messages carry SQL parameters such as password hashes and session tokens |
+| Passkey user verification (step 1) | The passkey plugin's verification hooks refuse a response without the user-verified flag; the authentication options are rewritten to ask for user verification | The plugin verifies with user verification optional and does not let the authentication options be configured |
+| Rate-limit address (step 1) | Better Auth reads the client address only from a header Mashkif sets from the TCP peer; any client value is replaced | Forwarded headers are not trusted before step 2a adds trusted proxies. Behind Traefik every client then shares one address, which is stricter, never weaker |
+| Admin recovery (step 1) | No backup codes: their routes are blocked and the pages never show them; `cli.js reset-admin` is the only recovery: it prints a single-use reset token (never a password) for `/admin/reset` | n8n-ops stored backup codes that could not be used |
 
 ## Handoff to foundation implementation
 

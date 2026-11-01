@@ -1,0 +1,114 @@
+# MVP stage 1 plan
+
+Approved by Shlomi on 2026-11-01 (draft r4), including decisions D1 to D8. The status of each step is at the end.
+
+Goal: Shlomi's own Windows PCs run an unsigned agent that reports to the production server; Shlomi signs in to an admin panel, sees agents and sites on an internal map; the server detects provider and infrastructure outages; the agent tells its user whether a fault is at home or at the provider. Signing and customer endpoints (stage 2) are out of scope.
+
+Baseline: `main` at 17a1339; the contract has only `GET /api/agent/health`, protocol version 1. Stage 1 extends version 1. From the first deployment on: new fields are optional, a breaking change becomes version 2 with version 1 still accepted, and request fixtures of every installed agent build stay in the contract tests.
+
+## Decisions for Shlomi
+
+| # | Decision | Recommendation | Why |
+|---|---|---|---|
+| D1 | Order | Admin sign-in, then registration and heartbeat, internal map, detection, local diagnosis. Detection does not depend on diagnosis | Enrollment keys, agents, and trust tiers live in the admin panel |
+| D2 | Agent identity | A single-use enrollment key per PC, valid 24 hours, created in the admin panel; the agent trades it for its own token | Per-PC revocation; a leaked key is worthless after use or expiry |
+| D3 | Area | Tray asks for Windows location consent and computes an H3 cell at resolution 7 (about 5 km2) on the PC. Without it the agent reports "area unknown" and Shlomi can assign an area on the map | Location is never a condition for reporting |
+| D4 | Heartbeat | Every 60 seconds; the server can change it within 30 to 600 seconds from the admin panel | Slow agents down without an update |
+| D5 | Map tiles | OpenFreeMap (free, no key) | Admin-only map, no account |
+| D6 | First deployment | After step 2 and the backup; Shlomi deploys | Detection needs history |
+| D7 | Infrastructure | Optional choice in the tray (Bezeq, HOT, IBC, Partner fiber, Cellcom fiber, other); default unknown; never inferred from the provider; unknown is not a group | GeoIP finds the provider, not the infrastructure |
+| D8 | Site | An IPv4 address or an IPv6 /64; an agent belongs to the site of its latest heartbeat. Behind carrier NAT many homes count as one site, which only makes an outage harder to declare | Thresholds count sites, not agents |
+
+## Step 1: admin sign-in
+
+- From n8n-ops: Better Auth with `username` and `twoFactor`, Drizzle tables, its rate limits (5 attempts per 5 minutes), sign-up blocked. Better Auth and `@better-auth/passkey` pinned to one matching version; a difference from n8n-ops is recorded.
+- Sessions: before TOTP is enrolled, a session may only enroll TOTP. Every other admin route needs password plus TOTP, or a passkey with `userVerification: "required"`. Passkeys are added only from such a session. Expiry 12 hours absolute, 1 hour idle. `__Host-` cookies, `Secure`, `SameSite=Strict`; origin check on every admin mutation.
+- First admin: `docker compose exec app node server/dist/cli.js setup-token` prints a single-use token valid 15 minutes, stored hashed, refused once an admin exists. A database constraint allows one admin; creation is one transaction.
+- Recovery: `node server/dist/cli.js reset-admin` in one transaction: the current password made unusable; TOTP, passkeys, sessions, and pending challenges deleted; a single-use reset token valid 15 minutes, stored hashed, printed with its expiry; audit entry. The admin sets a new password with the token at `/admin/reset`, then signs in and enrolls TOTP. The CLI never prints a password (Shlomi's decision of 2026-11-01; the approved text printed a new random password once).
+- Audit log for sign-in, failures, credential changes, and every admin change in later steps. New secret `MASHKIF_APP_KEY`, validated at startup.
+- Web: `/admin` (setup, sign-in, TOTP with QR, passkeys), Hebrew and English, light and dark, code-split from the public bundle.
+- Verification: tests against real PostgreSQL for every session state, setup token expiry and reuse, two concurrent setups, a passkey without user verification, a reset interrupted halfway, lockout, cookies, and the origin check; a live sign-in flow with screenshots in both languages and themes.
+
+## Step 2: registration, heartbeat, and backfill (three pull requests)
+
+**2a server and admin**
+
+- Admin: enrollment keys (label, expiry, revoke; shown once, stored hashed); agents with last seen, version, site address, ASN and organization, area, infrastructure, trust tier (trusted, normal, suspicious, blocked), label, revoke.
+- `register`: the agent creates its 256-bit token and saves it first, then sends the key, a random install ID, the token, and versions. One transaction uses the key and creates the agent; a retry with the same install ID and token succeeds again, so a lost response or a crash is harmless. The server stores only the token hash. No hostname or user name.
+- `heartbeat`: sequence, area cell or unknown, infrastructure, the interval the agent is using, round trip, DNS time. The response carries a sync ID, server time, and the next interval. Until the agent reports using the interval last sent, silence is judged by the larger of the two, so neither a lost response nor a change in either direction makes an agent look silent.
+- `events`: connectivity lost and restored, shutdown, sleep, resume, service stop. Each has a durable ID, the boot ID, and the sync ID of the last heartbeat response the agent received, with the time elapsed since then on the monotonic clock, so wall-clock changes do not move it. The server computes the time from the server time it recorded for that sync ID. An event with no sync in the same boot (a reboot while offline), outside the range between the last heartbeat before the gap and the receive time, or older than 7 days is marked "time uncertain" and does not refine history. A late event never changes the current state of an agent with a newer heartbeat. The server answers per event, so one bad event never blocks a batch.
+- Limits: body at most 64 KB and 500 events; rate limits by token, and by address only for `register`; 429 with `Retry-After`.
+- Client address: `X-Forwarded-For` only when the TCP peer is in `MASHKIF_TRUSTED_PROXIES` (CIDR list), right-most untrusted address; Better Auth uses the same address. Deployment notes recommend a network shared only by Traefik and the app.
+- Area: a resolution 7 cell whose center is outside the service area is stored as unknown. An area that Shlomi assigns is stored separately and wins until he clears it.
+- Provider table grouping ASNs, managed by the admin, empty in the repository.
+- Retention: raw heartbeats and events kept for an admin setting (default 30 days, at least 8), deleted hourly in resumable batches. Outage records keep their own summary and survive this deletion. IP address retention, audit, and backups are separate policies.
+
+**2b agent core**
+
+- `%ProgramData%\Mashkif\state` grants access only to SYSTEM, Administrators, and the service SID (the service runs as LocalService); atomic writes.
+- Enrollment: the recommended path is the tray, which passes the key to the service through the pipe command `register` (allowed only while unregistered); the token never leaves the service. The MSI property `ENROLLMENT_KEY` is supported for unattended installs: hidden, written to a registry value readable only by SYSTEM, Administrators, and the service SID, deleted by the service after registration, and never written again by a repair or upgrade without the property. It is documented with the warning that a machine logging policy (`Debug=7`) can still record it.
+- `SERVER_URL` (default `https://mashkif.co.il`); HTTP only to loopback, for development. Backoff with jitter on failure.
+
+**2c agent resilience**
+
+- Connectivity probe every 15 seconds, also offline; transitions, shutdown, sleep, and resume recorded.
+- Offline queue: append-only, checksummed lines, a torn last line dropped; a record is removed when the server accepts or rejects it, or when it passes 7 days or the size cap (oldest first, with a dropped count sent later).
+- Named pipe: refuses network clients, accepts interactive users. Commands: status, register, set area cell, set infrastructure, run diagnosis. No token, no coordinates. The tray checks that the server end is the Mashkif service.
+
+**Tests for step 2:** racing and interrupted registrations, lost responses, interval increases and decreases with a lost response, a dummy MSI key absent from the registry after registration and not rewritten by repair or upgrade, IPv6 /64 and address changes, spoofed `X-Forwarded-For`, oversize and mixed batches, clock jumps, future times, a lost heartbeat response, and a reboot while offline, retention batches with outage history kept, ACLs after install, repair, and upgrade, pipe access from a standard account, a second session, and the network, queue crash mid-write and overflow, and a live MSI run on a real PC with the network unplugged and a sleep.
+
+## Deployment readiness (between steps 2 and 3)
+
+- Nightly `pg_dump` and a runbook (`MASHKIF_APP_KEY` and `.env` backed up separately, same image version on restore, revocations and credential changes (password, TOTP, passkeys) made after the dump repeated before the restored service is opened). The restore test proves admin sign-in and a heartbeat.
+- Shlomi: Traefik values, host paths, Docker versions, `release.sh server prepare` and `publish`, the deployment. Agent: the unsigned MSI built locally with `scripts/verify.sh --area agent`.
+- From then on, each pull request runs its migrations on a copy of the previous step's data and keeps the installed agent working.
+
+## Step 3: internal map
+
+- MapLibre with OpenFreeMap light and dark styles; H3 hexagons (`h3-js`) colored by sites up, silent, planned offline; filters by provider and infrastructure; sites per cell; assign an area by clicking a cell. CSP extended only for the tile hosts.
+- Verification: map API refuses without a full admin session; screenshots in both languages, both themes, mobile and desktop.
+
+## Step 4: detection behind `DetectionEngine`
+
+- `evaluate(now)` reads through a storage port; other code depends only on the interface. Runs every minute.
+- Eligible agents are normal and trusted agents on sites that are not blocked. A site is up when an eligible agent sent a heartbeat within three of its intervals; planned offline when every eligible agent's latest record is a shutdown or sleep event later than its last heartbeat; otherwise silent. A site's area and infrastructure come from most of its eligible agents active in the last hour, ties to the most recent, and a silent site keeps its last values. A group's baseline is its sites that were up or silent in the previous hour; a site with no eligible agent in the last hour is not observed and joins no baseline. Thresholds are plain counts of distinct sites, no weights.
+- Groups: (provider, H3 parent at resolution 5) and (infrastructure, resolution 5).
+- An outage opens when silent sites reach a minimum count and a ratio of the group's baseline and went silent within a correlation window. Its reference sites are frozen at opening; it closes when a recovery ratio of them is back, or becomes "no longer observed" after a maximum time.
+- Collection gap: only direct evidence of the server not ingesting (process start, database errors, an ingest gap) stops outages from opening and marks the window. Wide silence alone opens outages normally.
+- Backfill refines history; diagnosis is stored but excludes nothing in v1. Thresholds live in a settings table edited in the admin panel; the repository holds development defaults only. Outages are shown on the map and in a list.
+- Verification: deterministic simulations: correlated and scattered silence, a multi-hour partial outage, a full outage of the only provider (opens), the server down while agents are fine (does not open), offices closing at night, one PC asleep while another reports, address changes, backfill, trust tiers. Real-world accuracy is not verifiable with a handful of sites; reported as such.
+
+## Step 5: local diagnosis
+
+- On connectivity loss and on request: default gateway, DNS, an external HTTPS endpoint, the Mashkif server; each probe passed, failed, or not supported. Verdicts: home network, provider or beyond, only Mashkif unreachable, not enough information; "possible power outage" on battery with the gateway gone. Shown in the tray in Hebrew or English and sent with backfilled events.
+- Verification: fake probes for each verdict, including VPN and captive portal; live checks on a real PC.
+
+## Delivery
+
+- Pull requests: 1; 2a, 2b, 2c; backup; 3; 4; 5. Changelogs under `Unreleased`; `AGENTS.md` and the foundation document follow implemented reality. The approved plan lands as `docs/mvp-stage-1.md` in the step 1 pull request.
+- Result review for every pull request, full tier for 1, 2a, 2b, backup, and 4.
+- Out of scope: signing, auto-update, the public site, self-hosted tiles, notifications, traceroute inference, active probing, reputation weights, multi-use enrollment keys, more than one admin.
+
+## Status
+
+Updated on 2026-11-01. A step exists only when its row says so, with evidence.
+
+| Step | Status | Evidence |
+|---|---|---|
+| 1 Admin sign-in | Implemented in pull request #8 (branch `feature/admin-auth`); awaiting review and merge | `scripts/verify.sh`: server tests against PostgreSQL (session states, setup token expiry and reuse, concurrent setups, passkeys with and without user verification, interrupted and completed reset, a request racing a reset, an interrupted TOTP enrollment, lockout, cookies, origin check, blocked routes, body size limit, database errors kept out of logs, configuration), the migration drift check against malformed, unsupported, and drifted snapshots, and web tests (locale keys, locale-only text, admin routes); a check that the public bundle holds no admin code. Live run in the development environment on 2026-11-01 with Chromium: setup with a setup token, TOTP enrollment, sign-out, password plus TOTP, the admin page refused after the password alone, `reset-admin` three times (old password and passkey refused, only TOTP enrollment allowed), and a passkey added and used through a virtual authenticator that verifies the user; screenshots in Hebrew and English, light and dark, at 390 and 1440 px |
+| 2a, 2b, 2c Registration, heartbeat, and backfill | Not started | |
+| Backup and deployment readiness | Not started | |
+| 3 Internal map | Not started | |
+| 4 Detection | Not started | |
+| 5 Local diagnosis | Not started | |
+
+Step 1 as built, where it adds to or differs from the text above:
+
+- **Versions:** Better Auth and `@better-auth/passkey` 1.7.12, while n8n-ops uses 1.7.10. 1.7.12 is the newest release older than the repository's seven-day cooldown for new versions; 1.7.13 to 1.7.15 change nothing that Mashkif uses.
+- **Additional setting:** `MASHKIF_PUBLIC_URL`, required and not secret, is the origin of the web app. Passkeys need a fixed relying-party ID and origin, and the origin check compares every admin mutation against it.
+- **Passkey user verification:** the plugin verifies passkey responses with user verification optional. Mashkif refuses a registration or sign-in response without the user-verified flag in the plugin's verification hooks, before a passkey or session is stored, and asks the browser for user verification in both ceremonies. Tests sign real WebAuthn responses with a software authenticator, with and without the flag.
+- **Rate-limit address:** sign-in, TOTP, passkey, and setup attempts are counted per TCP peer address. Behind Traefik, before step 2a adds trusted proxies, every client shares one address, which makes the limit stricter, never weaker.
+- **Recovery:** Better Auth's backup codes are not offered; their routes are blocked and the pages never show them. Recovery is `reset-admin` on the server, which prints a single-use reset token and never a password, then `/admin/reset`. Mashkif's own route checks the token, because Better Auth's `/reset-password` would keep the token in plain text unless every verification row (TOTP sign-in steps, passkey challenges) were stored hashed; its reset routes stay blocked.
+- **Not in step 1:** a password change from a full session and a view of the audit log were built and then removed in review, because the step does not include them; `reset-admin` covers a lost password. They are possible follow-ups.
+- **Credential changes and sign-ins:** setup, `reset-admin`, every route that changes a credential (TOTP enrollment, adding or removing a passkey), and every sign-in step that creates a session hold one PostgreSQL advisory lock, so a request already under way cannot undo a reset. In the server, requests (setup included) queue in the process first and give up after 15 seconds, also while waiting for a database connection, so waiting never uses up database connections; sign-in steps are rate limited before they queue, and every admin and auth request body is read in full first, bounded by 16 KB and 5 seconds, so a slow client never holds the lock. A credential route checks its session again inside the lock, and TOTP enrollment ends every other session of the admin. A TOTP enrollment that Better Auth left half written (the flag set, the secret not yet verified) counts as not enrolled and is repaired. Each credential change writes an audit entry before it starts and one with its outcome.
+- **Development origin:** browsers refuse passkeys on an IP address, so local development uses `MASHKIF_PUBLIC_URL=http://localhost:8180`; with `http://127.0.0.1:8180` everything but passkeys works, and the server warns at startup.

@@ -283,7 +283,8 @@ _docker_expect() {
 # _docker_runtime <scratch> <image> <id>: runs the image the way Compose does,
 # without Compose, against PostgreSQL on tmpfs.
 _docker_runtime() {
-  local scratch="$1" image="$2" id="$3" net db app password url
+  local scratch="$1" image="$2" id="$3" net db app password url app_key
+  app_key="$(head -c 32 /dev/urandom | base64)"
   net="mashkif-verify-docker-$id"
   db="$net-db"
   app="$net-app"
@@ -317,6 +318,7 @@ _docker_runtime() {
   docker run -d --name "$app" --network "$net" \
     --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
     -e DATABASE_URL="$url" -e MASHKIF_GEOIP_ASN_PATH=/geoip/GeoLite2-ASN.mmdb -e PORT=8080 \
+    -e MASHKIF_APP_KEY="$app_key" -e MASHKIF_PUBLIC_URL=http://127.0.0.1:8080 \
     -v "$scratch/geoip:/geoip:ro" \
     --health-interval 2s --health-retries 2 --health-timeout 5s --health-start-period 60s \
     "$image" >/dev/null || return "$MASHKIF_EXIT_ENV"
@@ -365,6 +367,11 @@ _docker_runtime() {
     _docker_failed "app logs never contain the database password"
   else
     _docker_pass "app logs never contain the database password"
+  fi
+  if docker logs "$app" 2>&1 | grep -qF -- "$app_key"; then
+    _docker_failed "app logs never contain MASHKIF_APP_KEY"
+  else
+    _docker_pass "app logs never contain MASHKIF_APP_KEY"
   fi
 }
 
