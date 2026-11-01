@@ -163,6 +163,18 @@ export const adminSetupToken = pgTable("admin_setup_token", {
 });
 
 /**
+ * Single-use tokens printed by `cli.js reset-admin` for setting a new
+ * password at /admin/reset. Only the SHA-256 hash is stored.
+ */
+export const adminResetToken = pgTable("admin_reset_token", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  expiresAt: ts("expires_at").notNull(),
+  usedAt: ts("used_at"),
+});
+
+/**
  * Security and admin events. Rows are only ever inserted. `actor` is the admin
  * username, "cli" for operator commands, or "-" when nobody is signed in.
  */

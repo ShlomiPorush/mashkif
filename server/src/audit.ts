@@ -9,6 +9,8 @@ export const AUDIT_ACTIONS = [
   "admin.setup_token_created",
   "admin.created",
   "admin.reset",
+  "admin.password_reset",
+  "admin.password_reset_failed",
   "sign_in.succeeded",
   "sign_in.failed",
   "sign_in.rate_limited",

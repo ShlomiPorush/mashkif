@@ -1,9 +1,11 @@
 // Operator commands, run inside the app container:
 //   docker compose exec app node server/dist/cli.js setup-token
 //   docker compose exec app node server/dist/cli.js reset-admin
-// They need only DATABASE_URL, and apply pending migrations first.
+// They need only DATABASE_URL, and apply pending migrations first. Neither
+// ever prints a password.
+import { pathToFileURL } from "node:url";
 import postgres from "postgres";
-import { resetAdmin } from "./admin/reset.js";
+import { RESET_TOKEN_TTL_MS, resetAdmin } from "./admin/reset.js";
 import { createSetupToken, SETUP_TOKEN_TTL_MS } from "./admin/setup.js";
 import { createDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
@@ -14,17 +16,22 @@ const USAGE = `Usage: node server/dist/cli.js <command>
 Commands:
   setup-token   Print a single-use token for creating the admin at /admin/setup.
                 Valid for ${SETUP_TOKEN_TTL_MS / 60_000} minutes. Refused once an admin exists.
-  reset-admin   Give the admin a new random password, printed once, and remove
-                TOTP, passkeys, sessions, and pending sign-ins. After signing in
-                with the new password, TOTP must be set up again.`;
+  reset-admin   Lock the admin out and print a single-use token for setting a
+                new password at /admin/reset, valid for ${RESET_TOKEN_TTL_MS / 60_000} minutes. The current
+                password, TOTP, passkeys, sessions, and pending sign-ins stop
+                working at once. After the new password, TOTP is set up again.`;
 
-async function main(argv: string[]): Promise<number> {
+/** Runs one operator command and returns the exit code. */
+export async function runCli(
+  argv: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<number> {
   const command = argv[0];
   if (argv.length !== 1 || (command !== "setup-token" && command !== "reset-admin")) {
     console.error(USAGE);
     return 2;
   }
-  const databaseUrl = process.env.DATABASE_URL?.trim() ?? "";
+  const databaseUrl = env.DATABASE_URL?.trim() ?? "";
   if (!/^postgres(?:ql)?:\/\//.test(databaseUrl)) {
     console.error("configuration error: DATABASE_URL must be set to a postgres:// URL");
     return 2;
@@ -52,10 +59,11 @@ async function main(argv: string[]): Promise<number> {
       console.error("No admin exists yet. Create one with: node server/dist/cli.js setup-token");
       return 1;
     }
-    console.log(`Username: ${result.username}`);
-    console.log(`New password: ${result.password}`);
-    console.log("This password is shown only now. TOTP, passkeys, and every session were removed.");
-    console.log("Sign in at /admin with the new password, then set up TOTP again.");
+    console.log(`Reset token: ${result.token}`);
+    console.log(
+      `Valid until ${result.expiresAt.toISOString()}, once. Open /admin/reset, enter it, and choose a new password.`,
+    );
+    console.log("The old password, TOTP, passkeys, and every session no longer work.");
     return 0;
   } catch (error) {
     console.error(`command failed: ${describeSafely(error)}`);
@@ -65,4 +73,6 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-process.exitCode = await main(process.argv.slice(2));
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.exitCode = await runCli(process.argv.slice(2));
+}

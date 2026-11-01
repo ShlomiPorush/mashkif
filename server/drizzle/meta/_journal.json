@@ -8,6 +8,13 @@
       "when": 1793534532243,
       "tag": "0000_admin_sign_in",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793549484519,
+      "tag": "0001_admin_reset_token",
+      "breakpoints": true
     }
   ]
 }

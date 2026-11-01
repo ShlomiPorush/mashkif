@@ -57,6 +57,8 @@ describe("blocked Better Auth routes", () => {
     ["POST", "/api/auth/delete-user"],
     ["POST", "/api/auth/change-email"],
     ["POST", "/api/auth/request-password-reset"],
+    ["POST", "/api/auth/reset-password"],
+    ["GET", "/api/auth/reset-password/some-token"],
     ["GET", "/api/auth/list-sessions"],
     ["POST", "/api/auth/revoke-sessions"],
     ["POST", "/api/auth/passkey/update-passkey"],

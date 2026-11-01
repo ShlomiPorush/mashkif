@@ -38,7 +38,8 @@ mashkif_migration_drift_self_test() {
   for name in unchanged malformed unsupported drift; do
     cp -R drizzle "$base/$name"
   done
-  snapshot="meta/0000_snapshot.json"
+  # drizzle-kit compares against the newest snapshot.
+  snapshot="meta/$(find drizzle/meta -name '*_snapshot.json' -printf '%f\n' | sort | tail -n 1)"
   printf '{"version": "7", "tables": ' >"$base/malformed/$snapshot"
   sed -i 's/^  "version": "7",$/  "version": "99",/' "$base/unsupported/$snapshot"
   node -e '

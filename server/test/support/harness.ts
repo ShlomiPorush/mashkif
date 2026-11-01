@@ -211,3 +211,11 @@ export async function untilLockWaiter(sql: TestDatabase["sql"]): Promise<boolean
   }
   return false;
 }
+
+/** The password the admin sets at /admin/reset in tests. */
+export const NEW_PASSWORD = "a brand new passphrase";
+
+/** Sets a new password with a reset token, as /admin/reset does. */
+export function completeReset(browser: Browser, token: string, password = NEW_PASSWORD) {
+  return browser.post("/api/admin/reset", { token, password });
+}

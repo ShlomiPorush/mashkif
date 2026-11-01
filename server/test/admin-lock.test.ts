@@ -8,9 +8,11 @@ import { createDb } from "../src/db/client.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import {
   Browser,
+  completeReset,
   createHarness,
   enrollTotp,
   type Harness,
+  NEW_PASSWORD,
   ORIGIN,
   PASSWORD,
   pauseOnce,
@@ -42,11 +44,12 @@ beforeEach(async () => {
   await setUpAdmin(database, harness);
 });
 
-/** The owner signs in with the password reset-admin printed and enrolls TOTP again. */
-async function ownerRecovers(password: string): Promise<void> {
+/** The owner sets a new password with the reset token, signs in, and enrolls TOTP again. */
+async function ownerRecovers(token: string): Promise<void> {
   harness.rateLimits.clear();
   const owner = new Browser(harness);
-  await enrollTotp(owner, password);
+  expect((await completeReset(owner, token)).status).toBe(200);
+  await enrollTotp(owner, NEW_PASSWORD);
   expect(await owner.sessionState()).toBe("full");
 }
 
@@ -71,7 +74,7 @@ describe("sign-ins racing reset-admin", () => {
     expect(
       (await attacker.post("/api/auth/two-factor/enable", { password: PASSWORD })).status,
     ).toBe(401);
-    await ownerRecovers(result.password);
+    await ownerRecovers(result.token);
     expect(await attacker.sessionState()).toBe("none");
   });
 
@@ -115,7 +118,7 @@ describe("sign-ins racing reset-admin", () => {
 
     // Checked only after the owner enrolls TOTP again, when a surviving
     // passkey session would count as full.
-    await ownerRecovers(result.password);
+    await ownerRecovers(result.token);
     expect(await attacker.sessionState()).toBe("none");
   });
 });
