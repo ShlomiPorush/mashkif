@@ -20,6 +20,15 @@ updates:
     groups:
       npm-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # openapi-typescript, which generates the contract types, requires
+      # TypeScript 5. Move to a new TypeScript major only together with it.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # The runtime is Node.js 24, so its type definitions follow the
+      # Node.js major in use rather than the newest one.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   # Agent: central package management and NuGet lock files under agent/,
   # plus the WixToolset.Sdk MSBuild SDK in agent/global.json "msbuild-sdks".
