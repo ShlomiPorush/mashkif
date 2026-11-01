@@ -168,7 +168,7 @@ Decisions made while building the foundation, within the approved plan:
 | Protocol versioning | One unversioned path with the `Mashkif-Protocol-Version` request and response header | One route can serve the current and the previous protocol version |
 | Node and pnpm | Run only in the pinned official Node image; pnpm from corepack and `packageManager` | No host installs |
 | Development port | The development app listens on `127.0.0.1:8180` | Port 8080 is taken on the development machine |
-| Release lock | A remote ref `refs/release-leases/<tag>` held for the whole publish; any lease blocks every release; no automatic takeover | Prevents two machines from publishing the same version; a crashed run is cleared manually |
+| Release lock | One remote ref, `refs/release-leases/active`, held for the whole publish of any target and version; any lease blocks every release; no automatic takeover | Prevents two machines from publishing the same version; a crashed run is cleared manually |
 | Dependabot cooldown | New versions are proposed after seven days | Supply-chain hardening |
 
 ## Handoff to foundation implementation
