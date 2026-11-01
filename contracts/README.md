@@ -27,6 +27,11 @@ sides derive their types from it. This directory is licensed under MIT (see
 | Operation | Method and path | Purpose |
 |---|---|---|
 | `getAgentHealth` | `GET /api/agent/health` | The agent checks that the server is up and accepts its protocol version. |
+| `registerAgent` | `POST /api/agent/register` | The agent trades a single-use enrollment key for its identity. It generates its token and saves it before the request; a retry with the same key, install ID, and token succeeds again. |
+| `sendHeartbeat` | `POST /api/agent/heartbeat` | Bearer token. Reports that the agent is up, with its area cell, infrastructure, interval, and latency; the answer carries a sync ID, the server time, and the next interval. |
+| `sendEvents` | `POST /api/agent/events` | Bearer token. Delivers events, also those recorded offline, timed by sync ID and monotonic elapsed time; one result per event. |
+
+Stable error codes are listed in `AgentErrorCode`. Limits: 64 KB per body, 500 events per request, rate limits with 429 and `Retry-After`.
 
 Operator endpoints (`/healthz`, `/readyz`) are not part of the agent protocol
 and are not in this document.
