@@ -12,11 +12,20 @@ export type ClientAddressResolver = (c: Context) => string | undefined;
  */
 export const peerAddress: ClientAddressResolver = (c) => {
   try {
-    return getConnInfo(c).remote.address ?? undefined;
+    return normalizeAddress(getConnInfo(c).remote.address);
   } catch {
     return undefined;
   }
 };
+
+/** An IPv4 address the socket reports as IPv4-mapped IPv6 (::ffff:a.b.c.d) becomes plain IPv4. */
+export function normalizeAddress(address: string | undefined): string | undefined {
+  if (address === undefined || address === "") {
+    return undefined;
+  }
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
+  return mapped?.[1] ?? address;
+}
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
