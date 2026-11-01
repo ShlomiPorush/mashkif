@@ -1,0 +1,88 @@
+# Mashkif production deployment: the app (server plus web) and PostgreSQL,
+# behind an existing Traefik reverse proxy.
+#
+# Setup on the server:
+#   1. Copy .env.example to .env next to this file and replace every placeholder.
+#   2. Create ${MASHKIF_DATA_DIR}/postgres owned by UID:GID 999:999 (the db user below).
+#   3. docker compose up -d
+#
+# Images are published to GHCR by scripts/release.sh; this file never builds.
+# Compose interpolation is limited to MASHKIF_IMAGE_TAG, MASHKIF_DATA_DIR,
+# MASHKIF_GEOIP_DIR, and MASHKIF_TRAEFIK_NETWORK. Application settings reach
+# the containers through env_file.
+
+name: mashkif
+
+services:
+  app:
+    image: ghcr.io/shlomiporush/mashkif:${MASHKIF_IMAGE_TAG:?set MASHKIF_IMAGE_TAG in .env}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MASHKIF_GEOIP_ASN_PATH: /geoip/GeoLite2-ASN.mmdb
+      PORT: "8080"
+    volumes:
+      # GeoLite2-ASN is maintained outside Mashkif and mounted read-only.
+      - type: bind
+        source: ${MASHKIF_GEOIP_DIR:?set MASHKIF_GEOIP_DIR in .env}
+        target: /geoip
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${MASHKIF_TRAEFIK_NETWORK:?set MASHKIF_TRAEFIK_NETWORK in .env}
+      traefik.http.routers.mashkif.rule: Host(`mashkif.co.il`)
+      # Open: the entry point and certificate resolver names of the existing
+      # Traefik are not known yet (see docs/project-foundation.md, known
+      # unknowns). Add traefik.http.routers.mashkif.entrypoints and
+      # traefik.http.routers.mashkif.tls.certresolver once they are.
+      traefik.http.routers.mashkif.tls: "true"
+      traefik.http.services.mashkif.loadbalancer.server.port: "8080"
+
+  db:
+    image: postgres:18.6-bookworm@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8
+    restart: unless-stopped
+    # The official image's postgres user. The data directory must be owned by it.
+    user: "999:999"
+    env_file: .env
+    volumes:
+      # PostgreSQL 18 keeps PGDATA at /var/lib/postgresql/18/docker.
+      - type: bind
+        source: ${MASHKIF_DATA_DIR:?set MASHKIF_DATA_DIR in .env}/postgres
+        target: /var/lib/postgresql
+        bind:
+          create_host_path: false
+    shm_size: 128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 1m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      start_interval: 2s
+      retries: 5
+    networks:
+      - default
+
+networks:
+  traefik:
+    external: true
+    name: ${MASHKIF_TRAEFIK_NETWORK:?set MASHKIF_TRAEFIK_NETWORK in .env}
