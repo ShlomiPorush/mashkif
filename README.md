@@ -4,9 +4,9 @@ Mashkif is a community internet outage map for Israel. Its goal is to answer one
 
 ## Status
 
-The repository holds the project foundation: toolchains, an empty server and web shell, a Windows agent that only starts and logs, container definitions, workflow scripts, and CI. No product features exist yet: no heartbeats, outage detection, or map data. There is nothing for end users to install.
+The repository holds the project foundation (toolchains, the server and web shells, a Windows agent that only starts and logs, container definitions, workflow scripts, and CI) and the admin sign-in, the first step of MVP stage 1. There are no heartbeats, outage detection, or map data yet, and nothing for end users to install.
 
-The design, decisions, and current state are in [docs/project-foundation.md](docs/project-foundation.md).
+The design, decisions, and current state are in [docs/project-foundation.md](docs/project-foundation.md) and [docs/mvp-stage-1.md](docs/mvp-stage-1.md).
 
 ## Repository layout
 
@@ -32,6 +32,20 @@ Run the scripts from WSL, in the repository root:
 | `scripts/local.sh` | Build and run the local development environment. Run it without arguments for usage. |
 | `scripts/try-pr.sh` | Try a pull request in the local environment, and restore the previous state afterwards. |
 | `scripts/release.sh` | Release the agent or the server through a pull request: `prepare` opens the release pull request, and `publish` tags and publishes its merge commit after CI passes. Maintainers only. |
+
+## Operations
+
+The server reads its settings from `.env` (template: `.env.example`). Besides the database settings it needs:
+
+- `MASHKIF_APP_KEY`: a secret of at least 32 random bytes in base64. Generate one with `openssl rand -base64 32` and back it up together with `.env`. A new key signs the admin out and makes the enrolled TOTP unusable; run `reset-admin` afterwards.
+- `MASHKIF_PUBLIC_URL`: the origin of the web app, for example `https://mashkif.co.il`. Passkeys are bound to its host name.
+
+The admin panel is at `/admin`. Mashkif has one admin. Run these commands next to the Compose file on the server:
+
+| Command | Purpose |
+|---|---|
+| `docker compose exec app node server/dist/cli.js setup-token` | Print a setup token for creating the admin at `/admin/setup`. It works once, for 15 minutes, and is refused once an admin exists. |
+| `docker compose exec app node server/dist/cli.js reset-admin` | Regain access: prints a new random password once, and removes TOTP, passkeys, sessions, and pending sign-ins. After signing in with it, TOTP must be set up again. |
 
 ## Contributing
 
