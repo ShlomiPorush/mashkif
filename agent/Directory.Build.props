@@ -1,0 +1,29 @@
+<Project>
+  <!-- Shared settings for every project under agent/. -->
+  <PropertyGroup>
+    <!-- Agent version. The MSI version and file name come from this value. -->
+    <Version>0.1.0</Version>
+    <Product>Mashkif</Product>
+    <Company>Mashkif</Company>
+    <Copyright>Copyright (c) 2026 Shlomi Porush</Copyright>
+    <ArtifactsRoot>$(MSBuildThisFileDirectory)artifacts\</ArtifactsRoot>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(MSBuildProjectExtension)' == '.csproj'">
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Deterministic>true</Deterministic>
+    <SatelliteResourceLanguages>en;he</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!-- NuGet: central package versions and committed lock files. -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,20 @@
+# Normalize text to LF in the repository and in working trees.
+* text=auto eol=lf
+
+# Shell scripts must stay LF so Bash can run them in WSL and CI.
+*.sh text eol=lf
+
+# Windows command files need CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.msi binary
+*.mmdb binary

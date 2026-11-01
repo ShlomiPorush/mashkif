@@ -1,0 +1,242 @@
+# Path-filtered CI. Area selection lives only in scripts/verify.sh
+# (--list-areas); this workflow never re-implements it.
+#
+# Required check for branch protection: "summary".
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly full run (all areas), Monday 03:17 UTC.
+    - cron: "17 3 * * 1"
+
+# Pull requests: one run per pull request; a new push cancels the old run,
+# which is safe because every run diffs against the pull request base.
+# Other events: one group per run, so no run is ever cancelled or replaced.
+# A replaced push run would leave its changes unverified, because the next
+# push only diffs against its own "before" commit.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  detect:
+    name: detect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      areas: ${{ steps.select.outputs.areas }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so the merge base with the base commit is available.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select areas
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            push) base="$PUSH_BEFORE" ;;
+            *) base="" ;;
+          esac
+
+          # A base that is no longer reachable from any ref (for example after
+          # a force push) is fetched by SHA. If that fails, verify.sh selects
+          # every area, which is the safe fallback.
+          if [[ -n "$base" && ! "$base" =~ ^0+$ ]] &&
+            ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --quiet origin "$base" ||
+              echo "::warning::base $base could not be fetched; every area runs"
+          fi
+
+          args=(--list-areas)
+          [[ -n "$base" ]] && args+=("$base")
+          areas="$(scripts/verify.sh "${args[@]}")"
+
+          if [[ -z "$areas" ]] || grep -qvxE '[a-z]+' <<<"$areas"; then
+            echo "::error::unexpected output from verify.sh --list-areas: $areas"
+            exit 1
+          fi
+
+          json="$(jq -R . <<<"$areas" | jq -cs .)"
+          echo "areas=$json" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Selected areas"
+            echo
+            echo "Event: \`$EVENT_NAME\`, base: \`${base:-none (all areas)}\`"
+            echo
+            mapfile -t list <<<"$areas"
+            printf -- '- %s\n' "${list[@]}"
+          } >>"$GITHUB_STEP_SUMMARY"
+          echo "base=${base:-none} areas=$json"
+
+  contracts:
+    name: contracts
+    needs: detect
+    if: contains(fromJSON(needs.detect.outputs.areas), 'contracts')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify contracts
+        run: scripts/verify.sh --area contracts
+
+  server:
+    name: server
+    needs: detect
+    if: contains(fromJSON(needs.detect.outputs.areas), 'server')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify server
+        run: scripts/verify.sh --area server
+
+  web:
+    name: web
+    needs: detect
+    if: contains(fromJSON(needs.detect.outputs.areas), 'web')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify web
+        run: scripts/verify.sh --area web
+
+  agent:
+    name: agent
+    needs: detect
+    if: contains(fromJSON(needs.detect.outputs.areas), 'agent')
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      DOTNET_NOLOGO: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    defaults:
+      run:
+        # Git Bash on the Windows runner.
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up the .NET SDK from agent/global.json
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: agent/global.json
+      - name: Verify agent
+        run: bash scripts/verify.sh --area agent
+
+  docker:
+    name: docker
+    needs: detect
+    if: contains(fromJSON(needs.detect.outputs.areas), 'docker')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify docker
+        run: scripts/verify.sh --area docker
+
+  guards:
+    name: guards
+    needs: detect
+    if: contains(fromJSON(needs.detect.outputs.areas), 'guards')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify guards
+        run: scripts/verify.sh --area guards
+
+  # The single required check. Fails when detect failed, when any job failed
+  # or was cancelled, or when a selected area did not pass (skipped, missing
+  # from this workflow, or any other result).
+  summary:
+    name: summary
+    needs: [detect, contracts, server, web, agent, docker, guards]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          AREAS: ${{ needs.detect.outputs.areas }}
+        run: |
+          failed=0
+          detect="$(jq -r '.detect.result' <<<"$NEEDS")"
+          echo "detect: $detect"
+          if [[ "$detect" != success ]]; then
+            echo "::error::detect did not succeed ($detect)"
+            exit 1
+          fi
+
+          while IFS=$'\t' read -r job result; do
+            echo "$job: $result"
+            if [[ "$result" == failure || "$result" == cancelled ]]; then
+              echo "::error::job $job: $result"
+              failed=1
+            fi
+          done < <(jq -r 'to_entries[] | select(.key != "detect") | [.key, .value.result] | @tsv' <<<"$NEEDS")
+
+          while IFS= read -r area; do
+            result="$(jq -r --arg a "$area" '.[$a].result // "missing"' <<<"$NEEDS")"
+            if [[ "$result" != success ]]; then
+              echo "::error::selected area $area did not pass ($result)"
+              failed=1
+            fi
+          done < <(jq -r '.[]' <<<"$AREAS")
+
+          {
+            echo "### CI summary"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<<"$NEEDS"
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$failed"

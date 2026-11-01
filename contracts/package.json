@@ -1,0 +1,23 @@
+{
+  "name": "@mashkif/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OpenAPI definition of the Mashkif agent-to-server protocol and the TypeScript types generated from it.",
+  "license": "MIT",
+  "type": "module",
+  "types": "./generated/openapi.d.ts",
+  "exports": {
+    ".": {
+      "types": "./generated/openapi.d.ts"
+    }
+  },
+  "scripts": {
+    "lint": "redocly lint openapi.yaml --config redocly.yaml",
+    "generate": "openapi-typescript openapi.yaml --output generated/openapi.d.ts"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.72.1",
+    "openapi-typescript": "^7.13.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Mashkif for Windows: per-machine MSI for manual, GPO, and Intune deployment.
+  Silent install:   msiexec /i Mashkif-<version>-x64.msi /qn
+  Silent uninstall: msiexec /x Mashkif-<version>-x64.msi /qn
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="!(loc.ProductName)"
+           Manufacturer="!(loc.Manufacturer)"
+           Version="$(ProductVersion)"
+           UpgradeCode="D80A17FB-1D99-47D0-A228-8FC027BE1667"
+           Language="!(loc.Language)"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPURLINFOABOUT" Value="https://mashkif.co.il" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Mashkif">
+        <Directory Id="ServiceFolder" Name="Service" />
+        <Directory Id="TrayFolder" Name="Tray" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DataFolder" Name="Mashkif">
+        <Directory Id="ServiceLogFolder" Name="logs" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="ServiceComponents" />
+      <ComponentGroupRef Id="TrayComponents" />
+    </Feature>
+
+    <!--
+      Close the tray app in every user session before its files are removed.
+      Restart Manager closes it only in the session that runs msiexec, so a
+      GPO or Intune uninstall running as SYSTEM would leave it running and
+      schedule the file for deletion at the next reboot. This deferred action
+      runs as LocalSystem; the tray keeps no state, so ending it is safe.
+      Exit code 128 (no such process) is expected and ignored.
+    -->
+    <StandardDirectory Id="System64Folder" />
+    <CustomAction Id="CloseTrayApps"
+                  Directory="System64Folder"
+                  ExeCommand="&quot;[System64Folder]taskkill.exe&quot; /F /IM Mashkif.Tray.exe"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="CloseTrayApps" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="ServiceComponents">
+      <Component Id="ServiceExecutable" Directory="ServiceFolder" Bitness="always64">
+        <File Id="ServiceExe" Source="$(ServicePublishDir)Mashkif.Service.exe" KeyPath="yes" />
+        <!-- Least privilege: the service runs as LocalService, not LocalSystem. -->
+        <ServiceInstall Id="MashkifService"
+                        Name="Mashkif"
+                        DisplayName="Mashkif Agent"
+                        Description="Reports internet connectivity to the Mashkif outage map."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="NT AUTHORITY\LocalService"
+                        Vital="yes" />
+        <ServiceControl Id="MashkifServiceControl"
+                        Name="Mashkif"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+
+      <!--
+        %ProgramData%\Mashkif\logs: SYSTEM and Administrators full control,
+        LocalService modify (the service writes here), Users read. Inheritance
+        from %ProgramData% is blocked so standard users cannot alter the logs.
+        Windows Installer removes the folder on uninstall only when it is empty,
+        so existing logs stay for troubleshooting.
+      -->
+      <Component Id="ServiceLogFolderAcl" Directory="ServiceLogFolder" Guid="5B0C6E1A-3F44-4B8E-9C2D-1E7A4F9B6C30" Bitness="always64">
+        <CreateFolder>
+          <PermissionEx Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;LS)(A;OICI;0x1200a9;;;BU)" />
+        </CreateFolder>
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="TrayComponents" Directory="TrayFolder">
+      <Component Id="TrayExecutable" Bitness="always64">
+        <File Id="TrayExe" Source="$(TrayPublishDir)Mashkif.Tray.exe" KeyPath="yes" />
+        <!-- Start the tray app at every user sign-in. -->
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+                       Name="Mashkif"
+                       Type="string"
+                       Value="&quot;[#TrayExe]&quot;" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>
