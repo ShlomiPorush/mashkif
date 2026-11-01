@@ -95,7 +95,7 @@ Updated on 2026-11-01. A step exists only when its row says so, with evidence.
 
 | Step | Status | Evidence |
 |---|---|---|
-| 1 Admin sign-in | Implemented on branch `feature/admin-auth`; awaiting review and merge | `scripts/verify.sh`: server tests against PostgreSQL (session states, setup token expiry and reuse, concurrent setups, passkeys with and without user verification, interrupted and completed reset, lockout, cookies, origin check, blocked routes, configuration) and web tests (locale keys, locale-only text, admin routes); a check that the public bundle holds no admin code |
+| 1 Admin sign-in | Implemented in pull request #8 (branch `feature/admin-auth`); awaiting review and merge | `scripts/verify.sh`: server tests against PostgreSQL (session states, setup token expiry and reuse, concurrent setups, passkeys with and without user verification, interrupted and completed reset, lockout, cookies, origin check, blocked routes, configuration) and web tests (locale keys, locale-only text, admin routes); a check that the public bundle holds no admin code. Live run in the development environment on 2026-11-01 with Chromium: setup with a setup token, TOTP enrollment, sign-out, password plus TOTP, the admin page refused after the password alone, `reset-admin` three times (old password and passkey refused, only TOTP enrollment allowed), and a passkey added and used through a virtual authenticator that verifies the user; screenshots in Hebrew and English, light and dark, at 390 and 1440 px |
 | 2a, 2b, 2c Registration, heartbeat, and backfill | Not started | |
 | Backup and deployment readiness | Not started | |
 | 3 Internal map | Not started | |
@@ -110,3 +110,4 @@ Step 1 as built, where it adds to or differs from the text above:
 - **Rate-limit address:** sign-in, TOTP, passkey, and setup attempts are counted per TCP peer address. Behind Traefik, before step 2a adds trusted proxies, every client shares one address, which makes the limit stricter, never weaker.
 - **Recovery:** Better Auth's backup codes are not offered; their routes are blocked and the pages never show them. Recovery is `reset-admin` on the server.
 - **Also in step 1:** a password change from a full session (audited as a credential change), and a list of recent security events on the admin page.
+- **Development origin:** browsers refuse passkeys on an IP address, so local development uses `MASHKIF_PUBLIC_URL=http://localhost:8180`; with `http://127.0.0.1:8180` everything but passkeys works, and the server warns at startup.

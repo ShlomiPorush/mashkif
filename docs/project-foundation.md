@@ -10,7 +10,7 @@ Inspected on 2026-11-01:
 
 - The public repository is `ShlomiPorush/mashkif`, default branch `main`. The foundation is merged into `main` (pull request #1).
 - Implemented: per-component licenses, the protocol contract with one health endpoint, the server and web shells, the Windows agent skeleton and its unsigned MSI, the container image and Compose files, `scripts/verify.sh`, `scripts/local.sh`, `scripts/try-pr.sh`, `scripts/release.sh`, path-filtered CI, and Dependabot. Evidence is in the implementation plan table below.
-- After the foundation: admin sign-in, step 1 of MVP stage 1, is implemented on branch `feature/admin-auth`. Its plan and status are in [mvp-stage-1.md](mvp-stage-1.md).
+- After the foundation: admin sign-in, step 1 of MVP stage 1, is implemented in pull request #8 (branch `feature/admin-auth`). Its plan and status are in [mvp-stage-1.md](mvp-stage-1.md).
 - `scripts/verify.sh` (full sweep, all six areas) passed locally from WSL on 2026-11-01.
 - The GitHub configuration (deliverable 14) is applied: labels, templates, rulesets for `main` and release tags, security settings, and CLA Assistant. No release has been made, and nothing is deployed.
 - The domain `mashkif.co.il` is registered. Hosting is an existing Linux server with Docker and Traefik that Shlomi operates; its details are not recorded in the repository.
