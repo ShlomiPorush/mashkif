@@ -1,57 +1,35 @@
-import { eq } from "drizzle-orm";
 import type { Context } from "hono";
-import { type AdminSession, checkSession, touchSession } from "../auth/session-policy.js";
+import { createMiddleware } from "hono/factory";
 import type { Tx } from "../db/client.js";
-import { session } from "../db/schema.js";
-import type { AdminDeps } from "./context.js";
+import type { AdminDeps, AdminEnv } from "./context.js";
 
 /**
- * The full admin session of a request (password plus TOTP, or a passkey with
- * user verification), or the refusal: the same codes as the auth routes.
- * Records the activity, which restarts the idle limit.
+ * Admits a request to Mashkif's admin API: Better Auth must find a session,
+ * and the admin must have TOTP enabled. Better Auth's own routes enforce
+ * their own requirements and do not pass through here.
  */
-export async function requireFullSession(
-  deps: AdminDeps,
-  c: Context,
-): Promise<AdminSession | Response> {
-  const check = await checkSession(deps.auth, deps.db, c.req.raw.headers);
-  if (check.state === "none") {
-    return c.json({ error: check.ended === undefined ? "session_required" : "session_ended" }, 401);
-  }
-  if (check.state !== "full") {
-    return c.json({ error: "totp_required" }, 403);
-  }
-  await touchSession(deps.db, check);
-  return check;
-}
-
-/** The session ended (for example by reset-admin) before the change could commit. */
-export const SESSION_GONE = Symbol("session gone");
-
-/**
- * Runs an admin change and its audit entries in one transaction that holds
- * a share lock on the admin's session row. reset-admin deletes sessions in
- * its own transaction, so it waits for a change already under way, and a
- * change that starts after a reset finds no session and commits nothing.
- */
-export async function adminChange<T>(
-  deps: AdminDeps,
-  admin: AdminSession,
-  work: (tx: Tx) => Promise<T>,
-): Promise<T | typeof SESSION_GONE> {
-  return deps.db.transaction(async (tx) => {
-    const [held] = await tx
-      .select({ id: session.id })
-      .from(session)
-      .where(eq(session.id, admin.sessionId))
-      .for("share");
-    if (held === undefined) {
-      return SESSION_GONE;
+export function requireAdmin(deps: AdminDeps) {
+  return createMiddleware<AdminEnv>(async (c, next) => {
+    const found = await deps.auth.api.getSession({ headers: c.req.raw.headers });
+    if (found === null) {
+      return c.json({ error: "session_required" }, 401);
     }
-    return work(tx);
+    const user = found.user as typeof found.user & {
+      username?: string | null;
+      twoFactorEnabled?: boolean | null;
+    };
+    if (user.twoFactorEnabled !== true) {
+      return c.json({ error: "totp_required" }, 403);
+    }
+    c.set("admin", { username: user.username ?? user.name });
+    return next();
   });
 }
 
+/** Runs an admin change and its audit entries in one transaction. */
+export async function adminChange<T>(deps: AdminDeps, work: (tx: Tx) => Promise<T>): Promise<T> {
+  return deps.db.transaction(work);
+}
 /** The JSON object of a request body; an empty object for anything else. */
 export async function jsonFields(c: Context): Promise<Record<string, unknown>> {
   const body: unknown = await c.req.json().catch(() => undefined);

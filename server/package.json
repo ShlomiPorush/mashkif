@@ -26,12 +26,14 @@
     "hono": "^4.13.14",
     "ipaddr.js": "2.5.0",
     "maxmind": "5.0.7",
+    "nodemailer": "10.3.1",
     "postgres": "^3.4.9"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.4",
     "@mashkif/contracts": "workspace:*",
     "@types/node": "^24.19.2",
+    "@types/nodemailer": "^8.0.2",
     "drizzle-kit": "^0.31.11",
     "typescript": "5.9.3",
     "vitest": "^5.0.5"

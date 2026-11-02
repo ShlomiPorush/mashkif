@@ -3,7 +3,6 @@ import { and, asc, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { lockBlocklistExclusive } from "../agent/write-guard.js";
 import { type AuditAction, writeAudit } from "../audit.js";
-import type { AdminSession } from "../auth/session-policy.js";
 import type { Tx } from "../db/client.js";
 import {
   agent,
@@ -19,18 +18,24 @@ import {
 import { classifyAreaCell } from "../geo/area.js";
 import { NO_ASN } from "../geoip.js";
 import { canonicalRange } from "../http/ip.js";
-import { parseSettingsUpdate, readSettings, SETTING_RULES, writeSettings } from "../settings.js";
-import { type AdminDeps, type RequestMeta, requestMeta } from "./context.js";
+import { hashToken } from "../http/token-hash.js";
 import {
-  adminChange,
-  idParam,
-  jsonFields,
-  requireFullSession,
-  SESSION_GONE,
-  uniqueViolation,
-  uuidParam,
-} from "./guard.js";
-import { hashToken } from "./setup.js";
+  isSecretSetting,
+  parseSettingsUpdate,
+  resolveSettings,
+  SETTING_APPLY,
+  SETTING_ENV,
+  type SettingName,
+  writeSettings,
+} from "../settings.js";
+import {
+  type AdminDeps,
+  type AdminEnv,
+  type AdminIdentity,
+  type RequestMeta,
+  requestMeta,
+} from "./context.js";
+import { adminChange, idParam, jsonFields, uniqueViolation, uuidParam } from "./guard.js";
 
 /** Enrollment keys are valid for 24 hours unless the admin chooses otherwise (decision D2). */
 export const ENROLLMENT_KEY_DEFAULT_HOURS = 24;
@@ -57,19 +62,19 @@ const fail = (status: Status, error: string, field?: string): Outcome => ({
 });
 
 /**
- * Runs a change under the session's share lock and writes its audit entries
- * in the same transaction. A refusal (status 400 or more) writes nothing.
+ * Runs a change and writes its audit entries in the same transaction. A
+ * refusal (status 400 or more) writes nothing.
  */
 async function change(
   deps: AdminDeps,
   c: Context,
-  admin: AdminSession,
+  admin: AdminIdentity,
   work: (tx: Tx) => Promise<{ outcome: Outcome; audits?: Audit[] }>,
 ): Promise<Response> {
   const meta: RequestMeta = requestMeta(deps, c);
-  let result: Outcome | typeof SESSION_GONE;
+  let result: Outcome;
   try {
-    result = await adminChange(deps, admin, async (tx) => {
+    result = await adminChange(deps, async (tx) => {
       const { outcome, audits = [] } = await work(tx);
       if (outcome.status < 400) {
         for (const audit of audits) {
@@ -84,9 +89,6 @@ async function change(
     } else {
       throw error;
     }
-  }
-  if (result === SESSION_GONE) {
-    return c.json({ error: "session_ended" }, 401);
   }
   return c.json(result.body, result.status);
 }
@@ -134,25 +136,21 @@ function asnList(value: unknown): number[] | undefined {
 
 /**
  * Admin API for step 2a: enrollment keys, agents, blocked addresses and
- * ranges, providers, and settings. Every route needs a full admin session;
- * the origin check and the body limit of /api/admin/* apply. Every change is
- * audited in its own transaction.
+ * ranges, providers, and settings. Every route needs an admin with TOTP
+ * (requireAdmin) and the origin check of /api/admin/* applies. Every change
+ * is audited in its own transaction.
  */
-export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
-  const guarded = (
-    handler: (c: Context, admin: AdminSession) => Promise<Response>,
-  ): ((c: Context) => Promise<Response>) => {
-    return async (c) => {
-      const admin = await requireFullSession(deps, c);
-      return admin instanceof Response ? admin : handler(c, admin);
-    };
-  };
+export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): void {
+  /** A handler with the admin that requireAdmin (src/admin/guard.ts) admitted. */
+  const asAdmin =
+    (handler: (c: Context, admin: AdminIdentity) => Promise<Response>) => (c: Context<AdminEnv>) =>
+      handler(c, c.get("admin"));
 
   // Enrollment keys -----------------------------------------------------------
 
   app.get(
     "/enrollment-keys",
-    guarded(async (c) => {
+    asAdmin(async (c) => {
       const now = new Date();
       const rows = await deps.db
         .select({
@@ -174,7 +172,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/enrollment-keys",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const fields = await jsonFields(c);
       const keyLabel = label(fields.label, true);
       if (typeof keyLabel !== "string") {
@@ -233,7 +231,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/enrollment-keys/:id/revoke",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const id = idParam(c);
       if (id === undefined) {
         return c.json({ error: "not_found" }, 404);
@@ -274,7 +272,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.get(
     "/agents",
-    guarded(async (c) => {
+    asAdmin(async (c) => {
       const rows = await deps.db
         .select({
           id: agent.id,
@@ -311,7 +309,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/agents/:id",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const id = uuidParam(c);
       const fields = await jsonFields(c);
       const update: {
@@ -399,7 +397,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/agents/:id/revoke",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const id = uuidParam(c);
       if (id === undefined) {
         return c.json({ error: "not_found" }, 404);
@@ -431,7 +429,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.get(
     "/blocked-ranges",
-    guarded(async (c) => {
+    asAdmin(async (c) => {
       const rows = await deps.db
         .select({
           id: blockedRange.id,
@@ -448,7 +446,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/blocked-ranges",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const fields = await jsonFields(c);
       // The same normalization as client addresses: host bits cleared
       // (192.0.2.7/24 is 192.0.2.0/24), and an IPv4-mapped range is IPv4.
@@ -484,7 +482,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/blocked-ranges/:id/delete",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const id = idParam(c);
       if (id === undefined) {
         return c.json({ error: "not_found" }, 404);
@@ -509,7 +507,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.get(
     "/providers",
-    guarded(async (c) => {
+    asAdmin(async (c) => {
       const providers = await deps.db
         .select({ id: provider.id, name: provider.name })
         .from(provider)
@@ -562,7 +560,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/providers",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const input = await providerInput(c);
       if (input instanceof Response) {
         return input;
@@ -596,7 +594,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/providers/:id",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const id = idParam(c);
       if (id === undefined) {
         return c.json({ error: "not_found" }, 404);
@@ -644,7 +642,7 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   app.post(
     "/providers/:id/delete",
-    guarded(async (c, admin) => {
+    asAdmin(async (c, admin) => {
       const id = idParam(c);
       if (id === undefined) {
         return c.json({ error: "not_found" }, 404);
@@ -667,43 +665,62 @@ export function mountManagementRoutes(app: Hono, deps: AdminDeps): void {
 
   // Settings ------------------------------------------------------------------
 
+  const resolve = (db: Tx | AdminDeps["db"]) =>
+    resolveSettings(db, {
+      ...(deps.env === undefined ? {} : { env: deps.env }),
+      secret: deps.authSecret,
+    });
+
+  /** The settings as the admin panel sees them: secrets only as set or not. */
+  const view = ({ values, locked }: Awaited<ReturnType<typeof resolve>>) => {
+    const { smtpPassword, ...visible } = values;
+    return {
+      ...visible,
+      smtpPasswordSet: smtpPassword !== "",
+      locked,
+      apply: SETTING_APPLY,
+      env: SETTING_ENV,
+    };
+  };
+
   app.get(
     "/settings",
-    guarded(async (c) => {
-      const settings = await readSettings(deps.db);
-      return c.json({
-        ...settings,
-        rules: SETTING_RULES,
-        geoip: (deps.asn ?? NO_ASN).status(),
-      });
-    }),
+    asAdmin(async (c) =>
+      c.json({ ...view(await resolve(deps.db)), geoip: (deps.asn ?? NO_ASN).status() }),
+    ),
   );
 
   app.post(
     "/settings",
-    guarded(async (c, admin) => {
-      const parsed = parseSettingsUpdate(await jsonFields(c));
-      if (!parsed.ok) {
-        return c.json({ error: "setting_invalid", field: parsed.field }, 400);
-      }
+    asAdmin(async (c, admin) => {
+      const fields = await jsonFields(c);
       return change(deps, c, admin, async (tx) => {
         // One update at a time, also before a setting's row exists, so the
         // value read here is the one this update replaces and every change
         // is audited.
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext('mashkif:settings'))`);
-        const before = await readSettings(tx);
-        await deps.testHooks?.afterSettingsRead?.();
-        const changes: Record<string, { from: number; to: number }> = {};
-        for (const [name, value] of Object.entries(parsed.update)) {
-          const from = before[name as keyof typeof before];
-          if (value !== from) {
-            changes[name] = { from, to: value };
-          }
+        const before = await resolve(tx);
+        const parsed = parseSettingsUpdate(fields, before.locked);
+        if (!parsed.ok) {
+          return {
+            outcome: fail(400, parsed.locked ? "setting_locked" : "setting_invalid", parsed.field),
+          };
         }
-        await writeSettings(tx, parsed.update, admin.username);
-        const after = { ...before, ...parsed.update };
+        await deps.testHooks?.afterSettingsRead?.();
+        const changes: Record<string, unknown> = {};
+        for (const [name, value] of Object.entries(parsed.update)) {
+          const from = before.values[name as SettingName];
+          if (JSON.stringify(value) === JSON.stringify(from)) {
+            continue;
+          }
+          // A secret is never written to the audit log.
+          changes[name] = isSecretSetting(name as SettingName)
+            ? { changed: true }
+            : { from, to: value };
+        }
+        await writeSettings(tx, parsed.update, admin.username, deps.authSecret);
         return {
-          outcome: { status: 200, body: after },
+          outcome: { status: 200, body: view(await resolve(tx)) },
           audits:
             Object.keys(changes).length === 0
               ? []

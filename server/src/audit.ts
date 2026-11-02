@@ -21,6 +21,15 @@ export const AUDIT_ACTIONS = [
   "passkey.removed",
   "credential_change.started",
   "credential_change.failed",
+  // Since admin sign-in uses Better Auth as is (2026-11-02), the setup and
+  // reset token actions, sign_in.rate_limited, and credential_change.* above
+  // are no longer written; old rows keep them.
+  "totp.disabled",
+  "backup_codes.generated",
+  "password.changed",
+  "password_reset.requested",
+  "email_change.requested",
+  "email.changed",
   // MVP stage 1, step 2a.
   "enrollment_key.created",
   "enrollment_key.revoked",
@@ -41,7 +50,7 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 export interface AuditEntry {
   /**
-   * Admin username, "cli" for operator commands, "agent" for an agent's own
+   * Admin username, "cli" for the former operator commands, "agent" for an agent's own
    * request, or "-" when nobody is signed in.
    */
   actor: string;

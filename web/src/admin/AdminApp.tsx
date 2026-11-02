@@ -8,13 +8,14 @@ import { ERROR_KEYS, type ErrorKey, errorKey } from "./errors";
 import { AdminNav } from "./manage";
 import { AgentsPage } from "./pages/AgentsPage";
 import { BlockedPage } from "./pages/BlockedPage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { HomePage } from "./pages/HomePage";
 import { KeysPage } from "./pages/KeysPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
-import { ResetPage } from "./pages/ResetPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { SetupPage } from "./pages/SetupPage";
-import { type SessionEnded, SignInPage } from "./pages/SignInPage";
+import { SignInPage } from "./pages/SignInPage";
 import { TotpPage } from "./pages/TotpPage";
 import { ADMIN_PATHS, type AdminPath, isManagementPath, navigate, usePath } from "./router";
 
@@ -28,10 +29,13 @@ export function targetPath(boot: Boot, path = ""): AdminPath {
   if (boot.setupRequired) {
     return ADMIN_PATHS.setup;
   }
+  // The emailed reset link works with or without a session.
+  if (path === ADMIN_PATHS.resetPassword) {
+    return ADMIN_PATHS.resetPassword;
+  }
   switch (boot.session.state) {
     case "none":
-      // The reset page is reachable only without a session.
-      return path === ADMIN_PATHS.reset ? ADMIN_PATHS.reset : ADMIN_PATHS.signIn;
+      return path === ADMIN_PATHS.forgotPassword ? ADMIN_PATHS.forgotPassword : ADMIN_PATHS.signIn;
     case "enrollment":
       return ADMIN_PATHS.totp;
     case "full":
@@ -39,12 +43,31 @@ export function targetPath(boot: Boot, path = ""): AdminPath {
   }
 }
 
+/** Better Auth's session, and whether the admin has TOTP (the admin API requires it). */
+async function readSession(): Promise<SessionInfo> {
+  const { data, error } = await authClient.getSession();
+  if (error) {
+    throw new AdminApiError(error.status ?? 0, error.code ?? "unexpected");
+  }
+  if (data === null) {
+    return { state: "none" };
+  }
+  const user = data.user as typeof data.user & {
+    username?: string | null;
+    twoFactorEnabled?: boolean | null;
+  };
+  return {
+    state: user.twoFactorEnabled === true ? "full" : "enrollment",
+    username: user.username ?? user.name,
+    email: user.email,
+  };
+}
+
 /** The admin panel under /admin, loaded only on admin pages. */
 export function AdminApp() {
   const { t } = useTranslation();
   const path = usePath();
   const [boot, setBoot] = useState<Boot>();
-  const [ended, setEnded] = useState<SessionEnded>();
   const [error, setError] = useState<ErrorKey>();
   const [signingOut, setSigningOut] = useState(false);
 
@@ -52,11 +75,8 @@ export function AdminApp() {
     try {
       const [status, session] = await Promise.all([
         adminApi.get<{ setupRequired: boolean }>("/status"),
-        adminApi.get<SessionInfo>("/session"),
+        readSession(),
       ]);
-      if (session.state === "none" && session.ended !== undefined) {
-        setEnded(session.ended);
-      }
       setError(undefined);
       setBoot({ setupRequired: status.setupRequired, session });
     } catch (caught) {
@@ -83,15 +103,9 @@ export function AdminApp() {
       await authClient.signOut();
     } finally {
       setSigningOut(false);
-      setEnded(undefined);
       await refresh();
     }
   }
-
-  const done = async () => {
-    setEnded(undefined);
-    await refresh();
-  };
 
   let page: ReactNode;
   if (boot === undefined || target === undefined) {
@@ -107,20 +121,22 @@ export function AdminApp() {
         </div>
       );
   } else if (target === ADMIN_PATHS.setup) {
-    page = <SetupPage onDone={done} />;
-  } else if (target === ADMIN_PATHS.reset) {
+    page = <SetupPage onDone={refresh} />;
+  } else if (target === ADMIN_PATHS.resetPassword) {
     page = (
-      <ResetPage
+      <ResetPasswordPage
         onDone={async () => {
           navigate(ADMIN_PATHS.signIn, true);
-          await done();
+          await refresh();
         }}
       />
     );
+  } else if (target === ADMIN_PATHS.forgotPassword) {
+    page = <ForgotPasswordPage />;
   } else if (target === ADMIN_PATHS.signIn) {
-    page = <SignInPage ended={ended} onDone={done} />;
+    page = <SignInPage onDone={refresh} />;
   } else if (target === ADMIN_PATHS.totp) {
-    page = <TotpPage onDone={done} />;
+    page = <TotpPage onDone={refresh} />;
   } else if (boot.session.state === "full") {
     let content: ReactNode;
     switch (target) {
@@ -143,7 +159,7 @@ export function AdminApp() {
         content = (
           <HomePage
             username={boot.session.username}
-            method={boot.session.method}
+            email={boot.session.email}
             onSessionLost={refresh}
           />
         );

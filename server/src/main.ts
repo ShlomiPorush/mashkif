@@ -3,15 +3,17 @@ import { serve } from "@hono/node-server";
 import postgres from "postgres";
 import { createApp } from "./app.js";
 import { createAuth } from "./auth/auth.js";
-import { MemoryRateLimitStore } from "./auth/rate-limit.js";
-import { ConfigError, loadConfig, passkeysSupported, type ServerConfig } from "./config.js";
+import { ConfigError, loadConfig, type ServerConfig } from "./config.js";
 import { createDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
 import { describeSafely } from "./errors.js";
 import { GeoLiteAsn } from "./geoip.js";
 import { clientAddressResolver } from "./http/client-address.js";
+import { MemoryRateLimitStore } from "./http/rate-limit.js";
+import { createMailer } from "./mail/mailer.js";
 import { databaseCheck, readableFileCheck } from "./readiness.js";
 import { scheduleRetention } from "./retention.js";
+import { panelTrustedOrigins, resolveSettings } from "./settings.js";
 import { hasWebAssets } from "./static.js";
 
 /** web/dist, resolved from server/dist/main.js. */
@@ -52,17 +54,23 @@ async function main(): Promise<void> {
     console.warn(`web assets not found at ${WEB_ROOT}; serving the API only`);
   }
 
-  if (!passkeysSupported(config.publicOrigin)) {
-    console.warn(
-      "MASHKIF_PUBLIC_URL uses an IP address, so passkeys cannot work (browsers need a host name); use http://localhost:<port> in development",
-    );
-  }
   const db = createDb(sql);
-  const auth = createAuth({ db, appKey: config.appKey, publicOrigin: config.publicOrigin });
-  // One client address for sign-in limits, Better Auth, and the agent API.
-  const clientAddress = clientAddressResolver(config.trustedProxies);
-  if (config.trustedProxies.length === 0) {
-    console.log("MASHKIF_TRUSTED_PROXIES is empty: the TCP peer is the client address");
+  // Settings that apply at startup; a change in the admin panel needs a restart.
+  const { values: settings } = await resolveSettings(db);
+  const publicUrl = settings.publicUrl === "" ? undefined : settings.publicUrl;
+  const auth = createAuth({
+    db,
+    secret: config.authSecret,
+    publicUrl,
+    trustedOrigins: () => panelTrustedOrigins(db),
+    trustedProxies: settings.trustedProxies,
+    sessionHours: settings.sessionHours,
+    mailer: createMailer(db, config.authSecret),
+  });
+  // The agent API's client address; Better Auth resolves its own from the same proxies.
+  const clientAddress = clientAddressResolver(settings.trustedProxies);
+  if (settings.trustedProxies.length === 0) {
+    console.log("no trusted proxies are set: the TCP peer is the client address");
   }
   const asn = new GeoLiteAsn(config.geoipAsnPath);
   await asn.start();
@@ -72,7 +80,7 @@ async function main(): Promise<void> {
       database: databaseCheck(sql),
       geoip: readableFileCheck(config.geoipAsnPath),
     },
-    admin: { db, auth, publicOrigin: config.publicOrigin, clientAddress, asn },
+    admin: { db, auth, authSecret: config.authSecret, publicUrl, clientAddress, asn },
     agent: {
       db,
       asn,

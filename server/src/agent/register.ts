@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, gt, isNull } from "drizzle-orm";
-import { hashToken } from "../admin/setup.js";
 import { writeAudit } from "../audit.js";
 import type { Db } from "../db/client.js";
 import { agent, enrollmentKey } from "../db/schema.js";
+import { hashToken } from "../http/token-hash.js";
 import type { RegisterRequest } from "./parse.js";
 import { addressBlocked, lockBlocklistShared } from "./write-guard.js";
 

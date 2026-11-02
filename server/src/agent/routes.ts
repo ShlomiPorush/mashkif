@@ -1,8 +1,6 @@
 import type { components } from "@mashkif/contracts";
 import { eq } from "drizzle-orm";
 import type { Context, Hono } from "hono";
-import { hashToken } from "../admin/setup.js";
-import { MemoryRateLimitStore, type RateLimitRule } from "../auth/rate-limit.js";
 import type { Db } from "../db/client.js";
 import { agent } from "../db/schema.js";
 import { describeSafely } from "../errors.js";
@@ -10,11 +8,13 @@ import { classifyAreaCell } from "../geo/area.js";
 import { siteKeyOf } from "../geo/site.js";
 import type { AsnLookup } from "../geoip.js";
 import { boundedBody } from "../http/bounded-body.js";
+import { MemoryRateLimitStore, type RateLimitRule } from "../http/rate-limit.js";
 import {
   type ClientAddressResolver,
   normalizeAddress,
   peerAddress,
 } from "../http/request-guards.js";
+import { hashToken } from "../http/token-hash.js";
 import { readSettings } from "../settings.js";
 import { recordEvents } from "./events.js";
 import { recordHeartbeat } from "./heartbeat.js";

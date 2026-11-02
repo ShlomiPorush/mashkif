@@ -70,9 +70,10 @@ describe("retention", () => {
     await runRetention(database.db, NOW);
     expect(await counts()).toMatchObject({ heartbeats: 1, events: 1 });
 
-    expect(parseSettingsUpdate({ retentionDays: 7 })).toEqual({
+    expect(parseSettingsUpdate({ retentionDays: 7 }, [])).toEqual({
       ok: false,
       field: "retentionDays",
+      locked: false,
     });
     // A value stored out of range falls back to the default instead of deleting too much.
     await database.sql`update setting set value = '1'::jsonb where key = 'retention_days'`;

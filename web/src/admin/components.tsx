@@ -56,7 +56,7 @@ export function AuthPanel({
 
 interface FieldProps extends InputHTMLAttributes<HTMLInputElement> {
   label: string;
-  help?: string;
+  help?: ReactNode;
   ref?: Ref<HTMLInputElement>;
 }
 
@@ -129,11 +129,24 @@ export function Button({
   );
 }
 
-/** A shell command shown as code, chosen whole on click for copying. */
-export function Command({ children }: { children: string }) {
+/** TOTP backup codes, shown once: when TOTP is enrolled and when they are generated again. */
+export function BackupCodes({ codes }: { codes: string[] }) {
+  const { t } = useTranslation();
+  const headingId = useId();
   return (
-    <code className="command" dir="ltr">
-      {children}
-    </code>
+    <section className="backup-codes" aria-labelledby={headingId}>
+      <h2 id={headingId} className="card-heading">
+        {t("backupCodes.heading")}
+      </h2>
+      <p className="field-help">{t("backupCodes.help")}</p>
+      <ul className="backup-code-list" dir="ltr">
+        {codes.map((code) => (
+          <li key={code}>
+            {/* User data, never translated. */}
+            <span data-value="">{code}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

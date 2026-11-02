@@ -35,18 +35,17 @@ Run the scripts from WSL, in the repository root:
 
 ## Operations
 
-The server reads its settings from `.env` (template: `.env.example`). Besides the database settings it needs:
+The server reads only a few values from `.env` (template: `.env.example`): the database settings, the GeoLite2-ASN path, and:
 
-- `MASHKIF_APP_KEY`: a secret of at least 32 random bytes in base64. Generate one with `openssl rand -base64 32` and back it up together with `.env`. A new key signs the admin out and makes the enrolled TOTP unusable; run `reset-admin` afterwards.
-- `MASHKIF_PUBLIC_URL`: the origin of the web app, for example `https://mashkif.co.il`. Passkeys are bound to its host name, so use `http://localhost:8180` for local development: browsers refuse passkeys on an IP address such as 127.0.0.1.
-- `MASHKIF_TRUSTED_PROXIES` (optional): addresses or CIDR ranges of the reverse proxies whose `X-Forwarded-For` is believed. Behind Traefik, put the app and Traefik on a Docker network that nothing else uses and list that network's subnet; otherwise every client counts as Traefik's address for rate limits and agent sites.
+- `BETTER_AUTH_SECRET`: a secret of at least 32 random characters. Generate one with `openssl rand -base64 32` and back it up together with `.env`. A new secret signs the admin out and makes the enrolled TOTP, the backup codes, and the stored SMTP password unusable.
 
-The admin panel is at `/admin`. Mashkif has one admin. There the admin creates single-use enrollment keys for agents, sees the agents and their sites, sets trust tiers, blocks addresses, groups ASNs into providers, and sets the heartbeat interval and how long raw data is kept. Thresholds and similar values live only in the database; the repository holds development defaults. Run these commands next to the Compose file on the server:
+Every other setting is managed in the admin panel under Settings, with a default: the heartbeat interval, how long raw data is kept, the public URL, other trusted origins, the trusted proxies, the session length, and SMTP for email. An environment variable may override a setting (for example `BETTER_AUTH_URL` for the public URL or `MASHKIF_TRUSTED_PROXIES`; `.env.example` lists them); the panel then shows the field locked. The public URL, the trusted proxies, and the session length apply after a restart.
 
-| Command | Purpose |
-|---|---|
-| `docker compose exec app node server/dist/cli.js setup-token` | Print a setup token for creating the admin at `/admin/setup`. It works once, for 15 minutes, and is refused once an admin exists. |
-| `docker compose exec app node server/dist/cli.js reset-admin` | Regain access: the current password, TOTP, passkeys, sessions, and pending sign-ins stop working, and a single-use reset token is printed (valid 15 minutes). Open `/admin/reset`, enter the token, and choose a new password; then sign in and set up TOTP again. No password is ever printed. |
+- Public URL: the origin of the web app, for example `https://mashkif.co.il`. Recommended behind a proxy; while it is empty, Better Auth takes the origin from each request. Use `http://localhost:8180` for local development: browsers refuse passkeys on an IP address such as 127.0.0.1.
+- Trusted proxies: addresses or CIDR ranges of the reverse proxies whose `X-Forwarded-For` is believed. Mashkif's own resolver (agent API and audit) and Better Auth's client address handling (sign-in rate limits) are both configured from this list, but they are separate. Behind Traefik, put the app and Traefik on a Docker network that nothing else uses and list that network's subnet; otherwise Mashkif counts every agent as Traefik's address, and Better Auth applies its own documented behavior. Keep the app reachable only through its proxy.
+- SMTP: host, port (465, or a port that offers STARTTLS), user, password (stored encrypted, never shown), and sender. Without it the server works, but password reset and email change send nothing: the page still says the link is on its way, and only the server log says why.
+
+The admin panel is at `/admin`. Mashkif has one admin. The first visit creates the admin account (username, email address, password), then sets up two-step verification with an authenticator app and shows ten backup codes once. Keep them: each one replaces the app's code for one sign-in. A lost password is reset from the sign-in page with a link sent by email. There is no other recovery: losing the authenticator and every backup code locks the admin out. In the panel the admin creates single-use enrollment keys for agents, sees the agents and their sites, sets trust tiers, blocks addresses, groups ASNs into providers, and manages the settings. Thresholds and similar values live only in the database; the repository holds development defaults.
 
 ## Contributing
 

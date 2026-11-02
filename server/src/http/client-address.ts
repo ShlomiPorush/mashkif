@@ -50,8 +50,10 @@ function contains(list: BlockList, address: string): boolean {
  * the walk at the last trusted hop, which is stricter for rate limits, never
  * weaker. With no trusted proxies this is the TCP peer.
  *
- * The admin sign-in rate limits, Better Auth's session records, the agent
- * rate limits, and the agent's site all use this one address.
+ * The agent rate limits, the agent's site, and admin audit entries use this
+ * address. Better Auth resolves its own (sign-in rate limits, session records)
+ * through advanced.ipAddress, configured from the same trusted proxies but
+ * separate; without trusted proxies it applies its own documented behavior.
  */
 export function clientAddressResolver(
   trustedProxies: readonly string[],

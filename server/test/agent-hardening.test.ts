@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ADDRESS_RATE_LIMIT, INVALID_TOKEN_COST } from "../src/agent/routes.js";
-import { MemoryRateLimitStore } from "../src/auth/rate-limit.js";
 import { MAX_SYNC_ANCHORS_PER_AGENT } from "../src/db/schema.js";
+import { MemoryRateLimitStore } from "../src/http/rate-limit.js";
 import { runRetention } from "../src/retention.js";
 import { fullAdmin, insertKey, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
@@ -34,8 +34,8 @@ async function count(table: string): Promise<number> {
 describe("revoking or blocking while an agent request is under way", () => {
   async function setUp() {
     const pause = pauseOnce();
-    harness = createHarness(database, undefined, undefined, { beforeWrite: pause.hook });
-    const browser = await fullAdmin(database, harness);
+    harness = createHarness(database, { beforeWrite: pause.hook });
+    const browser = await fullAdmin(harness);
     const agent = await new TestAgent(harness).enroll(database);
     return { pause, browser, agent };
   }
@@ -207,7 +207,7 @@ describe("boot counters", () => {
   });
 
   it("deletes the anchors and boot counters of a revoked agent", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const agent = await new TestAgent(harness).enroll(database);
     await agent.heartbeat();
     await agent.events([], { bootId: agent.bootId, count: 4 });
@@ -230,7 +230,7 @@ describe("IPv4-mapped addresses", () => {
   );
 
   it("stores a mapped block as IPv4, so it matches the normalized address", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const single = await browser.post("/api/admin/blocked-ranges", {
       range: "::ffff:203.0.113.5/128",
     });
@@ -252,8 +252,8 @@ describe("IPv4-mapped addresses", () => {
 describe("settings updated at the same time", () => {
   it("audits every change when two updates race", async () => {
     const pause = pauseOnce();
-    harness = createHarness(database, undefined, undefined, { afterSettingsRead: pause.hook });
-    const browser = await fullAdmin(database, harness);
+    harness = createHarness(database, { afterSettingsRead: pause.hook });
+    const browser = await fullAdmin(harness);
     // B reads 60 and stops; A then sets 120.
     const b = browser.post("/api/admin/settings", { heartbeatIntervalSeconds: 60 });
     await pause.atPause;
@@ -278,7 +278,7 @@ describe("settings updated at the same time", () => {
 
 describe("32-bit ASNs", () => {
   it("stores and maps an ASN above 2^31", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const created = await browser.post("/api/admin/providers", {
       name: "Private 32-bit",
       asns: [4200000001],

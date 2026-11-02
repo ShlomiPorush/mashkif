@@ -12,8 +12,8 @@ export interface RateLimitDecision {
 const MAX_ENTRIES = 100_000;
 
 /**
- * Fixed-window rate-limit store for Better Auth, kept in this process. One
- * instance per auth instance, so tests can start from a clean state; the
+ * Fixed-window rate-limit store for the agent API, kept in this process. One
+ * instance per use, so tests can start from a clean state; the
  * server runs as a single process.
  */
 export class MemoryRateLimitStore {

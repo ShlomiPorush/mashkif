@@ -8,14 +8,16 @@ import {
   peerAddress,
 } from "../http/request-guards.js";
 
-/** Everything the admin and auth routes need. */
+/** Everything the admin routes need. */
 export interface AdminDeps {
   db: Db;
   auth: Auth;
-  /** Origin of the web app, for example https://mashkif.co.il. */
-  publicOrigin: string;
-  /** Time a client has to send a request body; defaults to ADMIN_BODY_TIMEOUT_MS. */
-  bodyTimeoutMs?: number;
+  /** BETTER_AUTH_SECRET, which also encrypts stored secrets such as the SMTP password. */
+  authSecret: string;
+  /** The public URL; undefined means the origin the request was made to. */
+  publicUrl: string | undefined;
+  /** Environment overrides of settings; defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
   /** Defaults to the TCP peer address. */
   clientAddress?: ClientAddressResolver;
   /** For the GeoLite2-ASN status in the settings. */
@@ -23,6 +25,14 @@ export interface AdminDeps {
   /** Test seams. */
   testHooks?: { afterSettingsRead?: () => Promise<void> };
 }
+
+/** The signed-in admin of a request. */
+export interface AdminIdentity {
+  username: string;
+}
+
+/** Hono variables of an admin request. */
+export type AdminEnv = { Variables: { admin: AdminIdentity } };
 
 export interface RequestMeta {
   ipAddress: string | undefined;
@@ -35,6 +45,3 @@ export function requestMeta(deps: AdminDeps, c: Context): RequestMeta {
     userAgent: c.req.header("user-agent"),
   };
 }
-
-/** The error body of every admin and auth refusal: a stable code the web app maps to text. */
-export type ErrorBody = { error: string };
