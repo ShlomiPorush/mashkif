@@ -436,8 +436,7 @@
   white-space: nowrap;
 }
 
-.badge-trusted,
-.badge-key-active {
+.badge-trusted {
   border-color: var(--online);
   color: var(--online);
 }
@@ -448,16 +447,20 @@
 }
 
 .badge-blocked,
-.badge-revoked,
-.badge-key-revoked {
+.badge-revoked {
   border-color: var(--danger);
   color: var(--danger);
 }
 
-.badge-key-used,
-.badge-key-expired,
 .badge-normal {
   color: var(--muted);
+}
+
+/* A new agent in its trial: counted in no outage until it is promoted. */
+.badge-low {
+  border-style: dashed;
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .agent-list,

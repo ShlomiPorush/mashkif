@@ -7,6 +7,14 @@ import { ManagePage, useAdminResource, useDateFormat } from "../manage";
 type Name =
   | "heartbeatIntervalSeconds"
   | "retentionDays"
+  | "registrationOpen"
+  | "newAgentTier"
+  | "promotionDays"
+  | "registerPerSitePer10Min"
+  | "registerGlobalPerHour"
+  | "eventsPerAgentHour"
+  | "eventsPerLowAgentHour"
+  | "agentCleanupDays"
   | "publicUrl"
   | "trustedOrigins"
   | "trustedProxies"
@@ -17,7 +25,7 @@ type Name =
   | "smtpPassword"
   | "smtpFrom";
 
-type Kind = "number" | "text" | "list" | "password";
+type Kind = "number" | "text" | "list" | "password" | "open" | "tier";
 
 interface FieldSpec {
   name: Name;
@@ -26,7 +34,11 @@ interface FieldSpec {
 }
 
 const GROUPS: {
-  heading: "settings.agentsGroup" | "settings.signInGroup" | "settings.mailGroup";
+  heading:
+    | "settings.agentsGroup"
+    | "settings.registrationGroup"
+    | "settings.signInGroup"
+    | "settings.mailGroup";
   fields: FieldSpec[];
 }[] = [
   {
@@ -34,6 +46,19 @@ const GROUPS: {
     fields: [
       { name: "heartbeatIntervalSeconds", kind: "number", input: { min: 30, max: 600 } },
       { name: "retentionDays", kind: "number", input: { min: 8, max: 3650 } },
+    ],
+  },
+  {
+    heading: "settings.registrationGroup",
+    fields: [
+      { name: "registrationOpen", kind: "open" },
+      { name: "newAgentTier", kind: "tier" },
+      { name: "promotionDays", kind: "number", input: { min: 1, max: 90 } },
+      { name: "registerPerSitePer10Min", kind: "number", input: { min: 1, max: 1000 } },
+      { name: "registerGlobalPerHour", kind: "number", input: { min: 1, max: 100_000 } },
+      { name: "eventsPerAgentHour", kind: "number", input: { min: 100, max: 100_000 } },
+      { name: "eventsPerLowAgentHour", kind: "number", input: { min: 10, max: 100_000 } },
+      { name: "agentCleanupDays", kind: "number", input: { min: 7, max: 3650 } },
     ],
   },
   {
@@ -70,14 +95,34 @@ function shown(data: AdminSettings, field: FieldSpec): string | number {
     return "";
   }
   const value = data[field.name as Exclude<Name, "smtpPassword">];
+  if (typeof value === "boolean") {
+    return String(value);
+  }
   return Array.isArray(value) ? value.join(", ") : value;
 }
+
+/** The options of a select field: the registration switch, or the tier of new agents. */
+const OPTIONS = {
+  open: [
+    { value: "true", label: "settings.open" },
+    { value: "false", label: "settings.closed" },
+  ],
+  tier: [
+    { value: "low", label: "tier.low" },
+    { value: "normal", label: "tier.normal" },
+    { value: "suspicious", label: "tier.suspicious" },
+  ],
+} as const;
 
 /** The value to send for one field, or undefined to leave the setting unchanged. */
 function toSend(field: FieldSpec, text: string): unknown {
   switch (field.kind) {
     case "number":
       return Number(text);
+    case "open":
+      return text === "true";
+    case "tier":
+      return text;
     case "list":
       return text
         .split(/[\s,]+/)
@@ -175,6 +220,33 @@ export function SettingsPage({ onSessionLost }: { onSessionLost: () => Promise<v
               <div className="form">
                 {group.fields.map((field) => {
                   const locked = data.locked.includes(field.name);
+                  if (field.kind === "open" || field.kind === "tier") {
+                    const id = `setting-${field.name}`;
+                    return (
+                      <div key={field.name} className="field">
+                        <label className="field-label" htmlFor={id}>
+                          {t(`settings.${field.name}`)}
+                        </label>
+                        <select
+                          id={id}
+                          className="field-input"
+                          name={field.name}
+                          defaultValue={String(shown(data, field))}
+                          disabled={locked}
+                          aria-describedby={`${id}-help`}
+                        >
+                          {OPTIONS[field.kind].map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {t(option.label)}
+                            </option>
+                          ))}
+                        </select>
+                        <p id={`${id}-help`} className="field-help">
+                          {help(data, field)}
+                        </p>
+                      </div>
+                    );
+                  }
                   return (
                     <Field
                       key={field.name}

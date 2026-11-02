@@ -34,7 +34,7 @@ export const adminApi = {
   post: <T>(path: string, body: unknown = {}) => request<T>("POST", path, body),
 };
 
-export type TrustTier = "trusted" | "normal" | "suspicious" | "blocked";
+export type TrustTier = "trusted" | "normal" | "low" | "suspicious" | "blocked";
 export type Infrastructure =
   | "unknown"
   | "bezeq"
@@ -48,6 +48,8 @@ export interface AgentSummary {
   id: string;
   label: string | null;
   trustTier: TrustTier;
+  /** Distinct days the agent reported on, for the trial of a low agent. */
+  activeDays: number;
   agentVersion: string;
   osVersion: string | null;
   registeredAt: string;
@@ -65,17 +67,6 @@ export interface AgentSummary {
   lastEventKind: string | null;
   lastEventAt: string | null;
   droppedEvents: number | string;
-}
-
-export interface EnrollmentKeySummary {
-  id: number;
-  label: string;
-  createdAt: string;
-  expiresAt: string;
-  usedAt: string | null;
-  revokedAt: string | null;
-  agentId: string | null;
-  status: "active" | "used" | "expired" | "revoked";
 }
 
 export interface BlockedRange {
@@ -98,6 +89,14 @@ export type SettingApply = "now" | "restart" | "next_email";
 export interface AdminSettings {
   heartbeatIntervalSeconds: number;
   retentionDays: number;
+  registrationOpen: boolean;
+  newAgentTier: "low" | "normal" | "suspicious";
+  promotionDays: number;
+  registerPerSitePer10Min: number;
+  registerGlobalPerHour: number;
+  eventsPerAgentHour: number;
+  eventsPerLowAgentHour: number;
+  agentCleanupDays: number;
   publicUrl: string;
   trustedOrigins: string[];
   trustedProxies: string[];
