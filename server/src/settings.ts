@@ -236,10 +236,14 @@ function rule(name: SettingName): Rule<unknown> {
   return SETTING_RULES[name];
 }
 
-/** The environment value of a setting: set when not empty after trimming. */
+/**
+ * The environment value of a setting: set when not empty after trimming. A
+ * secret is kept exactly as given, and set when not empty.
+ */
 function envText(name: SettingName, env: NodeJS.ProcessEnv): string | undefined {
   const variable = rule(name).env;
-  const value = variable === undefined ? undefined : env[variable]?.trim();
+  const raw = variable === undefined ? undefined : env[variable];
+  const value = rule(name).secret === true ? raw : raw?.trim();
   return value === undefined || value === "" ? undefined : value;
 }
 

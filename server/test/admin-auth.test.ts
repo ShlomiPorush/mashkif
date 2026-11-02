@@ -218,6 +218,86 @@ describe("sign-in", () => {
   });
 });
 
+describe("sign-in by email", () => {
+  it("is audited like username sign-in, failed and successful", async () => {
+    await setUpAdmin(harness);
+    const browser = new Browser(harness);
+    const wrong = await browser.post("/api/auth/sign-in/email", {
+      email: EMAIL,
+      password: "wrong password here",
+    });
+    expect(wrong.status).toBe(401);
+    const right = await browser.post("/api/auth/sign-in/email", {
+      email: EMAIL,
+      password: PASSWORD,
+    });
+    expect(right.status).toBe(200);
+    const rows = await database.sql`select actor, action, details from audit_log
+      where action like 'sign_in.%' order by id`;
+    expect(rows).toEqual([
+      { actor: "-", action: "sign_in.failed", details: { step: "password" } },
+      {
+        actor: USERNAME.toLowerCase(),
+        action: "sign_in.succeeded",
+        details: { method: "password" },
+      },
+    ]);
+  });
+
+  it("with TOTP enrolled, leaves the audit to the TOTP step", async () => {
+    const admin = await setUpAdmin(harness);
+    const { secret } = await enrollTotp(admin);
+    const browser = new Browser(harness);
+    const password = await browser.post("/api/auth/sign-in/email", {
+      email: EMAIL,
+      password: PASSWORD,
+    });
+    expect(password.body.twoFactorRedirect).toBe(true);
+    expect(
+      (await browser.post("/api/auth/two-factor/verify-totp", { code: totpCode(secret) })).status,
+    ).toBe(200);
+    const rows = await database.sql`select details from audit_log
+      where action = 'sign_in.succeeded' order by id`;
+    expect(rows.map((row) => row.details)).toEqual([{ method: "password_totp" }]);
+  });
+
+  it("has the same limit of 5 attempts per 5 minutes", async () => {
+    await setUpAdmin(harness);
+    const browser = new Browser(harness);
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const reply = await browser.post("/api/auth/sign-in/email", {
+        email: EMAIL,
+        password: "wrong password here",
+      });
+      statuses.push(reply.status);
+    }
+    expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
+  });
+});
+
+describe("secure cookies", () => {
+  it("follow the scheme of a public URL that is set", async () => {
+    const browser = await setUpAdmin(harness);
+    expect(harness.auth.options.advanced?.useSecureCookies).toBe(true);
+    const cookie = browser.seenSetCookies.find((line) => line.includes("session_token"));
+    expect(cookie).toMatch(/^__Secure-/);
+    expect(cookie).toMatch(/;\s*Secure/i);
+    const http = createHarness(database, { publicUrl: "http://localhost:8180" });
+    expect(http.auth.options.advanced?.useSecureCookies).toBe(false);
+  });
+
+  it("are left to Better Auth when no public URL is set", async () => {
+    harness = createHarness(database, { publicUrl: null });
+    expect(harness.auth.options.advanced).not.toHaveProperty("useSecureCookies");
+    // Under tests Better Auth's own default is not secure; in production it is.
+    const browser = await setUpAdmin(harness);
+    const cookie = browser.seenSetCookies.find((line) => line.includes("session_token"));
+    expect(cookie).toBeDefined();
+    expect(cookie).not.toMatch(/^__Secure-/);
+  });
+});
+
 describe("admin API", () => {
   it("is refused without a session and before TOTP is enabled, and /status stays public", async () => {
     const admin = await setUpAdmin(harness);

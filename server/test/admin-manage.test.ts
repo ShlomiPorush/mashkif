@@ -422,6 +422,24 @@ describe("settings from the environment", () => {
     expect((await browser.post("/api/admin/settings", { retentionDays: 10 })).status).toBe(200);
   });
 
+  it("keeps a secret from the environment exactly as given, spaces included", async () => {
+    const { resolveSettings } = await import("../src/settings.js");
+    const env = { MASHKIF_SMTP_PASSWORD: "  spaced secret  ", MASHKIF_SMTP_USER: "  mailer  " };
+    const resolved = await resolveSettings(database.db, { env, secret: harness.secret });
+    expect(resolved.values.smtpPassword).toBe("  spaced secret  ");
+    // Other settings are trimmed.
+    expect(resolved.values.smtpUser).toBe("mailer");
+    expect(resolved.locked).toEqual(expect.arrayContaining(["smtpPassword", "smtpUser"]));
+    // Empty is not set; spaces alone are a password.
+    expect(
+      (await resolveSettings(database.db, { env: { MASHKIF_SMTP_PASSWORD: "" } })).locked,
+    ).toEqual([]);
+    expect(
+      (await resolveSettings(database.db, { env: { MASHKIF_SMTP_PASSWORD: "   " } })).values
+        .smtpPassword,
+    ).toBe("   ");
+  });
+
   it("an empty environment variable does not lock its setting", async () => {
     harness = createHarness(database, {
       env: { MASHKIF_TRUSTED_PROXIES: " ", BETTER_AUTH_URL: "" },

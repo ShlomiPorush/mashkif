@@ -89,6 +89,7 @@ export function createAuth(options: AuthOptions) {
       case "/sign-up/email":
         return failed ? undefined : { actor: actorOf(created), action: "admin.created" };
       case "/sign-in/username":
+      case "/sign-in/email":
         if (failed) {
           return signInFailed("password");
         }
@@ -216,6 +217,7 @@ export function createAuth(options: AuthOptions) {
       storage: "memory",
       customRules: {
         "/sign-in/username": SIGN_IN_RATE_LIMIT,
+        "/sign-in/email": SIGN_IN_RATE_LIMIT,
         "/two-factor/verify-totp": SIGN_IN_RATE_LIMIT,
         "/two-factor/verify-backup-code": SIGN_IN_RATE_LIMIT,
         "/request-password-reset": SIGN_IN_RATE_LIMIT,
@@ -224,7 +226,8 @@ export function createAuth(options: AuthOptions) {
     advanced: {
       // Explicit, so the origin check also runs under tests (Better Auth skips it there by default).
       disableOriginCheck: false,
-      useSecureCookies: publicUrl?.startsWith("https://") ?? false,
+      // From the public URL's scheme when one is set; otherwise Better Auth decides.
+      ...(publicUrl === undefined ? {} : { useSecureCookies: publicUrl.startsWith("https://") }),
       ipAddress: {
         ipAddressHeaders: ["x-forwarded-for"],
         trustedProxies: options.trustedProxies,
