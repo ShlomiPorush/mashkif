@@ -30,7 +30,10 @@ export const AUDIT_ACTIONS = [
   "password_reset.requested",
   "email_change.requested",
   "email.changed",
-  // MVP stage 1, step 2a.
+  // MVP stage 1, step 2a. Since open enrollment (2026-11-03) the enrollment
+  // key actions and agent.registered are no longer written; old rows keep
+  // them. A promotion from low to normal is agent.trust_tier_changed with
+  // the actor "system".
   "enrollment_key.created",
   "enrollment_key.revoked",
   "agent.registered",
@@ -51,7 +54,8 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 export interface AuditEntry {
   /**
    * Admin username, "cli" for the former operator commands, "agent" for an agent's own
-   * request, or "-" when nobody is signed in.
+   * request (no longer written), "system" for the promotion job, or "-" when nobody is
+   * signed in.
    */
   actor: string;
   action: AuditAction;

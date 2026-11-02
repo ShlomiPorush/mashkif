@@ -4,6 +4,9 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { setting } from "./db/schema.js";
 import { parseTrustedProxies } from "./http/client-address.js";
 
+/** Tiers the admin may choose for new agents: trusted is too generous for an unknown PC, and blocked would register and then refuse. */
+export const NEW_AGENT_TIERS = ["low", "normal", "suspicious"] as const;
+
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
@@ -129,6 +132,65 @@ export const SETTING_RULES = {
     apply: "now",
     parse: integer(8, 3650),
   } satisfies Rule<number>,
+  /** Whether new agents may register (decision of 2026-11-03); existing agents are not affected. */
+  registrationOpen: {
+    key: "registration_open",
+    default: true,
+    apply: "now",
+    parse: (value: unknown) => (typeof value === "boolean" ? value : undefined),
+  } satisfies Rule<boolean>,
+  /** The trust tier of a new agent; low agents are promoted after their trial. */
+  newAgentTier: {
+    key: "new_agent_tier",
+    default: "low" as string,
+    apply: "now",
+    parse: (value: unknown) =>
+      typeof value === "string" && (NEW_AGENT_TIERS as readonly string[]).includes(value)
+        ? value
+        : undefined,
+  } satisfies Rule<string>,
+  /** Distinct days a low agent must report on before it becomes normal. */
+  promotionDays: {
+    key: "promotion_days",
+    default: 7,
+    apply: "now",
+    parse: integer(1, 90),
+  } satisfies Rule<number>,
+  /** New registrations per site (an IPv4 address or an IPv6 /64) in 10 minutes. */
+  registerPerSitePer10Min: {
+    key: "register_per_site_per_10min",
+    default: 10,
+    apply: "now",
+    parse: integer(1, 1000),
+  } satisfies Rule<number>,
+  /** New registrations per hour across all sites. */
+  registerGlobalPerHour: {
+    key: "register_global_per_hour",
+    default: 200,
+    apply: "now",
+    parse: integer(1, 100_000),
+  } satisfies Rule<number>,
+  /** Events stored per agent per hour; events past it are deferred. */
+  eventsPerAgentHour: {
+    key: "events_per_agent_hour",
+    default: 2000,
+    apply: "now",
+    parse: integer(100, 100_000),
+  } satisfies Rule<number>,
+  /** The same budget for low agents. */
+  eventsPerLowAgentHour: {
+    key: "events_per_low_agent_hour",
+    default: 200,
+    apply: "now",
+    parse: integer(10, 100_000),
+  } satisfies Rule<number>,
+  /** Agents that registered but never sent a heartbeat are deleted after this many days. */
+  agentCleanupDays: {
+    key: "agent_cleanup_days",
+    default: 30,
+    apply: "now",
+    parse: integer(7, 3650),
+  } satisfies Rule<number>,
   /** Origin of the web app; empty lets Better Auth infer it from each request. */
   publicUrl: {
     key: "public_url",
@@ -212,11 +274,13 @@ export const SETTING_RULES = {
 
 export type SettingName = keyof typeof SETTING_RULES;
 export type Settings = {
-  [K in SettingName]: (typeof SETTING_RULES)[K]["default"] extends number
-    ? number
-    : (typeof SETTING_RULES)[K]["default"] extends string
-      ? string
-      : string[];
+  [K in SettingName]: (typeof SETTING_RULES)[K]["default"] extends boolean
+    ? boolean
+    : (typeof SETTING_RULES)[K]["default"] extends number
+      ? number
+      : (typeof SETTING_RULES)[K]["default"] extends string
+        ? string
+        : string[];
 };
 
 const NAMES = Object.keys(SETTING_RULES) as SettingName[];

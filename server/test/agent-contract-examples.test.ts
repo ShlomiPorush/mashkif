@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { insertKey, TestAgent } from "./support/agent.js";
+import { TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import { createHarness, type Harness } from "./support/harness.js";
 
@@ -45,8 +45,6 @@ describe("request examples of every agent build", () => {
   it.each(agentBuilds)("accepts the register and heartbeat requests of %s", async (build) => {
     const register = readExample(build, "register-request.json");
     const heartbeat = readExample(build, "heartbeat-request.json");
-    await insertKey(database, { secret: String(register.enrollmentKey) });
-
     const agent = new TestAgent(harness);
     agent.token = String(register.token);
     const registered = await agent.post("/register", register);

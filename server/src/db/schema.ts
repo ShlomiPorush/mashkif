@@ -8,6 +8,7 @@ import {
   boolean,
   check,
   cidr,
+  date,
   index,
   inet,
   integer,
@@ -165,8 +166,12 @@ export const auditLog = pgTable(
 // Agents: enrollment, heartbeats, and events (MVP stage 1, step 2a)
 // ---------------------------------------------------------------------------
 
-/** Trust tiers the admin assigns to an agent. A blocked agent is refused. */
-export const TRUST_TIERS = ["trusted", "normal", "suspicious", "blocked"] as const;
+/**
+ * Trust tiers of an agent. A new agent starts at the tier the admin set for
+ * new agents (default low) and is promoted from low to normal by the
+ * promotion job; the admin may set any tier. A blocked agent is refused.
+ */
+export const TRUST_TIERS = ["trusted", "normal", "low", "suspicious", "blocked"] as const;
 export type TrustTier = (typeof TRUST_TIERS)[number];
 
 /** Access infrastructure the user chooses in the tray. Never inferred from the provider. */
@@ -204,21 +209,6 @@ export type TimeUncertainReason = (typeof TIME_UNCERTAIN_REASONS)[number];
 const quoted = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
 
 /**
- * Single-use enrollment keys created in the admin panel. Only the SHA-256 hash
- * is stored; the key is shown once. The agent that used a key points to it.
- */
-export const enrollmentKey = pgTable("enrollment_key", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
-  label: text("label").notNull(),
-  keyHash: text("key_hash").notNull().unique(),
-  createdAt: ts("created_at").notNull().defaultNow(),
-  createdBy: text("created_by").notNull(),
-  expiresAt: ts("expires_at").notNull(),
-  usedAt: ts("used_at"),
-  revokedAt: ts("revoked_at"),
-});
-
-/**
  * One row per registered agent. The token is stored only as a SHA-256 hash.
  * The address, site, ASN, area, and interval columns describe the latest
  * heartbeat; an agent belongs to the site of its latest heartbeat.
@@ -229,11 +219,6 @@ export const agent = pgTable(
     id: uuid("id").primaryKey(),
     installId: uuid("install_id").notNull().unique(),
     tokenHash: text("token_hash").notNull().unique(),
-    /** Unique: a key creates at most one agent. */
-    enrollmentKeyId: bigint("enrollment_key_id", { mode: "number" })
-      .notNull()
-      .unique()
-      .references(() => enrollmentKey.id),
     label: text("label"),
     trustTier: text("trust_tier").$type<TrustTier>().notNull().default("normal"),
     agentVersion: text("agent_version").notNull(),
@@ -264,6 +249,14 @@ export const agent = pgTable(
     /** Latest event with a certain time later than the latest heartbeat at the time. */
     lastEventKind: text("last_event_kind").$type<EventKind>(),
     lastEventAt: ts("last_event_at"),
+    /** Distinct UTC days (server time) on which the agent sent a heartbeat. */
+    activeDays: integer("active_days").notNull().default(0),
+    /** The UTC date of the latest counted heartbeat; null after a reset of the trial. */
+    lastActiveDay: date("last_active_day", { mode: "string" }),
+    /** Start of the hour whose events count against the event budget; null until the first events request. */
+    eventWindowStart: ts("event_window_start"),
+    /** Events stored in that hour. */
+    eventWindowCount: integer("event_window_count").notNull().default(0),
   },
   (t) => [
     index("agent_site_key_idx").on(t.siteKey),

@@ -1,9 +1,10 @@
+import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runRetention } from "../src/retention.js";
 import { parseSettingsUpdate, readSettings } from "../src/settings.js";
-import { TestAgent } from "./support/agent.js";
+import { setSetting, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
-import { createHarness, type Harness } from "./support/harness.js";
+import { createHarness, type Harness, pauseOnce } from "./support/harness.js";
 
 let database: TestDatabase;
 let harness: Harness;
@@ -26,7 +27,7 @@ beforeEach(async () => {
 
 /** One agent with a heartbeat and an event on each of the given days before NOW. */
 async function seed(daysAgo: number[]): Promise<void> {
-  const agent = await new TestAgent(harness).enroll(database);
+  const agent = await new TestAgent(harness).enroll();
   for (const days of daysAgo) {
     harness.now = new Date(NOW.getTime() - days * DAY);
     expect((await agent.heartbeat()).status).toBe(200);
@@ -88,4 +89,119 @@ describe("retention", () => {
       complete: true,
     });
   });
+});
+
+describe("cleanup of agents that never reported", () => {
+  /** An agent registered the given number of days before NOW, without a heartbeat. */
+  async function registered(daysAgo: number): Promise<TestAgent> {
+    harness.now = new Date(NOW.getTime() - daysAgo * DAY);
+    const agent = await new TestAgent(harness).enroll();
+    harness.now = undefined;
+    return agent;
+  }
+
+  async function exists(agent: TestAgent): Promise<boolean> {
+    const rows = await database.sql`select 1 from agent where id = ${agent.agentId ?? ""}`;
+    return rows.length === 1;
+  }
+
+  it("deletes only agents that are not revoked, never sent a heartbeat, and are older than the setting", async () => {
+    const stale = await registered(31);
+    const recent = await registered(29);
+    const reported = await registered(40);
+    harness.now = new Date(NOW.getTime() - 39 * DAY);
+    expect((await reported.heartbeat()).status).toBe(200);
+    harness.now = undefined;
+    const revoked = await registered(400);
+    await database.sql`update agent set revoked_at = now() where id = ${revoked.agentId ?? ""}`;
+
+    const result = await runRetention(database.db, NOW);
+    expect(result.agents).toBe(1);
+    expect(await exists(stale)).toBe(false);
+    expect(await exists(recent)).toBe(true);
+    expect(await exists(reported)).toBe(true);
+    // Revoked rows stay forever: they make the server answer agent_revoked.
+    expect(await exists(revoked)).toBe(true);
+  });
+
+  it("follows the setting and resumes in batches", async () => {
+    await setSetting(database, "agent_cleanup_days", 7);
+    await registered(8);
+    await registered(9);
+    await registered(10);
+    const partial = await runRetention(database.db, NOW, 1, 2);
+    expect(partial).toMatchObject({ agents: 2, complete: false });
+    const rest = await runRetention(database.db, NOW, 1, 2);
+    expect(rest).toMatchObject({ agents: 1, complete: true });
+    expect(await counts()).toMatchObject({ agents: 0 });
+  });
+
+  it("keeps a revoked agent's row while its raw data ages out, so a PC that returns is told it was revoked", async () => {
+    harness.now = new Date(NOW.getTime() - 60 * DAY);
+    const agent = await new TestAgent(harness).enroll();
+    expect((await agent.heartbeat()).status).toBe(200);
+    // Revoked while the PC was offline.
+    await database.sql`update agent set revoked_at = ${new Date(NOW.getTime() - 50 * DAY).toISOString()}::timestamptz`;
+    await runRetention(database.db, NOW);
+    expect(await counts()).toMatchObject({ heartbeats: 0, agents: 1 });
+
+    harness.now = NOW;
+    expect(await agent.heartbeat()).toMatchObject({
+      status: 403,
+      body: { error: "agent_revoked" },
+    });
+    // Its own registration again is refused the same way; it does not register anew.
+    expect((await agent.register()).body.error).toBe("agent_revoked");
+    expect(await counts()).toMatchObject({ agents: 1 });
+  });
+
+  it("keeps an agent whose first heartbeat holds its row while the cleanup runs", async () => {
+    const agent = await registered(40);
+    const heartbeat = await database.sql.reserve();
+    try {
+      await heartbeat`begin`;
+      await heartbeat`select id from agent where id = ${agent.agentId ?? ""} for update`;
+      expect((await runRetention(database.db, NOW)).agents).toBe(0);
+      await heartbeat`update agent set last_seen_at = now() where id = ${agent.agentId ?? ""}`;
+      await heartbeat`commit`;
+    } finally {
+      heartbeat.release();
+    }
+    expect((await runRetention(database.db, NOW)).agents).toBe(0);
+    expect(await exists(agent)).toBe(true);
+  });
+
+  it.each(["heartbeat", "events"] as const)(
+    "answers a %s request whose agent the cleanup removed after authentication with 401, and the agent registers again",
+    async (kind) => {
+      const pause = pauseOnce();
+      harness = createHarness(database, { beforeWrite: pause.hook });
+      const agent = await registered(40);
+      const reply =
+        kind === "heartbeat" ? agent.heartbeat() : agent.events([agent.event("sleep", null)]);
+      await pause.atPause;
+      expect((await runRetention(database.db, NOW)).agents).toBe(1);
+      pause.resume();
+      expect(await reply).toMatchObject({ status: 401, body: { error: "token_invalid" } });
+
+      // The 401 cycle: a new token with the same install ID.
+      agent.token = randomBytes(32).toString("base64url");
+      expect((await agent.register()).status).toBe(201);
+    },
+  );
+
+  it.each(["heartbeat", "events"] as const)(
+    "still answers a %s request of an agent revoked after authentication with agent_revoked",
+    async (kind) => {
+      const pause = pauseOnce();
+      harness = createHarness(database, { beforeWrite: pause.hook });
+      const agent = await new TestAgent(harness).enroll();
+      const reply =
+        kind === "heartbeat" ? agent.heartbeat() : agent.events([agent.event("sleep", null)]);
+      await pause.atPause;
+      await database.sql`update agent set revoked_at = now()`;
+      pause.resume();
+      expect(await reply).toMatchObject({ status: 403, body: { error: "agent_revoked" } });
+    },
+  );
 });

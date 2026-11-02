@@ -11,6 +11,7 @@ import { GeoLiteAsn } from "./geoip.js";
 import { clientAddressResolver } from "./http/client-address.js";
 import { MemoryRateLimitStore } from "./http/rate-limit.js";
 import { createMailer } from "./mail/mailer.js";
+import { schedulePromotion } from "./promotion.js";
 import { databaseCheck, readableFileCheck } from "./readiness.js";
 import { scheduleRetention } from "./retention.js";
 import { panelTrustedOrigins, resolveSettings } from "./settings.js";
@@ -93,6 +94,7 @@ async function main(): Promise<void> {
   });
 
   const stopRetention = scheduleRetention(db);
+  const stopPromotion = schedulePromotion(db);
 
   const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
     console.log(`listening on port ${info.port}`);
@@ -107,6 +109,7 @@ async function main(): Promise<void> {
     console.log(`received ${signal}, shutting down`);
     setTimeout(() => process.exit(1), 10_000).unref();
     stopRetention();
+    stopPromotion();
     asn.stop();
     server.close(() => {
       sql.end({ timeout: 5 }).finally(() => process.exit(0));

@@ -1,25 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { expect } from "vitest";
-import { enrollmentKey } from "../../src/db/schema.js";
-import { hashToken } from "../../src/http/token-hash.js";
 import type { TestDatabase } from "./database.js";
 import { type Browser, enrollTotp, type Harness, ORIGIN, setUpAdmin } from "./harness.js";
-
-/** Creates an enrollment key directly in the database; returns the secret. */
-export async function insertKey(
-  database: TestDatabase,
-  options: { expiresAt?: Date; revokedAt?: Date; label?: string; secret?: string } = {},
-): Promise<string> {
-  const secret = options.secret ?? randomBytes(24).toString("base64url");
-  await database.db.insert(enrollmentKey).values({
-    label: options.label ?? "test PC",
-    keyHash: hashToken(secret),
-    createdBy: "shlomi",
-    expiresAt: options.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000),
-    revokedAt: options.revokedAt ?? null,
-  });
-  return secret;
-}
 
 export interface HeartbeatBody {
   sequence: number;
@@ -93,9 +75,8 @@ export class TestAgent {
     };
   }
 
-  register(key: string, overrides: Record<string, unknown> = {}) {
+  register(overrides: Record<string, unknown> = {}) {
     return this.post("/register", {
-      enrollmentKey: key,
       installId: this.installId,
       token: this.token,
       agentVersion: "0.1.0",
@@ -104,9 +85,9 @@ export class TestAgent {
     });
   }
 
-  /** Registers with a fresh key and checks it worked. */
-  async enroll(database: TestDatabase): Promise<this> {
-    const reply = await this.register(await insertKey(database));
+  /** Registers (open registration) and checks it worked. */
+  async enroll(): Promise<this> {
+    const reply = await this.register();
     expect(reply.status).toBe(201);
     this.agentId = String(reply.body.agentId);
     return this;
@@ -171,4 +152,15 @@ export async function fullAdmin(harness: Harness): Promise<Browser> {
   await enrollTotp(browser);
   expect(await browser.sessionState()).toBe("full");
   return browser;
+}
+
+/** Stores a setting as the admin panel would. */
+export async function setSetting(
+  database: TestDatabase,
+  key: string,
+  value: unknown,
+): Promise<void> {
+  await database.sql`insert into setting (key, value, updated_by)
+    values (${key}, ${JSON.stringify(value)}::jsonb, 'test')
+    on conflict (key) do update set value = excluded.value`;
 }

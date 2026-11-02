@@ -2,7 +2,7 @@ import type { components } from "@mashkif/contracts";
 import { eq } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { Db } from "../db/client.js";
-import { agent } from "../db/schema.js";
+import { agent, type TrustTier } from "../db/schema.js";
 import { describeSafely } from "../errors.js";
 import { classifyAreaCell } from "../geo/area.js";
 import { siteKeyOf } from "../geo/site.js";
@@ -20,7 +20,7 @@ import { recordEvents } from "./events.js";
 import { recordHeartbeat } from "./heartbeat.js";
 import { parseEventsRequest, parseHeartbeat, parseRegister, TOKEN_PATTERN } from "./parse.js";
 import { type RegisterHooks, registerAgent } from "./register.js";
-import { addressBlocked } from "./write-guard.js";
+import { addressBlocked, type WriteRefusal } from "./write-guard.js";
 
 type Schemas = components["schemas"];
 export type AgentErrorCode = Schemas["AgentErrorCode"];
@@ -32,8 +32,10 @@ export const AGENT_BODY_TIMEOUT_MS = 10_000;
 /** Most events in one request. */
 export const MAX_EVENTS_PER_REQUEST = 500;
 
-/** Registrations per client address. A retry after a lost answer fits easily. */
-export const REGISTER_RATE_LIMIT: RateLimitRule = { window: 600, max: 10 };
+/** Window of the per-site register limit (its count is the setting registerPerSitePer10Min). */
+export const REGISTER_SITE_WINDOW_SECONDS = 600;
+/** Window of the global register limit (its count is the setting registerGlobalPerHour). */
+export const REGISTER_GLOBAL_WINDOW_SECONDS = 3600;
 /** Heartbeats per agent: the shortest interval is 30 seconds, plus retries. */
 export const HEARTBEAT_RATE_LIMIT: RateLimitRule = { window: 60, max: 10 };
 /** Events requests per agent: a backlog of batches after a long time offline. */
@@ -79,6 +81,14 @@ function refuse(
 ) {
   const body: Schemas["AgentError"] = field === undefined ? { error } : { error, field };
   return c.json(body, status);
+}
+
+/**
+ * A refused agent write. A missing agent row is 401 token_invalid, so the
+ * agent registers again; only an explicit revoke is agent_revoked (O14).
+ */
+function refuseWrite(c: Context, error: WriteRefusal) {
+  return error === "agent_missing" ? refuse(c, 401, "token_invalid") : refuse(c, 403, error);
 }
 
 async function readJson(c: Context): Promise<unknown> {
@@ -171,7 +181,14 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       console.error("agent registration without a usable client address");
       return refuse(c, 500, "internal_error");
     }
-    const refusal = await limited(registerLimits, c, `register:${address}`, REGISTER_RATE_LIMIT);
+    const settings = await readSettings(deps.db);
+    // Per site (an IPv4 address or an IPv6 /64), before any database work, so
+    // the addresses of one /64 share one budget.
+    const site = siteKeyOf(address) as string;
+    const refusal = await limited(registerLimits, c, `register:site:${site}`, {
+      window: REGISTER_SITE_WINDOW_SECONDS,
+      max: settings.registerPerSitePer10Min,
+    });
     if (refusal !== undefined) {
       return refusal;
     }
@@ -183,11 +200,33 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       return refuse(c, 400, "request_invalid", parsed.field);
     }
     const at = now();
-    const outcome = await registerAgent(deps.db, parsed.value, address, at, deps.testHooks);
+    const outcome = await registerAgent(
+      deps.db,
+      parsed.value,
+      address,
+      at,
+      {
+        open: settings.registrationOpen,
+        tier: settings.newAgentTier as TrustTier,
+        admit: async () => {
+          const decision = await registerLimits.consume("register:global", {
+            window: REGISTER_GLOBAL_WINDOW_SECONDS,
+            max: settings.registerGlobalPerHour,
+          });
+          return decision.allowed
+            ? undefined
+            : (decision.retryAfter ?? REGISTER_GLOBAL_WINDOW_SECONDS);
+        },
+      },
+      deps.testHooks,
+    );
     if (!outcome.ok) {
+      if (outcome.error === "rate_limited") {
+        c.header("Retry-After", String(outcome.retryAfter ?? REGISTER_GLOBAL_WINDOW_SECONDS));
+        return refuse(c, 429, "rate_limited");
+      }
       return refuse(c, outcome.error === "install_id_conflict" ? 409 : 403, outcome.error);
     }
-    const settings = await readSettings(deps.db);
     const body: Schemas["RegisterResponse"] = {
       agentId: outcome.agentId,
       heartbeatIntervalSeconds: settings.heartbeatIntervalSeconds,
@@ -226,7 +265,7 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       now: now(),
     });
     if (!reply.ok) {
-      return refuse(c, 403, reply.error);
+      return refuseWrite(c, reply.error);
     }
     const body: Schemas["HeartbeatResponse"] = {
       syncId: reply.syncId,
@@ -248,6 +287,7 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
     if (parsed.value.events.length > MAX_EVENTS_PER_REQUEST) {
       return refuse(c, 413, "too_many_events");
     }
+    const settings = await readSettings(deps.db);
     await deps.testHooks?.beforeWrite?.();
     const recorded = await recordEvents(
       deps.db,
@@ -256,11 +296,18 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       parsed.value.events,
       parsed.value.droppedEvents,
       now(),
+      {
+        perAgentHour: settings.eventsPerAgentHour,
+        perLowAgentHour: settings.eventsPerLowAgentHour,
+      },
     );
     if (!recorded.ok) {
-      return refuse(c, 403, recorded.error);
+      return refuseWrite(c, recorded.error);
     }
-    const body: Schemas["EventsResponse"] = { results: recorded.results };
+    const body: Schemas["EventsResponse"] =
+      recorded.retryAfterSeconds === undefined
+        ? { results: recorded.results }
+        : { results: recorded.results, retryAfterSeconds: recorded.retryAfterSeconds };
     return c.json(body, 200);
   });
 
