@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Repository guards: Hebrew text, Compose build keys, shell scripts, line
-# endings, the area selection and release script tests, and CI configuration.
+# endings, the variables in .env.example, the area selection and release
+# script tests, and CI configuration.
 # Sourced by scripts/verify.sh.
 
 # The only files that may contain Hebrew. Changing this list needs the
@@ -157,6 +158,58 @@ guard_line_endings() {
   fi
 }
 
+# Variables that only the environment sets: what the server needs before it
+# can read its settings from the database, and Compose wiring.
+MASHKIF_ENV_ONLY=(
+  MASHKIF_IMAGE_TAG
+  MASHKIF_DATA_DIR
+  MASHKIF_GEOIP_DIR
+  MASHKIF_TRAEFIK_NETWORK
+  POSTGRES_USER
+  POSTGRES_DB
+  POSTGRES_PASSWORD
+  DATABASE_URL
+  PORT
+  MASHKIF_GEOIP_ASN_PATH
+  BETTER_AUTH_SECRET
+)
+
+# _env_example_offenders <file>: prints every variable the file assigns that is
+# neither environment-only nor the override of a setting in
+# server/src/settings.ts (its env: "NAME" entries).
+_env_example_offenders() {
+  local file="$1" name
+  local -a allowed=("${MASHKIF_ENV_ONLY[@]}")
+  mapfile -t -O "${#allowed[@]}" allowed < <(
+    grep -oE 'env: "[A-Z0-9_]+"' "$MASHKIF_ROOT/server/src/settings.ts" | sed -E 's/env: "(.*)"/\1/'
+  )
+  while IFS= read -r name; do
+    [[ " ${allowed[*]} " == *" $name "* ]] || printf '%s\n' "$name"
+  done < <(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1/p' "$file")
+}
+
+# Every setting is managed in the admin panel; .env.example may list only the
+# environment-only values and the variables that override a panel setting.
+# Self-test first: an unlisted variable must be reported.
+guard_env_example() {
+  local scratch offenders
+  scratch="$(mashkif_mktemp env-example)" || return "$MASHKIF_EXIT_ENV"
+  cp "$MASHKIF_ROOT/.env.example" "$scratch/.env.example"
+  printf 'MASHKIF_NOT_A_SETTING=1\n' >>"$scratch/.env.example"
+  offenders="$(_env_example_offenders "$scratch/.env.example")"
+  rm -rf -- "$scratch"
+  if [[ "$offenders" != MASHKIF_NOT_A_SETTING ]]; then
+    fail "the .env.example guard did not report an unlisted variable (self-test)"
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+  offenders="$(_env_example_offenders "$MASHKIF_ROOT/.env.example")"
+  if [[ -n "$offenders" ]]; then
+    fail ".env.example lists variables that are neither environment-only nor a setting override:"
+    sed 's/^/  /' <<<"$offenders" >&2
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+}
+
 guard_selection_tests() {
   bash "$MASHKIF_ROOT/scripts/tests/test-select-areas.sh"
 }
@@ -299,7 +352,7 @@ urllib3==2.8.0"
 
 verify_guards() {
   local name rc failed=0 env=0
-  for name in hebrew compose_build shell line_endings selection_tests release_tests ci_config; do
+  for name in hebrew compose_build shell line_endings env_example selection_tests release_tests ci_config; do
     set +e
     "guard_$name"
     rc=$?

@@ -146,7 +146,8 @@ export function SettingsPage({ onSessionLost }: { onSessionLost: () => Promise<v
           className="manage-page"
           onSubmit={(event) => {
             event.preventDefault();
-            const form = new FormData(event.currentTarget);
+            const element = event.currentTarget;
+            const form = new FormData(element);
             const body: Record<string, unknown> = {};
             for (const field of GROUPS.flatMap((group) => group.fields)) {
               if (data.locked.includes(field.name)) {
@@ -158,7 +159,14 @@ export function SettingsPage({ onSessionLost }: { onSessionLost: () => Promise<v
               }
             }
             setSaved(false);
-            void act(() => adminApi.post("/settings", body)).then(setSaved);
+            void act(() => adminApi.post("/settings", body)).then((ok) => {
+              setSaved(ok);
+              // A saved password is not kept in the page.
+              const password = element.elements.namedItem("smtpPassword");
+              if (ok && password instanceof HTMLInputElement) {
+                password.value = "";
+              }
+            });
           }}
         >
           {GROUPS.map((group) => (
