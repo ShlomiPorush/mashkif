@@ -102,6 +102,8 @@
 }
 
 .field-input[readonly] {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
   color: var(--muted);
 }
 
