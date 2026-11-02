@@ -21,4 +21,76 @@
   <data name="MenuExit" xml:space="preserve">
     <value>יציאה</value>
   </data>
+  <data name="StatusUnregistered" xml:space="preserve">
+    <value>המחשב לא רשום. הזינו מפתח רישום כדי להתחיל.</value>
+  </data>
+  <data name="StatusRegistering" xml:space="preserve">
+    <value>רושם את המחשב...</value>
+  </data>
+  <data name="StatusConnected" xml:space="preserve">
+    <value>מחובר. משקיף מדווח.</value>
+  </data>
+  <data name="StatusUnreachable" xml:space="preserve">
+    <value>אין חיבור לשרת משקיף. משקיף ממשיך לנסות.</value>
+  </data>
+  <data name="StatusRefused" xml:space="preserve">
+    <value>השרת דוחה את המחשב כרגע ({0}). משקיף ממשיך לנסות.</value>
+  </data>
+  <data name="StatusRefusedTokenInvalid" xml:space="preserve">
+    <value>השרת כבר לא מזהה את המחשב. הזינו מפתח רישום חדש.</value>
+  </data>
+  <data name="StatusRefusedServerChanged" xml:space="preserve">
+    <value>משקיף עובד עכשיו מול שרת אחר. הזינו מפתח רישום לשרת הזה.</value>
+  </data>
+  <data name="StatusRevoked" xml:space="preserve">
+    <value>המחשב הוסר ממשקיף. הזינו מפתח רישום חדש כדי לדווח שוב.</value>
+  </data>
+  <data name="StatusServiceUnavailable" xml:space="preserve">
+    <value>שירות משקיף לא פועל.</value>
+  </data>
+  <data name="StatusLastContact" xml:space="preserve">
+    <value>חיבור אחרון: {0}</value>
+  </data>
+  <data name="MenuEnroll" xml:space="preserve">
+    <value>רישום המחשב...</value>
+  </data>
+  <data name="EnrollTitle" xml:space="preserve">
+    <value>רישום המחשב</value>
+  </data>
+  <data name="EnrollPrompt" xml:space="preserve">
+    <value>הזינו את מפתח הרישום מלוח הניהול של משקיף.</value>
+  </data>
+  <data name="EnrollOk" xml:space="preserve">
+    <value>רישום</value>
+  </data>
+  <data name="EnrollCancel" xml:space="preserve">
+    <value>ביטול</value>
+  </data>
+  <data name="EnrollFormatInvalid" xml:space="preserve">
+    <value>מפתח רישום מכיל 32 אותיות לועזיות, ספרות, מקפים או קווים תחתונים. בדקו את המפתח ונסו שוב.</value>
+  </data>
+  <data name="EnrollErrorKeyInvalid" xml:space="preserve">
+    <value>מפתח הרישום לא תקין. בקשו מפתח חדש.</value>
+  </data>
+  <data name="EnrollErrorKeyExpired" xml:space="preserve">
+    <value>תוקף מפתח הרישום פג. בקשו מפתח חדש.</value>
+  </data>
+  <data name="EnrollErrorKeyRevoked" xml:space="preserve">
+    <value>מפתח הרישום בוטל. בקשו מפתח חדש.</value>
+  </data>
+  <data name="EnrollErrorKeyUsed" xml:space="preserve">
+    <value>מפתח הרישום כבר נוצל. בקשו מפתח חדש.</value>
+  </data>
+  <data name="EnrollErrorAgentRevoked" xml:space="preserve">
+    <value>השרת דחה את הרישום כי המחשב הוסר. בקשו מפתח חדש.</value>
+  </data>
+  <data name="EnrollErrorAlreadyRegistered" xml:space="preserve">
+    <value>המחשב כבר רשום.</value>
+  </data>
+  <data name="EnrollErrorInProgress" xml:space="preserve">
+    <value>רישום כבר מתבצע. המתינו רגע.</value>
+  </data>
+  <data name="EnrollErrorNotAvailable" xml:space="preserve">
+    <value>משקיף לא יכול לרשום את המחשב כרגע. הפרטים ביומן השירות.</value>
+  </data>
 </root>

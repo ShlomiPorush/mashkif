@@ -24,7 +24,7 @@ internal static class Program
             "info",
             $"Mashkif tray {AgentInfo.VersionOf(typeof(Program).Assembly)} started (process {Environment.ProcessId}, UI culture {Thread.CurrentThread.CurrentUICulture.Name})");
 
-        using (var context = new TrayContext(log))
+        using (var context = new TrayContext(log, PipeClient.Production()))
         {
             Application.Run(context);
         }

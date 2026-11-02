@@ -1,26 +1,47 @@
+using System.Globalization;
 using Mashkif.Common;
+using Mashkif.Common.Pipe;
 
 namespace Mashkif.Tray;
 
 /// <summary>
-/// Notification area icon with an Exit menu. A hidden top-level window lets
-/// Windows Installer and Restart Manager close the app during uninstall or upgrade.
+/// Notification area icon with the agent status, enrollment, and Exit. A
+/// hidden top-level window lets Windows Installer and Restart Manager close
+/// the app during uninstall or upgrade.
 /// </summary>
 internal sealed class TrayContext : ApplicationContext
 {
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan FastPollInterval = TimeSpan.FromSeconds(2);
+
+    // NotifyIcon.Text accepts at most 127 characters.
+    private const int TooltipLimit = 127;
+
     private readonly FileLog _log;
+    private readonly PipeClient _pipe;
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu;
+    private readonly ToolStripMenuItem _statusItem;
+    private readonly ToolStripMenuItem _enrollItem;
+    private readonly System.Windows.Forms.Timer _timer;
     private readonly SessionEndWindow _sessionWindow;
+    private AgentStatus? _status;
+    private bool _polling;
+    private EnrollForm? _enrollForm;
 
-    public TrayContext(FileLog log)
+    public TrayContext(FileLog log, PipeClient pipe)
     {
         _log = log;
+        _pipe = pipe;
         _menu = new ContextMenuStrip
         {
             RightToLeft = TrayStrings.IsRightToLeft() ? RightToLeft.Yes : RightToLeft.No,
         };
         _menu.Items.Add(new ToolStripLabel(TrayStrings.ProductName()) { Font = new Font(_menu.Font, FontStyle.Bold) });
+        _statusItem = new ToolStripMenuItem(TrayStrings.StatusLine(null)) { Enabled = false };
+        _enrollItem = new ToolStripMenuItem(TrayStrings.Get("MenuEnroll"), null, (_, _) => ShowEnrollForm()) { Visible = false };
+        _menu.Items.Add(_statusItem);
+        _menu.Items.Add(_enrollItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(TrayStrings.MenuExit(), null, (_, _) => Exit("user chose Exit"));
 
@@ -33,11 +54,91 @@ internal sealed class TrayContext : ApplicationContext
         };
 
         _sessionWindow = new SessionEndWindow(() => Exit("session ending or close requested"));
+        _timer = new System.Windows.Forms.Timer { Interval = (int)FastPollInterval.TotalMilliseconds };
+        _timer.Tick += async (_, _) => await PollAsync().ConfigureAwait(true);
+        _timer.Start();
+    }
+
+    private async Task PollAsync()
+    {
+        if (_polling)
+        {
+            return;
+        }
+
+        _polling = true;
+        try
+        {
+            var reply = await _pipe.SendAsync(new PipeRequest { Command = PipeProtocol.StatusCommand }, CancellationToken.None).ConfigureAwait(true);
+            Show(reply.Response?.Status);
+        }
+        finally
+        {
+            _polling = false;
+        }
+    }
+
+    private void Show(AgentStatus? status)
+    {
+        _status = status;
+        var line = TrayStrings.StatusLine(status);
+        if (status?.LastContactUtc is { } contact && status.State == AgentStates.Connected)
+        {
+            line += Environment.NewLine + string.Format(
+                CultureInfo.CurrentCulture,
+                TrayStrings.Get("StatusLastContact"),
+                contact.ToLocalTime().ToString("g", CultureInfo.CurrentCulture));
+        }
+
+        _statusItem.Text = line;
+        _enrollItem.Visible = status?.CanEnroll == true;
+        var tooltip = $"{TrayStrings.ProductName()}: {TrayStrings.StatusLine(status)}";
+        _icon.Text = tooltip.Length <= TooltipLimit ? tooltip : tooltip[..TooltipLimit];
+        _timer.Interval = (int)(status?.State == AgentStates.Registering ? FastPollInterval : PollInterval).TotalMilliseconds;
+    }
+
+    private void ShowEnrollForm()
+    {
+        if (_enrollForm is { IsDisposed: false })
+        {
+            _enrollForm.Activate();
+            return;
+        }
+
+        _enrollForm = new EnrollForm(SubmitKeyAsync);
+        _enrollForm.FormClosed += (_, _) => _enrollForm = null;
+        _enrollForm.Show();
+    }
+
+    /// <summary>Sends the key; returns null on success or the message to show.</summary>
+    private async Task<string?> SubmitKeyAsync(string key)
+    {
+        var reply = await _pipe.SendAsync(
+            new PipeRequest { Command = PipeProtocol.RegisterCommand, EnrollmentKey = key },
+            CancellationToken.None).ConfigureAwait(true);
+        if (reply.Response is null)
+        {
+            return TrayStrings.StatusLine(null);
+        }
+
+        if (reply.Response.Status is { } status)
+        {
+            Show(status);
+        }
+
+        if (reply.Response.Ok)
+        {
+            _log.Write("info", "Enrollment key sent to the service");
+            return null;
+        }
+
+        return TrayStrings.EnrollmentMessage(reply.Response.Error) ?? TrayStrings.StatusLine(_status);
     }
 
     private void Exit(string reason)
     {
         _log.Write("info", $"Mashkif tray exiting: {reason}");
+        _timer.Stop();
         _icon.Visible = false;
         ExitThread();
     }
@@ -46,6 +147,8 @@ internal sealed class TrayContext : ApplicationContext
     {
         if (disposing)
         {
+            _timer.Dispose();
+            _enrollForm?.Dispose();
             _sessionWindow.DestroyHandle();
             _icon.Dispose();
             _menu.Dispose();

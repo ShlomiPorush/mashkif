@@ -6,6 +6,8 @@
     <RootNamespace>Mashkif.Tray</RootNamespace>
     <AssemblyName>Mashkif.Tray</AssemblyName>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- The source-generated P/Invoke stubs of LibraryImport (ServiceProcessCheck) need it. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Lets the installer publish a self-contained win-x64 build with the committed lock file. -->
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <!-- Published by the installer as one self-contained file. -->
