@@ -10,10 +10,15 @@
 #   MSYS*, the CI Windows runner): dotnet. Anything else, or a missing or
 #   unsuitable SDK, is an environment error (exit 2).
 # - MSI: <dotnet> build installer/Mashkif.Installer.wixproj -c Release
-#   writes agent/artifacts/msi/Mashkif-<version>-x64.msi.
+#   writes agent/artifacts/msi/Mashkif-<version>-x64.msi, before the tests,
+#   because Mashkif.Installer.Tests reads its tables.
+# - Install tests (tests/Mashkif.Install.Tests, outside the solution) run only
+#   on a GitHub-hosted runner.
 
 _AGENT_DIR="$MASHKIF_ROOT/agent"
 _AGENT_SDK_HINT="install the .NET 10 SDK"
+# Not in Mashkif.Agent.slnx: it changes the machine (see _agent_install_tests).
+_AGENT_INSTALL_TESTS="tests/Mashkif.Install.Tests/Mashkif.Install.Tests.csproj"
 
 # _agent_select_dotnet: sets _AGENT_DOTNET and _AGENT_HOST (wsl or gitbash).
 _agent_select_dotnet() {
@@ -134,9 +139,12 @@ _agent_run_checks() {
 
   _agent_step "restore (locked)" restore Mashkif.Agent.slnx --locked-mode || return
   _agent_step "restore installer (locked)" restore installer/Mashkif.Installer.wixproj --locked-mode || return
+  _agent_step "restore install tests (locked)" restore "$_AGENT_INSTALL_TESTS" --locked-mode || return
   _agent_step "format" format Mashkif.Agent.slnx --verify-no-changes --no-restore --verbosity minimal || return
+  _agent_step "format install tests" format "$_AGENT_INSTALL_TESTS" --verify-no-changes --no-restore --verbosity minimal || return
   _agent_step "build" build Mashkif.Agent.slnx -c Release --no-restore -warnaserror --disable-build-servers || return
-  _agent_step "test" test --solution Mashkif.Agent.slnx -c Release --no-build || return
+  _agent_step "build install tests" build "$_AGENT_INSTALL_TESTS" -c Release --no-restore -warnaserror --disable-build-servers || return
+  # The MSI comes before the tests: Mashkif.Installer.Tests reads its tables.
   _agent_step "msi" build installer/Mashkif.Installer.wixproj -c Release --no-restore -warnaserror --disable-build-servers || return
 
   if [[ ! -s "$msi" ]]; then
@@ -144,4 +152,44 @@ _agent_run_checks() {
     return "$MASHKIF_EXIT_FAILED"
   fi
   log "  MSI   ${msi#"$MASHKIF_ROOT"/} ($(wc -c <"$msi") bytes)"
+
+  _agent_step "test" test --solution Mashkif.Agent.slnx -c Release --no-build || return
+  _agent_install_tests "$msi"
+}
+
+# _agent_install_tests <msi>: installs, repairs, upgrades, and uninstalls the
+# real MSI. Only on a GitHub-hosted runner, a disposable VM; never on a
+# developer machine. The test assembly enforces the same rule and a full
+# preflight itself (InstallSafetyGate); the check here only reports early.
+_agent_install_tests() {
+  local msi="$1" upgrade_root upgrade_msi
+  if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
+    log "  install tests: not run (GitHub-hosted runner only)"
+    return 0
+  fi
+  if sc.exe query Mashkif >/dev/null 2>&1 || reg.exe query 'HKLM\SOFTWARE\Mashkif' >/dev/null 2>&1 ||
+    [[ -e "$(cygpath -u "$PROGRAMDATA")/Mashkif" ]]; then
+    fail "the runner already has a Mashkif service, registry key, or %ProgramData%\Mashkif; install tests refused"
+    return "$MASHKIF_EXIT_ENV"
+  fi
+
+  # A second MSI with a higher version, for the upgrade. Test artifact only.
+  upgrade_root="$(mashkif_mktemp agent-upgrade)" || return "$MASHKIF_EXIT_ENV"
+  upgrade_msi="$upgrade_root/msi/Mashkif-0.1.1-x64.msi"
+  local rc=0
+  _agent_step "upgrade msi (0.1.1)" build installer/Mashkif.Installer.wixproj -c Release --no-restore --no-incremental -warnaserror \
+    --disable-build-servers -p:Version=0.1.1 "-p:ArtifactsRoot=$(_agent_windows_path "$upgrade_root")\\" || rc=$?
+  if ((rc == 0)) && [[ ! -s "$upgrade_msi" ]]; then
+    fail "the upgrade MSI build did not produce $upgrade_msi"
+    rc="$MASHKIF_EXIT_FAILED"
+  fi
+
+  if ((rc == 0)); then
+    MASHKIF_INSTALL_TEST_MSI="$(_agent_windows_path "$msi")"
+    MASHKIF_INSTALL_TEST_UPGRADE_MSI="$(_agent_windows_path "$upgrade_msi")"
+    export MASHKIF_INSTALL_TEST_MSI MASHKIF_INSTALL_TEST_UPGRADE_MSI
+    _agent_step "install tests" test --project "$_AGENT_INSTALL_TESTS" -c Release --no-build || rc=$?
+  fi
+  rm -rf -- "$upgrade_root"
+  return "$rc"
 }

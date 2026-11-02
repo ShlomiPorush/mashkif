@@ -16,6 +16,14 @@
     <DefineConstants>ProductVersion=$(Version);ServicePublishDir=$(ServicePublishDir);TrayPublishDir=$(TrayPublishDir)</DefineConstants>
     <DotnetHost>$(DOTNET_HOST_PATH)</DotnetHost>
     <DotnetHost Condition="'$(DotnetHost)' == ''">dotnet</DotnetHost>
+    <!--
+      WIX1149 warns that ServiceConfig "does not work as expected". The Windows
+      Installer SDK says that about MsiServiceConfigFailureActions (recovery
+      actions), which Mashkif does not use; it uses only the service SID type of
+      MsiServiceConfig. The install tests check the SID type on a real install
+      (sc qsidtype Mashkif).
+    -->
+    <SuppressSpecificWarnings>1149</SuppressSpecificWarnings>
   </PropertyGroup>
 
   <!--
