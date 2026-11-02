@@ -107,6 +107,9 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/RegisterRequest"
+            examples:
+              agent-0.1.0:
+                $ref: "examples/agent-0.1.0/register-request.json"
       responses:
         "200":
           description: The same registration was already made; nothing changed.
@@ -126,6 +129,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RegisterResponse"
+              examples:
+                registered:
+                  $ref: "examples/responses/register-201.json"
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
@@ -169,6 +175,9 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/HeartbeatRequest"
+            examples:
+              agent-0.1.0:
+                $ref: "examples/agent-0.1.0/heartbeat-request.json"
       responses:
         "200":
           description: The heartbeat was recorded.
@@ -179,6 +188,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HeartbeatResponse"
+              examples:
+                recorded:
+                  $ref: "examples/responses/heartbeat-200.json"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -301,10 +313,16 @@ components:
             oneOf:
               - $ref: "#/components/schemas/ProtocolError"
               - $ref: "#/components/schemas/AgentError"
+          examples:
+            protocol-unsupported:
+              $ref: "examples/responses/protocol-error-400.json"
     Unauthorized:
       description: |
         `token_invalid`: the bearer token is missing, malformed, or unknown.
-        Register again with a new enrollment key, install ID, and token.
+        The agent keeps its token and tries again later, because the cause
+        can be on the server side (for example a proxy that drops the
+        `Authorization` header). An admin can enroll the PC again with a new
+        enrollment key; that registration uses a new install ID and token.
       headers:
         Mashkif-Protocol-Version:
           $ref: "#/components/headers/ProtocolVersion"
@@ -326,6 +344,9 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/AgentError"
+          examples:
+            agent-revoked:
+              $ref: "examples/responses/agent-error-403.json"
     Conflict:
       description: |
         `install_id_conflict`: another agent already uses this install ID.
@@ -368,6 +389,9 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/AgentError"
+          examples:
+            rate-limited:
+              $ref: "examples/responses/rate-limited-429.json"
   schemas:
     ProtocolVersionValue:
       type: string

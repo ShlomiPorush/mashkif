@@ -8,9 +8,9 @@ import { type Browser, enrollTotp, type Harness, ORIGIN, setUpAdmin } from "./ha
 /** Creates an enrollment key directly in the database; returns the secret. */
 export async function insertKey(
   database: TestDatabase,
-  options: { expiresAt?: Date; revokedAt?: Date; label?: string } = {},
+  options: { expiresAt?: Date; revokedAt?: Date; label?: string; secret?: string } = {},
 ): Promise<string> {
-  const secret = randomBytes(24).toString("base64url");
+  const secret = options.secret ?? randomBytes(24).toString("base64url");
   await database.db.insert(enrollmentKey).values({
     label: options.label ?? "test PC",
     keyHash: hashToken(secret),

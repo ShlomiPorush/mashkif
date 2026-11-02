@@ -1,0 +1,7 @@
+{
+  "summary": "An unsupported protocol version",
+  "value": {
+    "error": "protocol_version_unsupported",
+    "supportedVersions": [1]
+  }
+}

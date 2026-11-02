@@ -1,0 +1,6 @@
+{
+  "summary": "Too many requests",
+  "value": {
+    "error": "rate_limited"
+  }
+}

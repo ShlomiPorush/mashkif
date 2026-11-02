@@ -1,0 +1,8 @@
+{
+  "summary": "A new registration",
+  "value": {
+    "agentId": "0b5f3c1a-9d2e-4f6a-8b7c-1d2e3f4a5b6c",
+    "heartbeatIntervalSeconds": 60,
+    "serverTime": "2026-11-02T10:15:30.123Z"
+  }
+}

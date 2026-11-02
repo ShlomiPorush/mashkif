@@ -1,0 +1,13 @@
+{
+  "summary": "sendHeartbeat request sent by agent 0.1.0",
+  "value": {
+    "sequence": 42,
+    "bootId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "areaCell": null,
+    "infrastructure": "unknown",
+    "intervalSeconds": 60,
+    "roundTripMs": 85,
+    "dnsMs": 4,
+    "agentVersion": "0.1.0"
+  }
+}

@@ -300,7 +300,10 @@ export interface components {
         };
         /**
          * @description `token_invalid`: the bearer token is missing, malformed, or unknown.
-         *     Register again with a new enrollment key, install ID, and token.
+         *     The agent keeps its token and tries again later, because the cause
+         *     can be on the server side (for example a proxy that drops the
+         *     `Authorization` header). An admin can enroll the PC again with a new
+         *     enrollment key; that registration uses a new install ID and token.
          */
         Unauthorized: {
             headers: {
