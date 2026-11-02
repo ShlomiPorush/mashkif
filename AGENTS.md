@@ -22,10 +22,12 @@ Stage: MVP stage 1. The foundation is complete: toolchains, the server and web s
 - The agent never sends exact coordinates. It computes a coarse H3 cell locally and sends only that cell.
 - Outage thresholds count distinct sites (public IP addresses), not agents.
 - The server stores each site's full public IP address. Only the admin can see it; the public site and public APIs never expose it. The "what the agent sends" page must say so.
-- Admin sign-in follows Shlomi's n8n-ops project: Better Auth, one local admin, password with mandatory TOTP, plus passkeys with user verification. Every Better Auth route goes through the allowlist in `server/src/auth/routes.ts`; the session rules live in `server/src/auth/session-policy.ts`. Treat any change to it as security-sensitive.
+- Admin sign-in uses Better Auth's own features as documented: one local admin, password with mandatory TOTP, passkeys, Better Auth's email password reset and TOTP backup codes. Do not build authentication mechanisms of Mashkif's own on top of Better Auth, also not to answer review findings; accept Better Auth's behavior or bring the gap to Shlomi as a decision (Shlomi's decision of 2026-11-02). The current code still has custom layers (`server/src/auth/routes.ts`, `server/src/auth/session-policy.ts`, `server/src/admin/lock.ts`, setup and reset tokens) that the next pull request removes. Treat any change to sign-in as security-sensitive.
 - Trust tiers (trusted, normal, suspicious or blocked) are managed in the admin panel.
 - Every client address (sign-in rate limits, Better Auth, the agent API and its sites) comes from `clientAddressResolver` in `server/src/http/client-address.ts`, which reads `X-Forwarded-For` only from the proxies in `MASHKIF_TRUSTED_PROXIES`. Never read forwarded headers anywhere else.
 - The repository is public. Outage thresholds, reputation weights, and trust lists live in the database and are managed from the admin panel. Never commit their production values; code may hold only safe development defaults.
+- Every setting is editable in the admin panel, with a default. An environment variable may also set it; it then overrides the stored value, and the panel shows the field locked with a note that the environment sets it. Only values the server needs before it can read its settings are environment-only: the database connection, file paths, Compose wiring, and the Better Auth secret. Never add an environment-only setting outside this list. `MASHKIF_PUBLIC_URL` and `MASHKIF_TRUSTED_PROXIES` are still environment-only and move to the panel in the next pull request (Shlomi's rule of 2026-11-02).
+- Keep `docs/project-foundation.md`, `docs/mvp-stage-1.md`, `README.md`, and this file true in the same pull request that changes what they describe.
 
 ## Repository policies
 
@@ -45,7 +47,7 @@ Docker is part of the approved deployment and development architecture. The imag
 - `docker-compose.yml` (tracked) is the production deployment file and references published images. `docker-compose-dev.yml` (root, ignored, machine-local) references `mashkif-app:dev` and is created from `config/docker-compose-dev.example.yml`. Never commit it.
 - Use `docker-compose-dev.yml` only through `scripts/local.sh`. CI and release must not depend on it.
 - Neither Compose file may contain `build:`. Scripts build images explicitly. A guard enforces this.
-- Runtime variables live in `.env` through `env_file`. `.env.example` is tracked with placeholders only. Compose interpolation is limited to the image tag, `MASHKIF_DATA_DIR`, `MASHKIF_GEOIP_DIR`, and the external Traefik network name.
+- `.env` (through `env_file`) holds the environment-only values listed under Product invariants and any panel overrides. `.env.example` is tracked with placeholders only. Compose interpolation is limited to the image tag, `MASHKIF_DATA_DIR`, `MASHKIF_GEOIP_DIR`, and the external Traefik network name.
 - Services: `app` (server plus built web) and `db` (PostgreSQL). Production runs behind an existing Traefik.
 - Mashkif never downloads MaxMind data. `app` reads GeoLite2-ASN from `${MASHKIF_GEOIP_DIR}`, mounted read-only and kept current by a tool outside this repository.
 - Every application container runs as a dedicated non-root user. Verification fails if any application process runs as UID 0.

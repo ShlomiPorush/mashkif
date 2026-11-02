@@ -1,17 +1,17 @@
 # Mashkif Project Foundation
 
-Status: Foundation deliverables 1 to 13 implemented on branch `feature/foundation` (pull request #1) on 2026-11-01. CI is green and the cross-provider review found no open issues; the pull request awaits Shlomi's merge. Deliverable 14 is blocked on separate authorization. The plan was approved by Shlomi on 2026-11-01.
+Status: Foundation deliverables 1 to 14 are implemented and merged into `main` (pull requests #1, #4, #5, #7; deliverable 14 completed on 2026-11-01). The plan was approved by Shlomi on 2026-11-01. MVP stage 1 work after the foundation is tracked in [mvp-stage-1.md](mvp-stage-1.md).
 
 This document separates the repository's current state from the approved foundation. A planned item does not exist until its status and verification evidence say otherwise. Product features (heartbeats, outage detection, reputation, maps with real data) are out of scope for the foundation task.
 
 ## Current truth
 
-Inspected on 2026-11-01:
+Inspected on 2026-11-02:
 
 - The public repository is `ShlomiPorush/mashkif`, default branch `main`. The foundation is merged into `main` (pull request #1).
 - Implemented: per-component licenses, the protocol contract with one health endpoint, the server and web shells, the Windows agent skeleton and its unsigned MSI, the container image and Compose files, `scripts/verify.sh`, `scripts/local.sh`, `scripts/try-pr.sh`, `scripts/release.sh`, path-filtered CI, and Dependabot. Evidence is in the implementation plan table below.
-- After the foundation: admin sign-in, step 1 of MVP stage 1, is merged (pull request #8). Step 2a, the server and admin side of agent registration, heartbeats, and events, is implemented on branch `feature/agent-ingest`. The plan and status are in [mvp-stage-1.md](mvp-stage-1.md).
-- `scripts/verify.sh` (full sweep, all six areas) passed locally from WSL on 2026-11-01.
+- After the foundation: admin sign-in, step 1 of MVP stage 1, is merged (pull request #8). Step 2a, the server and admin side of agent registration, heartbeats, and events, is merged (pull request #9); CI is green on `main` at f412520. Shlomi decided on 2026-11-02 to rework admin sign-in on Better Auth as is and to move every setting into the admin panel. The plan, these decisions, and the status of each step are in [mvp-stage-1.md](mvp-stage-1.md).
+- `scripts/verify.sh` (full sweep, all six areas) passed locally from WSL on 2026-11-01; later changes were verified with `scripts/verify.sh --changed origin/main` and CI on each pull request.
 - The GitHub configuration (deliverable 14) is applied: labels, templates, rulesets for `main` and release tags, security settings, and CLA Assistant. No release has been made, and nothing is deployed.
 - The domain `mashkif.co.il` is registered. Hosting is an existing Linux server with Docker and Traefik that Shlomi operates; its details are not recorded in the repository.
 - A related project, geoip-extractor (outside this repository), downloads MaxMind GeoLite2 data and writes per-country CIDR and ASN lists. Its CIDR output is collapsed without per-range ASN, so it cannot map an IP address to a provider. Its Israeli ASN list is a useful seed for the curated provider table.
@@ -94,7 +94,7 @@ Load-bearing boundaries:
 | `app` | Project image (server plus built web), Node.js 24 | Dedicated unprivileged user declared in the image | HTTP readiness endpoint that also checks database connectivity and that the GeoLite2-ASN file is readable | None | `${MASHKIF_GEOIP_DIR}`, read-only, owned by the external updater | None | Not applicable; the external updater owns it |
 | `db` | Official PostgreSQL image | Non-root UID set in Compose that owns the data directory; verified at startup | `pg_isready` against the application database | Database files | `${MASHKIF_DATA_DIR}/postgres` | None | Scheduled logical dump to a host backup directory; documented restore; kept on ordinary stop; removed only by confirmed nuke |
 
-Compose interpolation is limited to values Compose itself resolves: the image tag, `MASHKIF_DATA_DIR`, `MASHKIF_GEOIP_DIR`, and the external Traefik network name. Application settings come from `.env` through `env_file`.
+Compose interpolation is limited to values Compose itself resolves: the image tag, `MASHKIF_DATA_DIR`, `MASHKIF_GEOIP_DIR`, and the external Traefik network name. `.env` (through `env_file`) holds only what the server needs before it can read its settings: the database connection, file paths, and the Better Auth secret. Every other setting is managed in the admin panel; an environment variable may override a panel setting and then locks its field (Shlomi's rule of 2026-11-02, see `AGENTS.md`).
 
 ## Repository root
 
