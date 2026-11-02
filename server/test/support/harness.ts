@@ -1,19 +1,21 @@
 import { randomBytes } from "node:crypto";
 import type { Hono } from "hono";
 import { expect } from "vitest";
-import { createSetupToken } from "../../src/admin/setup.js";
 import type { RegisterHooks } from "../../src/agent/register.js";
 import { createApp } from "../../src/app.js";
-import { type Auth, type AuthOptions, createAuth } from "../../src/auth/auth.js";
-import { MemoryRateLimitStore } from "../../src/auth/rate-limit.js";
+import { type Auth, createAuth } from "../../src/auth/auth.js";
 import type { AsnInfo, AsnLookup, GeoipStatus } from "../../src/geoip.js";
 import { clientAddressResolver } from "../../src/http/client-address.js";
+import { MemoryRateLimitStore } from "../../src/http/rate-limit.js";
+import { createMailer, type MailMessage } from "../../src/mail/mailer.js";
+import { panelTrustedOrigins } from "../../src/settings.js";
 import type { TestDatabase } from "./database.js";
 import { secretFromUri, totpCode } from "./totp.js";
 
 export const ORIGIN = "https://admin.test";
 export const USERNAME = "Shlomi";
 export const PASSWORD = "correct horse battery";
+export const EMAIL = "admin@example.test";
 
 const ok = async () => {};
 
@@ -39,7 +41,12 @@ export class FakeAsn implements AsnLookup {
 export interface Harness {
   app: Hono;
   auth: Auth;
-  rateLimits: MemoryRateLimitStore;
+  /** BETTER_AUTH_SECRET of this harness. */
+  secret: string;
+  /** Every email sent, newest last. */
+  mail: MailMessage[];
+  /** Makes the next sends fail as an SMTP server would. */
+  mailFails: boolean;
   agentRateLimits: MemoryRateLimitStore;
   registerRateLimits: MemoryRateLimitStore;
   asn: FakeAsn;
@@ -55,31 +62,44 @@ export interface HarnessOptions {
   beforeWrite?: () => Promise<void>;
   /** Runs in a settings update after it read the current values, under its lock. */
   afterSettingsRead?: () => Promise<void>;
-  /** MASHKIF_TRUSTED_PROXIES; the peer is x-test-client or harness.address. */
+  /** Trusted proxies, for the agent API and Better Auth; the peer is x-test-client or harness.address. */
   trustedProxies?: string[];
+  /** Environment overrides of settings. */
+  env?: NodeJS.ProcessEnv;
+  /** Better Auth session length. */
+  sessionHours?: number;
+  /** The public URL; null leaves it unset. Defaults to ORIGIN. */
+  publicUrl?: string | null;
 }
 
-export function createHarness(
-  database: TestDatabase,
-  testHooks?: AuthOptions["testHooks"],
-  bodyTimeoutMs?: number,
-  options: HarnessOptions = {},
-): Harness {
-  const rateLimits = new MemoryRateLimitStore();
+export function createHarness(database: TestDatabase, options: HarnessOptions = {}): Harness {
   const agentRateLimits = new MemoryRateLimitStore();
   const registerRateLimits = new MemoryRateLimitStore();
   const asn = new FakeAsn();
+  const secret = randomBytes(32).toString("base64");
+  const env = options.env ?? {};
+  const publicUrl = options.publicUrl === null ? undefined : (options.publicUrl ?? ORIGIN);
+  const mail: MailMessage[] = [];
   const auth = createAuth({
     db: database.db,
-    appKey: randomBytes(32),
-    publicOrigin: ORIGIN,
-    rateLimitStore: rateLimits,
-    ...(testHooks === undefined ? {} : { testHooks }),
+    secret,
+    publicUrl,
+    trustedOrigins: () => panelTrustedOrigins(database.db, env),
+    trustedProxies: options.trustedProxies ?? [],
+    sessionHours: options.sessionHours ?? 12,
+    mailer: createMailer(database.db, secret, async (_smtp, message) => {
+      if (harness.mailFails) {
+        throw new Error("550 mailbox unavailable");
+      }
+      mail.push(message);
+    }),
   });
   const harness: Harness = {
     app: undefined as unknown as Hono,
     auth,
-    rateLimits,
+    secret,
+    mail,
+    mailFails: false,
     agentRateLimits,
     registerRateLimits,
     asn,
@@ -96,10 +116,11 @@ export function createHarness(
     admin: {
       db: database.db,
       auth,
-      publicOrigin: ORIGIN,
+      authSecret: secret,
+      publicUrl,
+      env,
       clientAddress,
       asn,
-      ...(bodyTimeoutMs === undefined ? {} : { bodyTimeoutMs }),
       ...(options.afterSettingsRead === undefined
         ? {}
         : { testHooks: { afterSettingsRead: options.afterSettingsRead } }),
@@ -133,16 +154,33 @@ interface RequestOptions {
   origin?: string | null;
 }
 
-/** A browser with a cookie jar, talking to the app in-process. */
+let nextAddress = 1;
+
+/** A fresh client address, so Better Auth's rate limits of one browser never touch another. */
+export function uniqueAddress(): string {
+  const n = nextAddress++;
+  return `10.${(n >> 16) & 255}.${(n >> 8) & 255}.${n & 255}`;
+}
+
+/**
+ * A browser with a cookie jar, talking to the app in-process. Better Auth
+ * reads its client address from X-Forwarded-For, which each browser sets to
+ * its own address.
+ */
 export class Browser {
   readonly cookies = new Map<string, string>();
+  address = uniqueAddress();
   /** Every Set-Cookie header this browser received. */
   readonly seenSetCookies: string[] = [];
 
   constructor(private readonly harness: Harness) {}
 
   async request(method: string, path: string, options: RequestOptions = {}): Promise<Reply> {
-    const headers: Record<string, string> = { "user-agent": "vitest", ...options.headers };
+    const headers: Record<string, string> = {
+      "user-agent": "vitest",
+      "x-forwarded-for": this.address,
+      ...options.headers,
+    };
     const origin = options.origin === undefined ? ORIGIN : options.origin;
     if (method !== "GET" && origin !== null) {
       headers.origin = origin;
@@ -195,9 +233,14 @@ export class Browser {
     return this.request("POST", path, { ...options, json });
   }
 
-  async sessionState(): Promise<string> {
-    const reply = await this.get("/api/admin/session");
-    return String(reply.body.state);
+  /** Better Auth's session: none, without TOTP (enrollment), or with TOTP (full). */
+  async sessionState(): Promise<"none" | "enrollment" | "full"> {
+    const reply = await this.get("/api/auth/get-session");
+    const user = (reply.body as { user?: { twoFactorEnabled?: boolean } } | null)?.user;
+    if (user === undefined) {
+      return "none";
+    }
+    return user.twoFactorEnabled === true ? "full" : "enrollment";
   }
 
   signIn(username = USERNAME, password = PASSWORD) {
@@ -205,30 +248,35 @@ export class Browser {
   }
 }
 
-/** Creates the admin through the setup route. */
-export async function setUpAdmin(database: TestDatabase, harness: Harness): Promise<void> {
-  const token = await createSetupToken(database.db);
-  if (!token.ok) {
-    throw new Error("an admin exists already");
-  }
-  const reply = await new Browser(harness).post("/api/admin/setup", {
-    token: token.token,
+/** Creates the admin through Better Auth sign-up, as the setup page does; returns its browser. */
+export async function setUpAdmin(harness: Harness): Promise<Browser> {
+  const browser = new Browser(harness);
+  const reply = await browser.post("/api/auth/sign-up/email", {
+    name: USERNAME,
     username: USERNAME,
+    email: EMAIL,
     password: PASSWORD,
   });
-  expect(reply.status).toBe(201);
+  expect(reply.status).toBe(200);
+  return browser;
 }
 
-/** Signs in with the password and enrolls TOTP; returns the TOTP secret. */
-export async function enrollTotp(browser: Browser, password = PASSWORD): Promise<Buffer> {
-  const signIn = await browser.signIn(USERNAME, password);
-  expect(signIn.status).toBe(200);
+export interface Enrollment {
+  secret: Buffer;
+  backupCodes: string[];
+}
+
+/** Enrolls TOTP in a signed-in browser (signing in with the password first when needed). */
+export async function enrollTotp(browser: Browser, password = PASSWORD): Promise<Enrollment> {
+  if ((await browser.sessionState()) === "none") {
+    expect((await browser.signIn(USERNAME, password)).status).toBe(200);
+  }
   const enable = await browser.post("/api/auth/two-factor/enable", { password });
   expect(enable.status).toBe(200);
   const secret = secretFromUri(String(enable.body.totpURI));
   const verify = await browser.post("/api/auth/two-factor/verify-totp", { code: totpCode(secret) });
   expect(verify.status).toBe(200);
-  return secret;
+  return { secret, backupCodes: enable.body.backupCodes as string[] };
 }
 
 /** Signs in with the password and a TOTP code. */
@@ -237,6 +285,13 @@ export async function signInWithTotp(browser: Browser, secret: Buffer): Promise<
   expect(signIn.status).toBe(200);
   expect(signIn.body.twoFactorRedirect).toBe(true);
   return browser.post("/api/auth/two-factor/verify-totp", { code: totpCode(secret) });
+}
+
+/** Sets the SMTP host and sender, so Better Auth's emails reach the fake transport. */
+export async function configureSmtp(database: TestDatabase): Promise<void> {
+  await database.sql`insert into setting (key, value, updated_by) values
+    ('smtp_host', '"smtp.example.test"', 'test'),
+    ('smtp_from', '"mashkif@example.test"', 'test')`;
 }
 
 /** A test seam that stops the first call until resume() and reports when it was reached. */
@@ -263,7 +318,7 @@ export function pauseOnce() {
   };
 }
 
-/** Waits up to 2 seconds until a request waits for the admin lock in PostgreSQL. */
+/** Waits up to 2 seconds until a request waits for an advisory lock in PostgreSQL. */
 export async function untilLockWaiter(sql: TestDatabase["sql"]): Promise<boolean> {
   for (let i = 0; i < 40; i++) {
     const [row] = await sql`select count(*)::int as n from pg_locks
@@ -275,12 +330,4 @@ export async function untilLockWaiter(sql: TestDatabase["sql"]): Promise<boolean
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return false;
-}
-
-/** The password the admin sets at /admin/reset in tests. */
-export const NEW_PASSWORD = "a brand new passphrase";
-
-/** Sets a new password with a reset token, as /admin/reset does. */
-export function completeReset(browser: Browser, token: string, password = NEW_PASSWORD) {
-  return browser.post("/api/admin/reset", { token, password });
 }

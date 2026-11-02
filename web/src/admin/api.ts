@@ -92,18 +92,30 @@ export interface Provider {
   asns: number[];
 }
 
+export type SettingApply = "now" | "restart" | "next_email";
+
+/** The settings as the server shows them; the SMTP password only as set or not. */
 export interface AdminSettings {
   heartbeatIntervalSeconds: number;
   retentionDays: number;
+  publicUrl: string;
+  trustedOrigins: string[];
+  trustedProxies: string[];
+  sessionHours: number;
+  smtpHost: string;
+  smtpPort: number;
+  smtpUser: string;
+  smtpPasswordSet: boolean;
+  smtpFrom: string;
+  /** Settings an environment variable sets; the panel shows them locked. */
+  locked: string[];
+  apply: Record<string, SettingApply>;
+  /** The environment variable that may set each setting. */
+  env: Record<string, string>;
   geoip?: { state: "ok" | "unavailable"; buildDate: string | null; stale: boolean };
 }
 
+/** The admin's Better Auth session: none, without TOTP yet (enrollment), or with TOTP (full). */
 export type SessionInfo =
-  | { state: "none"; ended?: "idle" | "max_age" | "invalid" }
-  | {
-      state: "enrollment" | "full";
-      username: string;
-      method: "password" | "totp" | "passkey";
-      maxAgeAt: string;
-      idleAt: string;
-    };
+  | { state: "none" }
+  | { state: "enrollment" | "full"; username: string; email: string };

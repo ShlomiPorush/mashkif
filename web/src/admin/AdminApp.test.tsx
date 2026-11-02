@@ -12,17 +12,39 @@ import { rememberPassword } from "./router";
 
 type Routes = Record<string, unknown>;
 
-const ENROLLMENT = {
-  state: "enrollment",
+const USER = {
+  id: "user-1",
+  name: "shlomi",
   username: "shlomi",
-  method: "password",
-  maxAgeAt: "2026-11-01T22:00:00.000Z",
-  idleAt: "2026-11-01T11:00:00.000Z",
+  email: "admin@example.test",
+  emailVerified: false,
+  image: null,
+  twoFactorEnabled: false,
+  createdAt: "2026-11-01T08:00:00.000Z",
+  updatedAt: "2026-11-01T08:00:00.000Z",
 };
-const FULL = { ...ENROLLMENT, state: "full", method: "totp" };
+const SESSION = {
+  id: "session-1",
+  token: "token",
+  userId: USER.id,
+  expiresAt: "2026-11-01T20:00:00.000Z",
+  createdAt: "2026-11-01T08:00:00.000Z",
+  updatedAt: "2026-11-01T08:00:00.000Z",
+};
+
+/** Better Auth's get-session answers: a session without TOTP, and one with TOTP. */
+const ENROLLMENT = { session: SESSION, user: USER };
+const FULL = { session: SESSION, user: { ...USER, twoFactorEnabled: true } };
 
 const TOTP_URI =
-  "otpauth://totp/Mashkif:shlomi%40admin.mashkif.invalid?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Mashkif&algorithm=SHA1&digits=6&period=30";
+  "otpauth://totp/Mashkif:shlomi?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Mashkif&algorithm=SHA1&digits=6&period=30";
+
+function json(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 /** Answers fetch calls by path with JSON; unknown paths are 404. */
 function serve(routes: Routes) {
@@ -37,26 +59,25 @@ function serve(routes: Routes) {
       body = JSON.parse(init.body);
     }
     calls.push({ path: url.pathname, method, body });
-    const answer = routes[`${method} ${url.pathname}`] ?? routes[url.pathname];
+    const key = `${method} ${url.pathname}`;
+    const answer = key in routes ? routes[key] : routes[url.pathname];
     if (answer === undefined) {
-      return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
+      return json({ error: "not_found" }, 404);
     }
     if (answer instanceof Response) {
       return answer;
     }
-    return new Response(JSON.stringify(answer), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    return json(answer, 200);
   });
   vi.stubGlobal("fetch", fetchMock);
   return calls;
 }
 
+/** The answers the admin app needs to start; session is Better Auth's get-session answer. */
 function boot(setupRequired: boolean, session: unknown, extra: Routes = {}): Routes {
   return {
     "/api/admin/status": { setupRequired },
-    "/api/admin/session": session,
+    "/api/auth/get-session": session,
     "/api/auth/passkey/list-user-passkeys": [],
     ...extra,
   };
@@ -81,26 +102,43 @@ afterEach(() => {
 });
 
 const pages = [
-  ["setup", boot(true, { state: "none" }), "/admin/setup", en.setup.heading],
-  ["sign-in", boot(false, { state: "none" }), "/admin/sign-in", en.signIn.heading],
-  ["TOTP enrollment", boot(false, ENROLLMENT), "/admin/totp", en.totp.heading],
+  ["setup", boot(true, null), "/admin", "/admin/setup", en.setup.heading],
+  ["sign-in", boot(false, null), "/admin", "/admin/sign-in", en.signIn.heading],
+  ["TOTP enrollment", boot(false, ENROLLMENT), "/admin", "/admin/totp", en.totp.heading],
+  [
+    "forgot password",
+    boot(false, null),
+    "/admin/forgot-password",
+    "/admin/forgot-password",
+    en.forgot.heading,
+  ],
+  [
+    "reset password",
+    boot(false, null),
+    "/admin/reset-password?token=abc",
+    "/admin/reset-password",
+    en.reset.heading,
+  ],
   [
     "admin home",
     boot(false, FULL),
+    "/admin",
     "/admin",
     en.admin.homeHeading.replace("{{username}}", "shlomi"),
   ],
 ] as const;
 
 describe("admin routes", () => {
-  it.each(pages)("render the %s page at its path", async (_, routes, path, heading) => {
+  it.each(pages)("render the %s page at its path", async (_, routes, start, path, heading) => {
+    window.history.replaceState(null, "", start);
     serve(routes);
     renderAdmin(createI18n("en"));
     expect(await screen.findByRole("heading", { level: 1, name: heading })).toBeTruthy();
     await waitFor(() => expect(window.location.pathname).toBe(path));
   });
 
-  it.each(pages)("the %s page has only locale text", async (_, routes) => {
+  it.each(pages)("the %s page has only locale text", async (_, routes, start) => {
+    window.history.replaceState(null, "", start);
     serve(routes);
     const { container } = renderAdmin(createI18n("he", pseudoResources()));
     await screen.findByRole("heading", { level: 1 });
@@ -110,7 +148,7 @@ describe("admin routes", () => {
   });
 
   it("renders in Hebrew by default", async () => {
-    serve(boot(false, { state: "none" }));
+    serve(boot(false, null));
     renderAdmin(createI18n("he"));
     expect(await screen.findByRole("heading", { level: 1, name: he.signIn.heading })).toBeTruthy();
   });
@@ -121,12 +159,6 @@ describe("admin routes", () => {
     renderAdmin(createI18n("en"));
     await screen.findByRole("heading", { level: 1 });
     await waitFor(() => expect(window.location.pathname).toBe("/admin"));
-  });
-
-  it("explains a session that ended for inactivity", async () => {
-    serve(boot(false, { state: "none", ended: "idle" }));
-    renderAdmin(createI18n("en"));
-    expect(await screen.findByText(en.signIn.endedIdle)).toBeTruthy();
   });
 
   it("shows a retry when the server cannot be reached", async () => {
@@ -143,21 +175,23 @@ describe("admin routes", () => {
 });
 
 describe("sign-in", () => {
-  it("asks for the TOTP code after the password", async () => {
-    const calls = serve(
-      boot(
-        false,
-        { state: "none" },
-        { "POST /api/auth/sign-in/username": { twoFactorRedirect: true } },
-      ),
-    );
-    renderAdmin(createI18n("en"));
-    await screen.findByRole("heading", { level: 1, name: en.signIn.heading });
-    fireEvent.change(screen.getByLabelText(en.signIn.username), { target: { value: "shlomi" } });
-    fireEvent.change(screen.getByLabelText(en.signIn.password), {
+  async function password(language: typeof en | typeof he) {
+    await screen.findByRole("heading", { level: 1, name: language.signIn.heading });
+    fireEvent.change(screen.getByLabelText(language.signIn.username), {
+      target: { value: "shlomi" },
+    });
+    fireEvent.change(screen.getByLabelText(language.signIn.password), {
       target: { value: "a long password" },
     });
-    fireEvent.click(screen.getByRole("button", { name: en.signIn.submit }));
+    fireEvent.click(screen.getByRole("button", { name: language.signIn.submit }));
+  }
+
+  it("asks for the TOTP code after the password", async () => {
+    const calls = serve(
+      boot(false, null, { "POST /api/auth/sign-in/username": { twoFactorRedirect: true } }),
+    );
+    renderAdmin(createI18n("en"));
+    await password(en);
     expect(
       await screen.findByRole("heading", { level: 1, name: en.signIn.totpHeading }),
     ).toBeTruthy();
@@ -169,69 +203,219 @@ describe("sign-in", () => {
 
   it("maps a wrong password to a localized message", async () => {
     serve(
-      boot(
-        false,
-        { state: "none" },
-        {
-          "POST /api/auth/sign-in/username": new Response(
-            JSON.stringify({
-              code: "INVALID_USERNAME_OR_PASSWORD",
-              message: "Invalid username or password",
-            }),
-            { status: 401, headers: { "content-type": "application/json" } },
-          ),
-        },
-      ),
+      boot(false, null, {
+        "POST /api/auth/sign-in/username": json(
+          { code: "INVALID_USERNAME_OR_PASSWORD", message: "Invalid username or password" },
+          401,
+        ),
+      }),
     );
     renderAdmin(createI18n("he"));
-    await screen.findByRole("heading", { level: 1, name: he.signIn.heading });
-    fireEvent.change(screen.getByLabelText(he.signIn.username), { target: { value: "shlomi" } });
-    fireEvent.change(screen.getByLabelText(he.signIn.password), {
-      target: { value: "wrong password" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: he.signIn.submit }));
+    await password(he);
     expect((await screen.findByRole("alert")).textContent).toBe(he.errors.invalidCredentials);
+  });
+
+  it("completes with the TOTP code and shows the account page", async () => {
+    let session: unknown = null;
+    serve({
+      "/api/admin/status": { setupRequired: false },
+      get "/api/auth/get-session"() {
+        return session;
+      },
+      "/api/auth/passkey/list-user-passkeys": [],
+      "POST /api/auth/sign-in/username": { twoFactorRedirect: true },
+      get "POST /api/auth/two-factor/verify-totp"() {
+        session = FULL;
+        return { token: "t", user: FULL.user };
+      },
+    });
+    renderAdmin(createI18n("en"));
+    await password(en);
+    fireEvent.change(await screen.findByLabelText(en.signIn.code), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: en.signIn.verify }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin"));
+    expect(
+      await screen.findByRole("heading", { level: 2, name: en.passkeys.heading }),
+    ).toBeTruthy();
+  });
+
+  it("completes with a backup code instead", async () => {
+    let session: unknown = null;
+    const calls = serve({
+      "/api/admin/status": { setupRequired: false },
+      get "/api/auth/get-session"() {
+        return session;
+      },
+      "/api/auth/passkey/list-user-passkeys": [],
+      "POST /api/auth/sign-in/username": { twoFactorRedirect: true },
+      get "POST /api/auth/two-factor/verify-backup-code"() {
+        session = FULL;
+        return { token: "t", user: FULL.user };
+      },
+    });
+    renderAdmin(createI18n("en"));
+    await password(en);
+    fireEvent.click(await screen.findByRole("button", { name: en.signIn.useBackup }));
+    fireEvent.change(await screen.findByLabelText(en.signIn.backupCode), {
+      target: { value: "abcde-12345" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.signIn.verify }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin"));
+    expect(
+      calls.find((call) => call.path === "/api/auth/two-factor/verify-backup-code")?.body,
+    ).toMatchObject({ code: "abcde-12345" });
+  });
+
+  it("maps a used backup code to its message in Hebrew", async () => {
+    serve(
+      boot(false, null, {
+        "POST /api/auth/sign-in/username": { twoFactorRedirect: true },
+        "POST /api/auth/two-factor/verify-backup-code": json(
+          { code: "INVALID_BACKUP_CODE", message: "Invalid backup code" },
+          401,
+        ),
+      }),
+    );
+    renderAdmin(createI18n("he"));
+    await password(he);
+    fireEvent.click(await screen.findByRole("button", { name: he.signIn.useBackup }));
+    fireEvent.change(await screen.findByLabelText(he.signIn.backupCode), {
+      target: { value: "abcde-12345" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: he.signIn.verify }));
+    expect((await screen.findByRole("alert")).textContent).toBe(he.errors.invalidBackupCode);
+  });
+
+  it("signs in with a passkey", async () => {
+    let session: unknown = null;
+    const calls = serve({
+      "/api/admin/status": { setupRequired: false },
+      get "/api/auth/get-session"() {
+        return session;
+      },
+      "/api/auth/passkey/list-user-passkeys": [],
+      "/api/auth/passkey/generate-authenticate-options": {
+        challenge: "Y2hhbGxlbmdl",
+        rpId: "localhost",
+        allowCredentials: [],
+        userVerification: "preferred",
+      },
+      get "POST /api/auth/passkey/verify-authentication"() {
+        session = FULL;
+        return { session: SESSION, user: FULL.user };
+      },
+    });
+    const credential = {
+      id: "Y3JlZA",
+      rawId: new Uint8Array([1, 2, 3]).buffer,
+      type: "public-key",
+      authenticatorAttachment: "platform",
+      response: {
+        clientDataJSON: new Uint8Array([1]).buffer,
+        authenticatorData: new Uint8Array([2]).buffer,
+        signature: new Uint8Array([3]).buffer,
+        userHandle: null,
+      },
+      getClientExtensionResults: () => ({}),
+    };
+    vi.stubGlobal("PublicKeyCredential", class {});
+    Object.defineProperty(navigator, "credentials", {
+      configurable: true,
+      value: { get: vi.fn(async () => credential) },
+    });
+    renderAdmin(createI18n("en"));
+    fireEvent.click(await screen.findByRole("button", { name: en.signIn.passkey }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin"));
+    expect(calls.some((call) => call.path === "/api/auth/passkey/verify-authentication")).toBe(
+      true,
+    );
+  });
+
+  it("links to the forgot-password page", async () => {
+    serve(boot(false, null));
+    renderAdmin(createI18n("en"));
+    fireEvent.click(await screen.findByRole("link", { name: en.signIn.forgotLink }));
+    expect(await screen.findByRole("heading", { level: 1, name: en.forgot.heading })).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/forgot-password");
   });
 });
 
 describe("setup", () => {
+  async function fill(language: typeof en) {
+    await screen.findByRole("heading", { level: 1, name: language.setup.heading });
+    fireEvent.change(screen.getByLabelText(language.setup.username), {
+      target: { value: "shlomi" },
+    });
+    fireEvent.change(screen.getByLabelText(language.setup.email), {
+      target: { value: "admin@example.test" },
+    });
+    fireEvent.change(screen.getByLabelText(language.setup.password), {
+      target: { value: "a long password" },
+    });
+    fireEvent.change(screen.getByLabelText(language.setup.confirm), {
+      target: { value: "a long password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: language.setup.submit }));
+  }
+
+  it("creates the admin with Better Auth sign-up and goes on to TOTP enrollment", async () => {
+    let setupRequired = true;
+    let session: unknown = null;
+    const calls = serve({
+      get "/api/admin/status"() {
+        return { setupRequired };
+      },
+      get "/api/auth/get-session"() {
+        return session;
+      },
+      get "POST /api/auth/sign-up/email"() {
+        setupRequired = false;
+        session = ENROLLMENT;
+        return { token: "t", user: USER };
+      },
+      "POST /api/auth/two-factor/enable": { totpURI: TOTP_URI, backupCodes: ["one-1", "two-2"] },
+    });
+    renderAdmin(createI18n("en"));
+    await fill(en);
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/totp"));
+    expect(calls.find((call) => call.path === "/api/auth/sign-up/email")?.body).toEqual({
+      name: "shlomi",
+      username: "shlomi",
+      email: "admin@example.test",
+      password: "a long password",
+    });
+    // The password typed at setup starts the enrollment without asking again.
+    expect(await screen.findByRole("img", { name: en.totp.qrAlt })).toBeTruthy();
+  });
+
   it("moves on to sign-in when the admin exists already, for example after a lost answer", async () => {
     let setupRequired = true;
     serve({
       get "/api/admin/status"() {
         return { setupRequired };
       },
-      "/api/admin/session": { state: "none" },
-      get "POST /api/admin/setup"() {
+      "/api/auth/get-session": null,
+      get "POST /api/auth/sign-up/email"() {
         // The first attempt created the admin, but its answer never arrived.
         setupRequired = false;
-        return new Response(JSON.stringify({ error: "already_set_up" }), { status: 409 });
+        return json({ code: "FAILED_TO_CREATE_USER", message: "Failed to create user" }, 400);
       },
     });
     renderAdmin(createI18n("en"));
-    await screen.findByRole("heading", { level: 1, name: en.setup.heading });
-    fireEvent.change(screen.getByLabelText(en.setup.token), { target: { value: "token" } });
-    fireEvent.change(screen.getByLabelText(en.setup.username), { target: { value: "shlomi" } });
-    fireEvent.change(screen.getByLabelText(en.setup.password), {
-      target: { value: "a long password" },
-    });
-    fireEvent.change(screen.getByLabelText(en.setup.confirm), {
-      target: { value: "a long password" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: en.setup.submit }));
+    await fill(en);
     expect(await screen.findByRole("heading", { level: 1, name: en.signIn.heading })).toBeTruthy();
     await waitFor(() => expect(window.location.pathname).toBe("/admin/sign-in"));
   });
 });
 
 describe("TOTP enrollment", () => {
-  it("shows a QR code drawn locally and the manual key", async () => {
+  it("shows a QR code drawn locally, the manual key, and the backup codes once", async () => {
     rememberPassword("a long password");
     const calls = serve(
       boot(false, ENROLLMENT, {
         "POST /api/auth/two-factor/enable": {
           totpURI: TOTP_URI,
-          backupCodes: ["backup-code-one", "backup-code-two"],
+          backupCodes: ["backup-one", "backup-two"],
         },
       }),
     );
@@ -242,8 +426,23 @@ describe("TOTP enrollment", () => {
     expect(calls.find((call) => call.path === "/api/auth/two-factor/enable")?.body).toMatchObject({
       password: "a long password",
     });
-    // Backup codes are never shown.
-    expect(document.body.textContent).not.toContain("backup-code");
+    expect(screen.getByRole("heading", { level: 2, name: en.backupCodes.heading })).toBeTruthy();
+    expect(screen.getByText("backup-one")).toBeTruthy();
+    expect(screen.getByText("backup-two")).toBeTruthy();
+  });
+
+  it("has only locale text besides the codes", async () => {
+    rememberPassword("a long password");
+    serve(
+      boot(false, ENROLLMENT, {
+        "POST /api/auth/two-factor/enable": { totpURI: TOTP_URI, backupCodes: ["backup-one"] },
+      }),
+    );
+    const { container } = renderAdmin(createI18n("he", pseudoResources()));
+    await screen.findByRole("img");
+    // The manual key is user data too.
+    container.querySelector(".totp-key")?.setAttribute("data-value", "");
+    expectOnlyLocaleText(container);
   });
 
   it("asks for the password when it was not just typed", async () => {
@@ -253,20 +452,152 @@ describe("TOTP enrollment", () => {
   });
 });
 
+describe("forgot and reset password", () => {
+  it("asks Better Auth to email a link back to the reset page, without saying whether it was sent", async () => {
+    window.history.replaceState(null, "", "/admin/forgot-password");
+    const calls = serve(
+      boot(false, null, { "POST /api/auth/request-password-reset": { status: true } }),
+    );
+    renderAdmin(createI18n("en"));
+    fireEvent.change(await screen.findByLabelText(en.forgot.email), {
+      target: { value: "admin@example.test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.forgot.submit }));
+    expect(await screen.findByText(en.forgot.sent)).toBeTruthy();
+    expect(calls.find((call) => call.path === "/api/auth/request-password-reset")?.body).toEqual({
+      email: "admin@example.test",
+      redirectTo: `${window.location.origin}/admin/reset-password`,
+    });
+  });
+
+  it("is not offered to a signed-in admin", async () => {
+    window.history.replaceState(null, "", "/admin/forgot-password");
+    serve(boot(false, FULL));
+    renderAdmin(createI18n("en"));
+    await screen.findByRole("heading", { level: 1 });
+    await waitFor(() => expect(window.location.pathname).toBe("/admin"));
+  });
+
+  async function fillReset(language: typeof en | typeof he) {
+    await screen.findByRole("heading", { level: 1, name: language.reset.heading });
+    for (const label of [language.reset.password, language.reset.confirm]) {
+      fireEvent.change(screen.getByLabelText(label), {
+        target: { value: "a brand new passphrase" },
+      });
+    }
+    fireEvent.click(screen.getByRole("button", { name: language.reset.submit }));
+  }
+
+  it.each([
+    ["without a session", null],
+    ["with a session", FULL],
+  ] as const)("sets the new password from the link %s and goes to sign-in", async (_, start) => {
+    window.history.replaceState(null, "", "/admin/reset-password?token=link-token");
+    let session: unknown = start;
+    const calls = serve({
+      "/api/admin/status": { setupRequired: false },
+      get "/api/auth/get-session"() {
+        return session;
+      },
+      "/api/auth/passkey/list-user-passkeys": [],
+      get "POST /api/auth/reset-password"() {
+        // Better Auth ends every session.
+        session = null;
+        return { status: true };
+      },
+    });
+    renderAdmin(createI18n("en"));
+    await fillReset(en);
+    expect(await screen.findByRole("heading", { level: 1, name: en.signIn.heading })).toBeTruthy();
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/sign-in"));
+    expect(calls.find((call) => call.path === "/api/auth/reset-password")?.body).toEqual({
+      token: "link-token",
+      newPassword: "a brand new passphrase",
+    });
+  });
+
+  it("says when Better Auth reported the link invalid", async () => {
+    window.history.replaceState(null, "", "/admin/reset-password?error=INVALID_TOKEN");
+    serve(boot(false, null));
+    renderAdmin(createI18n("en"));
+    expect(await screen.findByText(en.errors.resetLinkInvalid)).toBeTruthy();
+    expect(screen.getByRole("link", { name: en.reset.again })).toBeTruthy();
+  });
+
+  it("maps a used or expired token to its message in Hebrew", async () => {
+    window.history.replaceState(null, "", "/admin/reset-password?token=old");
+    serve(
+      boot(false, null, {
+        "POST /api/auth/reset-password": json(
+          { code: "INVALID_TOKEN", message: "Invalid token" },
+          400,
+        ),
+      }),
+    );
+    renderAdmin(createI18n("he"));
+    await fillReset(he);
+    expect((await screen.findByRole("alert")).textContent).toBe(he.errors.resetLinkInvalid);
+  });
+});
+
+describe("account page", () => {
+  it("asks for an email change, which completes from the link sent to the new address", async () => {
+    const calls = serve(boot(false, FULL, { "POST /api/auth/change-email": { status: true } }));
+    renderAdmin(createI18n("en"));
+    expect(await screen.findByText("admin@example.test")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(en.account.newEmail), {
+      target: { value: "new@example.test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.account.changeEmail }));
+    expect(await screen.findByText(en.account.emailSent)).toBeTruthy();
+    expect(calls.find((call) => call.path === "/api/auth/change-email")?.body).toEqual({
+      newEmail: "new@example.test",
+      callbackURL: "/admin",
+    });
+  });
+
+  it("shows new backup codes once", async () => {
+    serve(
+      boot(false, FULL, {
+        "POST /api/auth/two-factor/generate-backup-codes": {
+          status: true,
+          backupCodes: ["fresh-one", "fresh-two"],
+        },
+      }),
+    );
+    renderAdmin(createI18n("en"));
+    fireEvent.change(await screen.findByLabelText(en.account.password), {
+      target: { value: "a long password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.account.generateBackup }));
+    expect(await screen.findByText("fresh-one")).toBeTruthy();
+  });
+});
+
 describe("routing and errors", () => {
   it("chooses the page from setup and session state", () => {
+    const enrollment = { state: "enrollment", username: "shlomi", email: "a@b.test" } as const;
+    const full = { ...enrollment, state: "full" } as const;
     expect(targetPath({ setupRequired: true, session: { state: "none" } })).toBe("/admin/setup");
     expect(targetPath({ setupRequired: false, session: { state: "none" } })).toBe("/admin/sign-in");
-    expect(targetPath({ setupRequired: false, session: ENROLLMENT as never })).toBe("/admin/totp");
-    expect(targetPath({ setupRequired: false, session: FULL as never })).toBe("/admin");
+    expect(targetPath({ setupRequired: false, session: enrollment })).toBe("/admin/totp");
+    expect(targetPath({ setupRequired: false, session: full })).toBe("/admin");
+    for (const session of [{ state: "none" } as const, enrollment, full]) {
+      expect(targetPath({ setupRequired: false, session }, "/admin/reset-password")).toBe(
+        "/admin/reset-password",
+      );
+    }
+    expect(targetPath({ setupRequired: false, session: full }, "/admin/forgot-password")).toBe(
+      "/admin",
+    );
   });
 
   it("maps server codes to locale keys that exist in both languages", () => {
     expect(errorKey("INVALID_USERNAME_OR_PASSWORD", 401)).toBe(ERROR_KEYS.invalidCredentials);
-    expect(errorKey("setup_token_invalid", 403)).toBe(ERROR_KEYS.setupTokenInvalid);
-    expect(errorKey("PASSKEY_USER_VERIFICATION_REQUIRED", 401)).toBe(
-      ERROR_KEYS.passkeyUserVerification,
-    );
+    expect(errorKey("FAILED_TO_CREATE_USER", 400)).toBe(ERROR_KEYS.alreadySetUp);
+    expect(errorKey("INVALID_TOKEN", 400)).toBe(ERROR_KEYS.resetLinkInvalid);
+    expect(errorKey("INVALID_ORIGIN", 403)).toBe(ERROR_KEYS.originRejected);
+    expect(errorKey("setting_locked", 400)).toBe(ERROR_KEYS.settingLocked);
     expect(errorKey(undefined, 429)).toBe(ERROR_KEYS.tooManyAttempts);
     expect(errorKey("SOMETHING_NEW", 500)).toBe(ERROR_KEYS.unexpected);
     expect(errorKey(undefined, undefined)).toBe(ERROR_KEYS.network);
@@ -275,111 +606,6 @@ describe("routing and errors", () => {
       expect(en.errors[name], key).toBeTruthy();
       expect(he.errors[name], key).toBeTruthy();
     }
-  });
-});
-
-describe("sign-in flow", () => {
-  it("shows the home page after the TOTP step succeeds", async () => {
-    let session: unknown = { state: "none" };
-    serve({
-      "/api/admin/status": { setupRequired: false },
-      get "/api/admin/session"() {
-        return session;
-      },
-      "/api/auth/passkey/list-user-passkeys": [],
-      "POST /api/auth/sign-in/username": { twoFactorRedirect: true },
-      get "POST /api/auth/two-factor/verify-totp"() {
-        session = FULL;
-        return { token: "t", user: { username: "shlomi" } };
-      },
-    });
-    renderAdmin(createI18n("en"));
-    await screen.findByRole("heading", { level: 1, name: en.signIn.heading });
-    fireEvent.change(screen.getByLabelText(en.signIn.username), { target: { value: "shlomi" } });
-    fireEvent.change(screen.getByLabelText(en.signIn.password), {
-      target: { value: "a long password" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: en.signIn.submit }));
-    fireEvent.change(await screen.findByLabelText(en.signIn.code), { target: { value: "123456" } });
-    fireEvent.click(screen.getByRole("button", { name: en.signIn.verify }));
-    await waitFor(() => expect(window.location.pathname).toBe("/admin"));
-    expect(
-      await screen.findByRole("heading", { level: 2, name: en.passkeys.heading }),
-    ).toBeTruthy();
-  });
-});
-
-describe("reset page", () => {
-  const atReset = () => window.history.replaceState(null, "", "/admin/reset");
-
-  async function fillReset(language: typeof en | typeof he, password = "a brand new passphrase") {
-    await screen.findByRole("heading", { level: 1, name: language.reset.heading });
-    fireEvent.change(screen.getByLabelText(language.reset.token), { target: { value: "token" } });
-    fireEvent.change(screen.getByLabelText(language.reset.password), {
-      target: { value: password },
-    });
-    fireEvent.change(screen.getByLabelText(language.reset.confirm), {
-      target: { value: password },
-    });
-    fireEvent.click(screen.getByRole("button", { name: language.reset.submit }));
-  }
-
-  it("is reachable without a session and has only locale text", async () => {
-    atReset();
-    serve(boot(false, { state: "none" }));
-    const { container } = renderAdmin(createI18n("he", pseudoResources()));
-    await screen.findByRole("heading", { level: 1 });
-    expect(window.location.pathname).toBe("/admin/reset");
-    expectOnlyLocaleText(container);
-  });
-
-  it("sets the new password and goes to sign-in", async () => {
-    atReset();
-    const calls = serve(boot(false, { state: "none" }, { "POST /api/admin/reset": { ok: true } }));
-    renderAdmin(createI18n("en"));
-    await fillReset(en);
-    expect(await screen.findByRole("heading", { level: 1, name: en.signIn.heading })).toBeTruthy();
-    await waitFor(() => expect(window.location.pathname).toBe("/admin/sign-in"));
-    expect(calls.find((call) => call.path === "/api/admin/reset")?.body).toEqual({
-      token: "token",
-      password: "a brand new passphrase",
-    });
-  });
-
-  it.each([
-    ["reset_token_expired", "resetTokenExpired"],
-    ["reset_token_used", "resetTokenUsed"],
-    ["reset_token_invalid", "resetTokenInvalid"],
-    ["password_too_short", "passwordTooShort"],
-  ] as const)("shows %s in Hebrew", async (code, key) => {
-    atReset();
-    serve(
-      boot(
-        false,
-        { state: "none" },
-        {
-          "POST /api/admin/reset": new Response(JSON.stringify({ error: code }), { status: 403 }),
-        },
-      ),
-    );
-    renderAdmin(createI18n("he"));
-    await fillReset(he);
-    expect((await screen.findByRole("alert")).textContent).toBe(he.errors[key]);
-  });
-
-  it("is not shown to a signed-in admin", async () => {
-    atReset();
-    serve(boot(false, FULL));
-    renderAdmin(createI18n("en"));
-    await screen.findByRole("heading", { level: 1 });
-    await waitFor(() => expect(window.location.pathname).toBe("/admin"));
-  });
-
-  it("is linked from the sign-in page", async () => {
-    serve(boot(false, { state: "none" }));
-    renderAdmin(createI18n("en"));
-    fireEvent.click(await screen.findByRole("link", { name: en.signIn.resetLink }));
-    expect(await screen.findByRole("heading", { level: 1, name: en.reset.heading })).toBeTruthy();
   });
 });
 
@@ -404,6 +630,46 @@ const AGENT = {
   lastEventKind: "connectivity_lost",
   lastEventAt: "2026-11-01T08:30:00.000Z",
   droppedEvents: "2",
+};
+
+const SETTINGS = {
+  heartbeatIntervalSeconds: 60,
+  retentionDays: 30,
+  publicUrl: "",
+  trustedOrigins: [],
+  trustedProxies: [],
+  sessionHours: 12,
+  smtpHost: "",
+  smtpPort: 465,
+  smtpUser: "",
+  smtpPasswordSet: false,
+  smtpFrom: "",
+  locked: [],
+  apply: {
+    heartbeatIntervalSeconds: "now",
+    retentionDays: "now",
+    publicUrl: "restart",
+    trustedOrigins: "now",
+    trustedProxies: "restart",
+    sessionHours: "restart",
+    smtpHost: "next_email",
+    smtpPort: "next_email",
+    smtpUser: "next_email",
+    smtpPassword: "next_email",
+    smtpFrom: "next_email",
+  },
+  env: {
+    publicUrl: "BETTER_AUTH_URL",
+    trustedOrigins: "BETTER_AUTH_TRUSTED_ORIGINS",
+    trustedProxies: "MASHKIF_TRUSTED_PROXIES",
+    sessionHours: "MASHKIF_SESSION_HOURS",
+    smtpHost: "MASHKIF_SMTP_HOST",
+    smtpPort: "MASHKIF_SMTP_PORT",
+    smtpUser: "MASHKIF_SMTP_USER",
+    smtpPassword: "MASHKIF_SMTP_PASSWORD",
+    smtpFrom: "MASHKIF_SMTP_FROM",
+  },
+  geoip: { state: "ok", buildDate: "2026-10-28T00:00:00.000Z", stale: false },
 };
 
 const KEY = {
@@ -436,11 +702,7 @@ function managed(extra: Routes = {}): Routes {
       ],
     },
     "/api/admin/providers": { providers: [{ id: 3, name: "Example", asns: [64500, 64501] }] },
-    "/api/admin/settings": {
-      heartbeatIntervalSeconds: 60,
-      retentionDays: 30,
-      geoip: { state: "ok", buildDate: "2026-10-28T00:00:00.000Z", stale: false },
-    },
+    "/api/admin/settings": SETTINGS,
     ...extra,
   });
 }
@@ -598,19 +860,78 @@ describe("management pages", () => {
 
   it("save the settings and confirm", async () => {
     window.history.replaceState(null, "", "/admin/settings");
-    const calls = serve(
-      managed({ "POST /api/admin/settings": { heartbeatIntervalSeconds: 120, retentionDays: 14 } }),
-    );
+    const calls = serve(managed({ "POST /api/admin/settings": SETTINGS }));
     renderAdmin(createI18n("en"));
-    fireEvent.change(await screen.findByLabelText(en.settings.interval), {
+    fireEvent.change(await screen.findByLabelText(en.settings.heartbeatIntervalSeconds), {
       target: { value: "120" },
     });
-    fireEvent.change(screen.getByLabelText(en.settings.retention), { target: { value: "14" } });
+    fireEvent.change(screen.getByLabelText(en.settings.trustedProxies), {
+      target: { value: "172.18.0.0/16, 10.0.0.1" },
+    });
+    fireEvent.change(screen.getByLabelText(en.settings.smtpHost), {
+      target: { value: "smtp.example.test" },
+    });
     fireEvent.click(screen.getByRole("button", { name: en.settings.save }));
     expect(await screen.findByText(en.settings.saved)).toBeTruthy();
+    // The empty password field keeps the stored password, so it is not sent.
     expect(calls.find((call) => call.method === "POST")?.body).toEqual({
       heartbeatIntervalSeconds: 120,
-      retentionDays: 14,
+      retentionDays: 30,
+      publicUrl: "",
+      trustedOrigins: [],
+      trustedProxies: ["172.18.0.0/16", "10.0.0.1"],
+      sessionHours: 12,
+      smtpHost: "smtp.example.test",
+      smtpPort: 465,
+      smtpUser: "",
+      smtpFrom: "",
+    });
+  });
+
+  it("show a field set by the environment locked, name the variable, and never send it", async () => {
+    window.history.replaceState(null, "", "/admin/settings");
+    const locked = {
+      ...SETTINGS,
+      publicUrl: "https://mashkif.example",
+      smtpPasswordSet: true,
+      locked: ["publicUrl", "smtpPassword"],
+    };
+    const calls = serve(
+      managed({ "/api/admin/settings": locked, "POST /api/admin/settings": locked }),
+    );
+    renderAdmin(createI18n("en"));
+    const field = (await screen.findByLabelText(en.settings.publicUrl)) as HTMLInputElement;
+    expect(field.readOnly).toBe(true);
+    expect(field.value).toBe("https://mashkif.example");
+    expect(
+      screen.getByText(en.settings.locked.replace("{{variable}}", "BETTER_AUTH_URL")),
+    ).toBeTruthy();
+    expect(screen.getByText(en.settings.passwordSet)).toBeTruthy();
+    expect((screen.getByLabelText(en.settings.smtpPassword) as HTMLInputElement).readOnly).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByRole("button", { name: en.settings.save }));
+    expect(await screen.findByText(en.settings.saved)).toBeTruthy();
+    const body = calls.find((call) => call.method === "POST")?.body as Record<string, unknown>;
+    expect(body).not.toHaveProperty("publicUrl");
+    expect(body).not.toHaveProperty("smtpPassword");
+  });
+
+  it("send a typed SMTP password once and say when the server refuses a value", async () => {
+    window.history.replaceState(null, "", "/admin/settings");
+    const calls = serve(
+      managed({
+        "POST /api/admin/settings": json({ error: "setting_invalid", field: "smtpPort" }, 400),
+      }),
+    );
+    renderAdmin(createI18n("he"));
+    fireEvent.change(await screen.findByLabelText(he.settings.smtpPassword), {
+      target: { value: "mail secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: he.settings.save }));
+    expect((await screen.findByRole("alert")).textContent).toBe(he.errors.settingInvalid);
+    expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({
+      smtpPassword: "mail secret",
     });
   });
 
@@ -619,8 +940,7 @@ describe("management pages", () => {
     serve(
       managed({
         "/api/admin/settings": {
-          heartbeatIntervalSeconds: 60,
-          retentionDays: 30,
+          ...SETTINGS,
           geoip: { state: "unavailable", buildDate: null, stale: false },
         },
       }),
@@ -634,11 +954,11 @@ describe("management pages", () => {
     let session: unknown = FULL;
     // Getters defined after the spread in managed(), so they run on each request.
     const routes = managed();
-    Object.defineProperty(routes, "/api/admin/session", { get: () => session });
+    Object.defineProperty(routes, "/api/auth/get-session", { get: () => session });
     Object.defineProperty(routes, "/api/admin/agents", {
       get: () => {
-        session = { state: "none", ended: "idle" };
-        return new Response(JSON.stringify({ error: "session_ended" }), { status: 401 });
+        session = null;
+        return json({ error: "session_required" }, 401);
       },
     });
     serve(routes);

@@ -9,6 +9,7 @@ MASHKIF_HEBREW_ALLOWLIST=(
   web/src/locales/he.json
   agent/src/Mashkif.Tray/Resources/Strings.he.resx
   agent/installer/Package.he-IL.wxl
+  server/src/mail/strings.he.ts
 )
 
 MASHKIF_SHELLCHECK_IMAGE="koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d"

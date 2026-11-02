@@ -1,16 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { expect } from "vitest";
-import { hashToken } from "../../src/admin/setup.js";
 import { enrollmentKey } from "../../src/db/schema.js";
+import { hashToken } from "../../src/http/token-hash.js";
 import type { TestDatabase } from "./database.js";
-import {
-  Browser,
-  enrollTotp,
-  type Harness,
-  ORIGIN,
-  setUpAdmin,
-  signInWithTotp,
-} from "./harness.js";
+import { type Browser, enrollTotp, type Harness, ORIGIN, setUpAdmin } from "./harness.js";
 
 /** Creates an enrollment key directly in the database; returns the secret. */
 export async function insertKey(
@@ -173,13 +166,9 @@ export class TestAgent {
 }
 
 /** The admin with a full session (password plus TOTP). */
-export async function fullAdmin(database: TestDatabase, harness: Harness): Promise<Browser> {
-  await setUpAdmin(database, harness);
-  const browser = new Browser(harness);
-  const secret = await enrollTotp(browser);
-  if ((await browser.sessionState()) !== "full") {
-    expect((await signInWithTotp(browser, secret)).status).toBe(200);
-  }
+export async function fullAdmin(harness: Harness): Promise<Browser> {
+  const browser = await setUpAdmin(harness);
+  await enrollTotp(browser);
   expect(await browser.sessionState()).toBe("full");
   return browser;
 }

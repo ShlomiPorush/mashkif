@@ -5,9 +5,7 @@ import type { AdminDeps } from "./admin/context.js";
 import { adminRoutes } from "./admin/routes.js";
 import type { AgentDeps } from "./agent/routes.js";
 import { AUTH_BASE_PATH } from "./auth/auth.js";
-import { authRoutes } from "./auth/routes.js";
 import { describeSafely } from "./errors.js";
-import { ADMIN_BODY_LIMIT_BYTES, boundedBody } from "./http/bounded-body.js";
 import { agentRoutes } from "./protocol.js";
 import {
   DEFAULT_READINESS_TIMEOUT_MS,
@@ -24,7 +22,7 @@ export interface AppOptions {
   webRoot?: string;
   /** Called when a readiness check fails. The reason must not contain secrets. */
   onReadinessFailure?: (name: ReadinessCheckName, reason: string) => void;
-  /** Admin sign-in and the admin API. When undefined, those routes are 404. */
+  /** Better Auth and the admin API. When undefined, those routes are 404. */
   admin?: AdminDeps;
   /** Agent registration, heartbeats, and events. When undefined, only agent health exists. */
   agent?: AgentDeps;
@@ -70,12 +68,8 @@ export function createApp(options: AppOptions): Hono {
 
   app.route("/api/agent", agentRoutes(options.agent));
   if (options.admin !== undefined) {
-    // Whole body first, bounded by size and time, before any route parses it
-    // or takes the admin lock.
-    const limit = boundedBody(ADMIN_BODY_LIMIT_BYTES, options.admin.bodyTimeoutMs);
-    app.use(`${AUTH_BASE_PATH}/*`, limit);
-    app.use("/api/admin/*", limit);
-    app.route(AUTH_BASE_PATH, authRoutes(options.admin));
+    const { auth } = options.admin;
+    app.on(["GET", "POST"], `${AUTH_BASE_PATH}/*`, (c) => auth.handler(c.req.raw));
     app.route("/api/admin", adminRoutes(options.admin));
   }
   app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));

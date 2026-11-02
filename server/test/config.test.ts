@@ -1,25 +1,23 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { ConfigError, DEFAULT_PORT, loadConfig, passkeysSupported } from "../src/config.js";
+import { ConfigError, DEFAULT_PORT, loadConfig } from "../src/config.js";
+import { parsePublicUrl } from "../src/settings.js";
 
-const appKey = randomBytes(32);
+const secret = randomBytes(32).toString("base64");
 
 const valid = {
   DATABASE_URL: "postgres://mashkif:example@db:5432/mashkif",
   MASHKIF_GEOIP_ASN_PATH: "/geoip/GeoLite2-ASN.mmdb",
-  MASHKIF_APP_KEY: appKey.toString("base64"),
-  MASHKIF_PUBLIC_URL: "https://mashkif.co.il",
+  BETTER_AUTH_SECRET: secret,
 };
 
 describe("loadConfig", () => {
-  it("reads the settings and defaults PORT to 8080", () => {
+  it("reads the environment-only values and defaults PORT to 8080", () => {
     expect(loadConfig(valid)).toEqual({
       databaseUrl: valid.DATABASE_URL,
       geoipAsnPath: valid.MASHKIF_GEOIP_ASN_PATH,
       port: DEFAULT_PORT,
-      appKey,
-      publicOrigin: "https://mashkif.co.il",
-      trustedProxies: [],
+      authSecret: secret,
     });
     expect(DEFAULT_PORT).toBe(8080);
   });
@@ -28,11 +26,15 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...valid, PORT: "3000" }).port).toBe(3000);
   });
 
-  it("names every missing setting", () => {
+  it("names every missing value", () => {
     expect(() => loadConfig({})).toThrow(ConfigError);
     expect(() => loadConfig({})).toThrow(
-      /DATABASE_URL is required.*MASHKIF_GEOIP_ASN_PATH is required.*MASHKIF_APP_KEY is required.*MASHKIF_PUBLIC_URL is required/,
+      /DATABASE_URL is required.*MASHKIF_GEOIP_ASN_PATH is required.*BETTER_AUTH_SECRET is required/,
     );
+  });
+
+  it("needs no public URL: Better Auth then infers it from each request", () => {
+    expect(() => loadConfig(valid)).not.toThrow();
   });
 
   it("rejects a database URL that is not PostgreSQL", () => {
@@ -44,9 +46,9 @@ describe("loadConfig", () => {
   });
 
   it("never puts the database URL in the error message", () => {
-    const secret = "postgres://mashkif:s3cret@db/mashkif";
+    const leaked = "postgres://mashkif:s3cret@db/mashkif";
     try {
-      loadConfig({ DATABASE_URL: secret, PORT: "x" });
+      loadConfig({ DATABASE_URL: leaked, PORT: "x" });
       expect.unreachable();
     } catch (error) {
       expect(String(error)).not.toContain("s3cret");
@@ -54,46 +56,53 @@ describe("loadConfig", () => {
   });
 });
 
-describe("MASHKIF_APP_KEY", () => {
-  it("accepts 32 or more random bytes in base64 or base64url", () => {
-    const longer = randomBytes(48);
-    expect(loadConfig({ ...valid, MASHKIF_APP_KEY: longer.toString("base64url") }).appKey).toEqual(
-      longer,
-    );
-    expect(loadConfig({ ...valid, MASHKIF_APP_KEY: ` ${valid.MASHKIF_APP_KEY} ` }).appKey).toEqual(
-      appKey,
-    );
-  });
-
-  it.each([
-    ["the .env.example placeholder", "change-me"],
-    ["31 bytes", randomBytes(31).toString("base64")],
-    ["text that is not base64", "this is not a key, it has spaces!"],
-    ["32 repeated bytes", Buffer.alloc(32, 7).toString("base64")],
-  ])("rejects %s with a clear message", (_, value) => {
-    expect(() => loadConfig({ ...valid, MASHKIF_APP_KEY: value })).toThrow(
-      /MASHKIF_APP_KEY must be at least 32 random bytes in base64 \(generate one with: openssl rand -base64 32\)/,
-    );
-  });
-
-  it("is required", () => {
-    expect(() => loadConfig({ ...valid, MASHKIF_APP_KEY: " " })).toThrow(
-      /MASHKIF_APP_KEY is required/,
-    );
-  });
-
-  it("never puts the key in the error message", () => {
-    const leaked = randomBytes(20).toString("base64");
-    try {
-      loadConfig({ ...valid, MASHKIF_APP_KEY: leaked });
-      expect.unreachable();
-    } catch (error) {
-      expect(String(error)).not.toContain(leaked);
+describe("BETTER_AUTH_SECRET", () => {
+  it("rejects the .env.example placeholder and short values without quoting them", () => {
+    for (const value of ["change-me", "x".repeat(31)]) {
+      try {
+        loadConfig({ ...valid, BETTER_AUTH_SECRET: value });
+        expect.unreachable();
+      } catch (error) {
+        expect(String(error)).toMatch(/BETTER_AUTH_SECRET must be at least 32 random characters/);
+        expect(String(error)).not.toContain(value);
+      }
     }
+  });
+
+  it("is passed on as is, without derivation", () => {
+    expect(loadConfig({ ...valid, BETTER_AUTH_SECRET: ` ${secret} ` }).authSecret).toBe(secret);
   });
 });
 
-describe("MASHKIF_PUBLIC_URL", () => {
+describe("environment overrides of settings", () => {
+  it("are validated at startup", () => {
+    expect(() =>
+      loadConfig({
+        ...valid,
+        BETTER_AUTH_URL: "http://mashkif.co.il",
+        MASHKIF_TRUSTED_PROXIES: "172.18.0.0/16,traefik",
+        MASHKIF_SESSION_HOURS: "twelve",
+        MASHKIF_SMTP_PORT: "70000",
+      }),
+    ).toThrow(
+      /BETTER_AUTH_URL is not a valid value.*MASHKIF_TRUSTED_PROXIES is not a valid value.*MASHKIF_SESSION_HOURS is not a valid value.*MASHKIF_SMTP_PORT is not a valid value/,
+    );
+  });
+
+  it("accept valid values, and an empty variable sets nothing", () => {
+    expect(() =>
+      loadConfig({
+        ...valid,
+        BETTER_AUTH_URL: "https://mashkif.co.il",
+        MASHKIF_TRUSTED_PROXIES: "",
+        MASHKIF_SESSION_HOURS: "24",
+        MASHKIF_SMTP_PORT: "587",
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("parsePublicUrl", () => {
   it.each([
     ["https://mashkif.co.il", "https://mashkif.co.il"],
     ["https://mashkif.co.il/", "https://mashkif.co.il"],
@@ -102,7 +111,7 @@ describe("MASHKIF_PUBLIC_URL", () => {
     ["http://localhost:8180", "http://localhost:8180"],
     ["http://[::1]:8180", "http://[::1]:8180"],
   ])("accepts %s", (value, origin) => {
-    expect(loadConfig({ ...valid, MASHKIF_PUBLIC_URL: value }).publicOrigin).toBe(origin);
+    expect(parsePublicUrl(value)).toBe(origin);
   });
 
   it.each([
@@ -113,34 +122,6 @@ describe("MASHKIF_PUBLIC_URL", () => {
     "mashkif.co.il",
     "ftp://mashkif.co.il",
   ])("rejects %s", (value) => {
-    expect(() => loadConfig({ ...valid, MASHKIF_PUBLIC_URL: value })).toThrow(
-      /MASHKIF_PUBLIC_URL must be an https:\/\/ origin without a path/,
-    );
-  });
-});
-
-describe("MASHKIF_TRUSTED_PROXIES", () => {
-  it("is optional and reads addresses and ranges", () => {
-    expect(loadConfig(valid).trustedProxies).toEqual([]);
-    expect(
-      loadConfig({ ...valid, MASHKIF_TRUSTED_PROXIES: "172.18.0.0/16, fd00::/8" }).trustedProxies,
-    ).toEqual(["172.18.0.0/16", "fd00::/8"]);
-  });
-
-  it("refuses an entry that is not an address or a range", () => {
-    expect(() =>
-      loadConfig({ ...valid, MASHKIF_TRUSTED_PROXIES: "172.18.0.0/16,traefik" }),
-    ).toThrow(/MASHKIF_TRUSTED_PROXIES must list IP addresses or CIDR ranges.*"traefik"/);
-  });
-});
-
-describe("passkeysSupported", () => {
-  it.each([
-    ["https://mashkif.co.il", true],
-    ["http://localhost:8180", true],
-    ["http://127.0.0.1:8180", false],
-    ["http://[::1]:8180", false],
-  ])("%s: %s", (origin, supported) => {
-    expect(passkeysSupported(origin)).toBe(supported);
+    expect(parsePublicUrl(value)).toBeUndefined();
   });
 });

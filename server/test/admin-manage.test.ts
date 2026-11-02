@@ -1,7 +1,6 @@
 import { latLngToCell } from "h3-js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { resetAdmin } from "../src/admin/reset.js";
-import { hashToken } from "../src/admin/setup.js";
+import { hashToken } from "../src/http/token-hash.js";
 import { fullAdmin, insertKey, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import { Browser, createHarness, type Harness, setUpAdmin, USERNAME } from "./support/harness.js";
@@ -51,22 +50,20 @@ const ROUTES: [string, string, unknown?][] = [
 
 describe("authorization of the management routes", () => {
   it.each(ROUTES)("%s %s needs a session", async (method, path, json) => {
-    await setUpAdmin(database, harness);
+    await setUpAdmin(harness);
     const reply = await new Browser(harness).request(method, path, { json });
     expect(reply).toMatchObject({ status: 401, body: { error: "session_required" } });
   });
 
-  it.each(ROUTES)("%s %s refuses a password-only session", async (method, path, json) => {
-    await setUpAdmin(database, harness);
-    const browser = new Browser(harness);
-    expect((await browser.signIn()).status).toBe(200);
+  it.each(ROUTES)("%s %s refuses a session without TOTP", async (method, path, json) => {
+    const browser = await setUpAdmin(harness);
     expect(await browser.sessionState()).toBe("enrollment");
     const reply = await browser.request(method, path, { json });
     expect(reply).toMatchObject({ status: 403, body: { error: "totp_required" } });
   });
 
   it.each(ROUTES)("%s %s works with a full session", async (method, path, json) => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const reply = await browser.request(method, path, { json });
     expect(reply.status).not.toBe(401);
     expect(reply.status).not.toBe(403);
@@ -76,7 +73,7 @@ describe("authorization of the management routes", () => {
   it.each(ROUTES.filter(([method]) => method === "POST"))(
     "POST %s from another origin is refused",
     async (_, path, json) => {
-      const browser = await fullAdmin(database, harness);
+      const browser = await fullAdmin(harness);
       const reply = await browser.request("POST", path.toString(), {
         json,
         origin: "https://evil.test",
@@ -84,20 +81,11 @@ describe("authorization of the management routes", () => {
       expect(reply).toMatchObject({ status: 403, body: { error: "origin_rejected" } });
     },
   );
-
-  it("commits nothing when reset-admin ended the session first", async () => {
-    const browser = await fullAdmin(database, harness);
-    await resetAdmin(database.db);
-    const reply = await browser.post("/api/admin/enrollment-keys", { label: "PC" });
-    expect(reply.status).toBe(401);
-    expect(await database.sql`select 1 from enrollment_key`).toHaveLength(0);
-    expect(await audits("enrollment_key")).toHaveLength(0);
-  });
 });
 
 describe("enrollment keys", () => {
   it("shows a new key once, stores only its hash, and lets the agent use it", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const created = await browser.post("/api/admin/enrollment-keys", {
       label: "Kitchen PC",
       validHours: 2,
@@ -134,7 +122,7 @@ describe("enrollment keys", () => {
   });
 
   it("defaults to 24 hours and refuses a missing label or a validity over 7 days", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const created = await browser.post("/api/admin/enrollment-keys", { label: "PC" });
     const key = created.body.key as { createdAt: string; expiresAt: string };
     expect(Date.parse(key.expiresAt) - Date.parse(key.createdAt)).toBe(24 * 60 * 60 * 1000);
@@ -148,7 +136,7 @@ describe("enrollment keys", () => {
   });
 
   it("revokes an unused key, which the agent then cannot use, and refuses to revoke a used one", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const created = await browser.post("/api/admin/enrollment-keys", { label: "PC" });
     const id = (created.body.key as { id: number }).id;
     expect((await browser.post(`/api/admin/enrollment-keys/${id}/revoke`)).status).toBe(200);
@@ -170,7 +158,7 @@ describe("enrollment keys", () => {
 
 describe("agents", () => {
   it("lists agents with site address, ASN, provider, area, infrastructure, and tier", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     harness.asn.table.set("203.0.113.", { asn: 64500, organization: "Example Net" });
     await browser.post("/api/admin/providers", { name: "Example", asns: [64500] });
     const agent = await new TestAgent(harness).enroll(database);
@@ -198,7 +186,7 @@ describe("agents", () => {
   });
 
   it("changes trust tier, label, and assigned area with one audit entry each", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const agent = await new TestAgent(harness).enroll(database);
     const path = `/api/admin/agents/${agent.agentId}`;
     expect(
@@ -225,7 +213,7 @@ describe("agents", () => {
   });
 
   it("refuses an invalid tier, label, or area", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const agent = await new TestAgent(harness).enroll(database);
     const path = `/api/admin/agents/${agent.agentId}`;
     expect((await browser.post(path, { trustTier: "vip" })).body.error).toBe("trust_tier_invalid");
@@ -241,7 +229,7 @@ describe("agents", () => {
   });
 
   it("revokes an agent, whose token then stops working", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const agent = await new TestAgent(harness).enroll(database);
     expect((await browser.post(`/api/admin/agents/${agent.agentId}/revoke`)).status).toBe(200);
     expect((await agent.heartbeat()).body.error).toBe("agent_revoked");
@@ -252,7 +240,7 @@ describe("agents", () => {
   });
 
   it("blocks and unblocks an agent through its trust tier", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const agent = await new TestAgent(harness).enroll(database);
     await browser.post(`/api/admin/agents/${agent.agentId}`, { trustTier: "blocked" });
     expect((await agent.heartbeat()).body.error).toBe("agent_blocked");
@@ -263,7 +251,7 @@ describe("agents", () => {
 
 describe("blocked addresses and ranges", () => {
   it("normalizes, lists, refuses duplicates, and removes, with audit entries", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     expect(
       await browser.post("/api/admin/blocked-ranges", { range: "203.0.113.77/24", note: "spam" }),
     ).toMatchObject({ status: 201, body: { range: "203.0.113.0/24" } });
@@ -301,7 +289,7 @@ describe("blocked addresses and ranges", () => {
 
 describe("providers", () => {
   it("creates, edits, and deletes providers; an ASN belongs to one provider", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     const created = await browser.post("/api/admin/providers", {
       name: "Example",
       asns: [64501, 64500, 64500],
@@ -337,7 +325,7 @@ describe("providers", () => {
 
 describe("settings", () => {
   it("starts from the development defaults, validates, saves, audits, and reaches agents", async () => {
-    const browser = await fullAdmin(database, harness);
+    const browser = await fullAdmin(harness);
     expect((await browser.get("/api/admin/settings")).body).toMatchObject({
       heartbeatIntervalSeconds: 60,
       retentionDays: 30,
@@ -355,7 +343,7 @@ describe("settings", () => {
       heartbeatIntervalSeconds: 120,
       retentionDays: 14,
     });
-    expect(saved.body).toEqual({ heartbeatIntervalSeconds: 120, retentionDays: 14 });
+    expect(saved.body).toMatchObject({ heartbeatIntervalSeconds: 120, retentionDays: 14 });
     expect(await audits("settings")).toMatchObject([
       {
         action: "settings.updated",
@@ -369,5 +357,145 @@ describe("settings", () => {
     ]);
     const agent = await new TestAgent(harness).enroll(database);
     expect((await agent.heartbeat()).body.nextIntervalSeconds).toBe(120);
+  });
+});
+
+describe("settings from the environment", () => {
+  const ENV = {
+    BETTER_AUTH_URL: "https://mashkif.example",
+    MASHKIF_SESSION_HOURS: "8",
+    MASHKIF_TRUSTED_PROXIES: "172.18.0.0/16",
+    BETTER_AUTH_TRUSTED_ORIGINS: "https://other.example",
+    MASHKIF_SMTP_HOST: "smtp.example",
+    MASHKIF_SMTP_PORT: "587",
+    MASHKIF_SMTP_USER: "mailer",
+    MASHKIF_SMTP_PASSWORD: "from-the-environment",
+    MASHKIF_SMTP_FROM: "mashkif@mashkif.example",
+  };
+
+  it("lets every environment override win over the stored value and reports it locked", async () => {
+    harness = createHarness(database, { env: ENV });
+    const browser = await fullAdmin(harness);
+    // Stored values that the environment overrides.
+    await database.sql`insert into setting (key, value, updated_by) values
+      ('public_url', '"https://stored.example"', 'test'),
+      ('session_hours', '24', 'test'),
+      ('smtp_host', '"stored.example"', 'test'),
+      ('smtp_port', '465', 'test')`;
+    const reply = await browser.get("/api/admin/settings");
+    expect(reply.body).toMatchObject({
+      publicUrl: "https://mashkif.example",
+      sessionHours: 8,
+      trustedProxies: ["172.18.0.0/16"],
+      trustedOrigins: ["https://other.example"],
+      smtpHost: "smtp.example",
+      smtpPort: 587,
+      smtpUser: "mailer",
+      smtpPasswordSet: true,
+      smtpFrom: "mashkif@mashkif.example",
+      apply: { publicUrl: "restart", trustedOrigins: "now", smtpHost: "next_email" },
+      env: { publicUrl: "BETTER_AUTH_URL", smtpPassword: "MASHKIF_SMTP_PASSWORD" },
+    });
+    expect([...(reply.body.locked as string[])].sort()).toEqual(
+      [
+        "publicUrl",
+        "sessionHours",
+        "smtpFrom",
+        "smtpHost",
+        "smtpPassword",
+        "smtpPort",
+        "smtpUser",
+        "trustedOrigins",
+        "trustedProxies",
+      ].sort(),
+    );
+    expect(JSON.stringify(reply.body)).not.toContain("from-the-environment");
+    // A locked setting cannot be changed in the panel.
+    for (const field of ["publicUrl", "sessionHours", "smtpPassword", "trustedProxies"]) {
+      const value = field === "sessionHours" ? 4 : field === "trustedProxies" ? [] : "x";
+      expect((await browser.post("/api/admin/settings", { [field]: value })).body).toEqual({
+        error: "setting_locked",
+        field,
+      });
+    }
+    // Unlocked settings stay editable.
+    expect((await browser.post("/api/admin/settings", { retentionDays: 10 })).status).toBe(200);
+  });
+
+  it("an empty environment variable does not lock its setting", async () => {
+    harness = createHarness(database, {
+      env: { MASHKIF_TRUSTED_PROXIES: " ", BETTER_AUTH_URL: "" },
+    });
+    const browser = await fullAdmin(harness);
+    const reply = await browser.get("/api/admin/settings");
+    expect(reply.body.locked).toEqual([]);
+    expect(reply.body).toMatchObject({ publicUrl: "", trustedProxies: [] });
+  });
+});
+
+describe("panel settings", () => {
+  it("validates and saves the sign-in, proxy, and mail settings", async () => {
+    const browser = await fullAdmin(harness);
+    for (const body of [
+      { publicUrl: "http://mashkif.example" },
+      { publicUrl: "https://mashkif.example/admin" },
+      { trustedOrigins: ["not a url"] },
+      { trustedProxies: ["300.1.1.1"] },
+      { sessionHours: 0 },
+      { sessionHours: 169 },
+      { smtpPort: 70000 },
+      { smtpHost: "bad host" },
+      { smtpFrom: "not-an-address" },
+    ]) {
+      expect(
+        (await browser.post("/api/admin/settings", body)).body.error,
+        JSON.stringify(body),
+      ).toBe("setting_invalid");
+    }
+    const saved = await browser.post("/api/admin/settings", {
+      publicUrl: "https://mashkif.example/",
+      trustedOrigins: ["https://other.example"],
+      trustedProxies: ["172.18.0.0/16", "10.0.0.1"],
+      sessionHours: 6,
+      smtpHost: "smtp.example",
+      smtpPort: 587,
+      smtpUser: "mailer",
+      smtpFrom: "mashkif@mashkif.example",
+    });
+    expect(saved.body).toMatchObject({
+      publicUrl: "https://mashkif.example",
+      trustedOrigins: ["https://other.example"],
+      trustedProxies: ["172.18.0.0/16", "10.0.0.1/32"],
+      sessionHours: 6,
+      smtpPort: 587,
+      smtpPasswordSet: false,
+      locked: [],
+    });
+  });
+
+  it("stores the SMTP password encrypted, never returns it, and keeps it out of the audit log", async () => {
+    const browser = await fullAdmin(harness);
+    const password = "smtp password 1234";
+    const saved = await browser.post("/api/admin/settings", { smtpPassword: password });
+    expect(saved.status).toBe(200);
+    expect(saved.body.smtpPasswordSet).toBe(true);
+    expect(JSON.stringify(saved.body)).not.toContain(password);
+    expect(JSON.stringify((await browser.get("/api/admin/settings")).body)).not.toContain(password);
+    const [row] = await database.sql`select value from setting where key = 'smtp_password'`;
+    expect(typeof row?.value).toBe("string");
+    expect(String(row?.value)).not.toContain(password);
+    expect(JSON.stringify(await audits("settings"))).not.toContain(password);
+    expect(await audits("settings")).toMatchObject([
+      { details: { changes: { smtpPassword: { changed: true } } } },
+    ]);
+    // The stored value decrypts to the password with the Better Auth secret only.
+    const { resolveSettings } = await import("../src/settings.js");
+    const own = await resolveSettings(database.db, { env: {}, secret: harness.secret });
+    expect(own.values.smtpPassword).toBe(password);
+    const other = await resolveSettings(database.db, {
+      env: {},
+      secret: "another secret 0123456789abcdef",
+    });
+    expect(other.values.smtpPassword).toBe("");
   });
 });

@@ -34,14 +34,30 @@ export function isMutation(method: string): boolean {
 
 /**
  * Whether a request comes from a page of Mashkif's own origin. Mutations of
- * admin state require it in addition to SameSite=Strict cookies: the Origin
- * header must equal the public origin, and Sec-Fetch-Site, when the browser
- * sends it, must say same-origin.
+ * admin state require it in addition to Better Auth's cookies: the Origin
+ * header must equal the public URL, or, while none is set, name the host the
+ * request was made to. Sec-Fetch-Site, when the browser sends it, must say
+ * same-origin.
  */
-export function fromOwnOrigin(c: Context, publicOrigin: string): boolean {
+export function fromOwnOrigin(c: Context, publicUrl: string | undefined): boolean {
   const origin = c.req.header("origin");
-  if (origin !== publicOrigin) {
+  if (origin === undefined) {
     return false;
+  }
+  if (publicUrl !== undefined) {
+    if (origin !== publicUrl) {
+      return false;
+    }
+  } else {
+    let host: string;
+    try {
+      host = new URL(origin).host;
+    } catch {
+      return false;
+    }
+    if (host !== c.req.header("host")) {
+      return false;
+    }
   }
   const site = c.req.header("sec-fetch-site");
   return site === undefined || site === "same-origin";

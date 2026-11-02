@@ -1,22 +1,14 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { authClient } from "../auth-client";
-import { AuthPanel, Button, Command, Field, Notice } from "../components";
+import { AuthPanel, Button, Field, Notice } from "../components";
 import { authErrorKey, ERROR_KEYS, type ErrorKey } from "../errors";
 import { ADMIN_PATHS, navigate, rememberPassword } from "../router";
 
-export type SessionEnded = "idle" | "max_age" | "invalid" | undefined;
-
-/** Password, then the TOTP code; or a passkey. */
-export function SignInPage({
-  ended,
-  onDone,
-}: {
-  ended: SessionEnded;
-  onDone: () => Promise<void>;
-}) {
+/** Password, then a TOTP code or a backup code; or a passkey. */
+export function SignInPage({ onDone }: { onDone: () => Promise<void> }) {
   const { t } = useTranslation();
-  const [step, setStep] = useState<"password" | "totp">("password");
+  const [step, setStep] = useState<"password" | "totp" | "backup">("password");
   const [error, setError] = useState<ErrorKey>();
   const [busy, setBusy] = useState(false);
   const passwordRef = useRef<HTMLInputElement>(null);
@@ -60,9 +52,11 @@ export function SignInPage({
 
   const verify = (form: FormData) =>
     run(async () => {
-      const { error: failure } = await authClient.twoFactor.verifyTotp({
-        code: String(form.get("code")).trim(),
-      });
+      const code = String(form.get("code")).trim();
+      const { error: failure } =
+        step === "backup"
+          ? await authClient.twoFactor.verifyBackupCode({ code })
+          : await authClient.twoFactor.verifyTotp({ code });
       if (failure) {
         const key = authErrorKey(failure);
         setError(key);
@@ -87,38 +81,61 @@ export function SignInPage({
       await onDone();
     });
 
-  const endedText =
-    ended === "idle"
-      ? t("signIn.endedIdle")
-      : ended === "max_age"
-        ? t("signIn.endedMaxAge")
-        : undefined;
-
-  if (step === "totp") {
+  if (step !== "password") {
+    const backup = step === "backup";
     return (
-      <AuthPanel heading={t("signIn.totpHeading")} intro={t("signIn.totpIntro")}>
+      <AuthPanel
+        heading={backup ? t("signIn.backupHeading") : t("signIn.totpHeading")}
+        intro={backup ? t("signIn.backupIntro") : t("signIn.totpIntro")}
+      >
         <form
+          key={step}
           className="form"
           onSubmit={(event) => {
             event.preventDefault();
             void verify(new FormData(event.currentTarget));
           }}
         >
-          <Field
-            ref={codeRef}
-            label={t("signIn.code")}
-            name="code"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            pattern="[0-9]{6}"
-            maxLength={6}
-            required
-            autoFocus
-            className="field-input field-code"
-            dir="ltr"
-          />
+          {backup ? (
+            <Field
+              ref={codeRef}
+              label={t("signIn.backupCode")}
+              name="code"
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={32}
+              required
+              autoFocus
+              className="field-input field-code"
+              dir="ltr"
+            />
+          ) : (
+            <Field
+              ref={codeRef}
+              label={t("signIn.code")}
+              name="code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              required
+              autoFocus
+              className="field-input field-code"
+              dir="ltr"
+            />
+          )}
           <Notice error={error} />
           <Button busy={busy}>{t("signIn.verify")}</Button>
+          <Button
+            type="button"
+            variant="quiet"
+            onClick={() => {
+              setError(undefined);
+              setStep(backup ? "totp" : "backup");
+            }}
+          >
+            {backup ? t("signIn.useTotp") : t("signIn.useBackup")}
+          </Button>
           <Button
             type="button"
             variant="quiet"
@@ -136,7 +153,6 @@ export function SignInPage({
 
   return (
     <AuthPanel heading={t("signIn.heading")} intro={t("signIn.intro")}>
-      {endedText !== undefined && <Notice>{endedText}</Notice>}
       <form
         className="form"
         onSubmit={(event) => {
@@ -170,17 +186,15 @@ export function SignInPage({
         {t("signIn.passkey")}
       </Button>
       <div className="help-block">
-        <p className="field-help">{t("signIn.lockedOut")}</p>
-        <Command>{t("signIn.resetCommand")}</Command>
         <a
           className="text-link"
-          href={ADMIN_PATHS.reset}
+          href={ADMIN_PATHS.forgotPassword}
           onClick={(event) => {
             event.preventDefault();
-            navigate(ADMIN_PATHS.reset);
+            navigate(ADMIN_PATHS.forgotPassword);
           }}
         >
-          {t("signIn.resetLink")}
+          {t("signIn.forgotLink")}
         </a>
       </div>
     </AuthPanel>

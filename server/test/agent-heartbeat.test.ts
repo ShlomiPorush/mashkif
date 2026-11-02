@@ -278,7 +278,7 @@ describe("heartbeat", () => {
 
 describe("client address", () => {
   it("ignores X-Forwarded-For from a peer that is not a trusted proxy", async () => {
-    harness = createHarness(database, undefined, undefined, { trustedProxies: ["10.0.0.0/8"] });
+    harness = createHarness(database, { trustedProxies: ["10.0.0.0/8"] });
     const agent = await new TestAgent(harness, "203.0.113.5").enroll(database);
     await agent.post("/heartbeat", agent.heartbeatBody({ sequence: 1 }), {
       "x-forwarded-for": "198.51.100.99",
@@ -287,32 +287,12 @@ describe("client address", () => {
   });
 
   it("takes the right-most untrusted address behind a trusted proxy, ignoring what the client wrote", async () => {
-    harness = createHarness(database, undefined, undefined, { trustedProxies: ["10.0.0.0/8"] });
+    harness = createHarness(database, { trustedProxies: ["10.0.0.0/8"] });
     const agent = await new TestAgent(harness, "10.0.0.2").enroll(database);
     // The client wrote 192.0.2.1 itself; the proxy appended the real address.
     await agent.post("/heartbeat", agent.heartbeatBody({ sequence: 1 }), {
       "x-forwarded-for": "192.0.2.1, 198.51.100.40",
     });
     expect((await agentRow(agent.agentId))?.address).toBe("198.51.100.40");
-  });
-
-  it("limits sign-in by the resolved address, so a forged header does not reset the count", async () => {
-    harness = createHarness(database, undefined, undefined, { trustedProxies: ["10.0.0.0/8"] });
-    const attempt = (forwarded: string) =>
-      harness.app.request("https://admin.test/api/auth/sign-in/username", {
-        method: "POST",
-        headers: {
-          origin: "https://admin.test",
-          "content-type": "application/json",
-          "x-test-client": "203.0.113.50",
-          "x-forwarded-for": forwarded,
-        },
-        body: JSON.stringify({ username: "nobody", password: "wrong password!" }),
-      });
-    const statuses: number[] = [];
-    for (let i = 0; i < 7; i++) {
-      statuses.push((await attempt(`192.0.2.${i}`)).status);
-    }
-    expect(statuses.at(-1)).toBe(429);
   });
 });

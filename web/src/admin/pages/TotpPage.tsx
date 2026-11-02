@@ -2,13 +2,15 @@ import QRCode from "qrcode";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { authClient } from "../auth-client";
-import { AuthPanel, Button, Field, Notice } from "../components";
+import { AuthPanel, BackupCodes, Button, Field, Notice } from "../components";
 import { authErrorKey, ERROR_KEYS, type ErrorKey } from "../errors";
 import { takeRememberedPassword } from "../router";
 
 interface Enrollment {
   qr: string;
   key: string;
+  /** Shown once, here; Better Auth stores them encrypted. */
+  backupCodes: string[];
 }
 
 /** The secret of an otpauth:// URI, in groups of four for typing by hand. */
@@ -23,7 +25,7 @@ async function qrDataUrl(uri: string): Promise<string> {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
-/** Mandatory TOTP enrollment. The only thing a session without TOTP may do. */
+/** Mandatory TOTP enrollment: the admin API needs it, and it shows the backup codes once. */
 export function TotpPage({ onDone }: { onDone: () => Promise<void> }) {
   const { t } = useTranslation();
   const [enrollment, setEnrollment] = useState<Enrollment>();
@@ -36,14 +38,16 @@ export function TotpPage({ onDone }: { onDone: () => Promise<void> }) {
     setBusy(true);
     setError(undefined);
     try {
-      // Better Auth also returns backup codes here. Mashkif never shows them:
-      // recovery is cli.js reset-admin on the server.
       const { data, error: failure } = await authClient.twoFactor.enable({ password });
       if (failure || data === null || !("totpURI" in data)) {
         setError(failure ? authErrorKey(failure) : ERROR_KEYS.unexpected);
         return;
       }
-      setEnrollment({ qr: await qrDataUrl(data.totpURI), key: manualKey(data.totpURI) });
+      setEnrollment({
+        qr: await qrDataUrl(data.totpURI),
+        key: manualKey(data.totpURI),
+        backupCodes: data.backupCodes,
+      });
     } catch {
       setError(ERROR_KEYS.network);
     } finally {
@@ -125,6 +129,7 @@ export function TotpPage({ onDone }: { onDone: () => Promise<void> }) {
           </code>
         </div>
       </div>
+      <BackupCodes codes={enrollment.backupCodes} />
       <form
         className="form"
         onSubmit={(event) => {

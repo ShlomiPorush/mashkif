@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { hashToken } from "../src/admin/setup.js";
 import { REGISTER_RATE_LIMIT } from "../src/agent/routes.js";
+import { hashToken } from "../src/http/token-hash.js";
 import { insertKey, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import { createHarness, type Harness, pauseOnce } from "./support/harness.js";
@@ -116,7 +116,7 @@ describe("register", () => {
 
   it("leaves the key unused when a registration is interrupted after using it", async () => {
     let fail = true;
-    harness = createHarness(database, undefined, undefined, {
+    harness = createHarness(database, {
       registerHooks: {
         afterKeyUse: async () => {
           if (fail) {
@@ -138,7 +138,7 @@ describe("register", () => {
 
   it("makes a second registration wait while the first holds the key", async () => {
     const pause = pauseOnce();
-    harness = createHarness(database, undefined, undefined, {
+    harness = createHarness(database, {
       registerHooks: { afterKeyUse: pause.hook },
     });
     const key = await insertKey(database);

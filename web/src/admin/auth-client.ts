@@ -2,7 +2,7 @@ import { passkeyClient } from "@better-auth/passkey/client";
 import { createAuthClient } from "better-auth/client";
 import { twoFactorClient, usernameClient } from "better-auth/client/plugins";
 
-/** Better Auth on the same origin. The server allows only the routes the admin pages use. */
+/** Better Auth on the same origin. */
 export const authClient = createAuthClient({
   basePath: "/api/auth",
   plugins: [usernameClient(), twoFactorClient(), passkeyClient()],

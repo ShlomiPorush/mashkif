@@ -1,6 +1,10 @@
-import { parseTrustedProxies } from "./http/client-address.js";
+import { settingEnvProblems } from "./settings.js";
 
-/** Runtime settings read from environment variables. */
+/**
+ * Values the server needs before it can read its settings from the database.
+ * They come only from the environment; every other setting lives in the
+ * admin panel (src/settings.ts), where an environment variable may override it.
+ */
 export interface ServerConfig {
   /** PostgreSQL connection URL. Never log it: it contains the password. */
   databaseUrl: string;
@@ -8,84 +12,23 @@ export interface ServerConfig {
   geoipAsnPath: string;
   /** TCP port for HTTP. */
   port: number;
-  /** Secret key material (at least 32 bytes). Never log it. Auth secrets are derived from it. */
-  appKey: Buffer;
-  /** Origin the browser uses for the web app, for example https://mashkif.co.il. */
-  publicOrigin: string;
-  /**
-   * Addresses and CIDR ranges of the reverse proxies whose X-Forwarded-For is
-   * believed (MASHKIF_TRUSTED_PROXIES). Empty: the TCP peer is the client.
-   */
-  trustedProxies: string[];
+  /** BETTER_AUTH_SECRET, passed to Better Auth as is. Never log it. */
+  authSecret: string;
 }
 
 export const DEFAULT_PORT = 8080;
 
-/** Minimum length of MASHKIF_APP_KEY after base64 decoding. */
-export const APP_KEY_MIN_BYTES = 32;
+/** Minimum length of BETTER_AUTH_SECRET, as Better Auth recommends. */
+export const AUTH_SECRET_MIN_LENGTH = 32;
 
 export class ConfigError extends Error {
   override name = "ConfigError";
 }
 
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const BASE64URL = /^[A-Za-z0-9_-]+$/;
-
-/** Decodes the application key, or returns undefined when it is not usable. */
-export function parseAppKey(text: string): Buffer | undefined {
-  let key: Buffer;
-  if (BASE64.test(text)) {
-    key = Buffer.from(text, "base64");
-  } else if (BASE64URL.test(text)) {
-    key = Buffer.from(text, "base64url");
-  } else {
-    return undefined;
-  }
-  if (key.length < APP_KEY_MIN_BYTES || new Set(key).size < 8) {
-    return undefined;
-  }
-  return key;
-}
-
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 /**
- * Validates the public URL and returns its origin. HTTPS is required, except
- * for a loopback host in local development: browsers treat loopback as a
- * secure context, so Secure cookies and passkeys still work there.
+ * Reads and validates the environment-only values and every environment
+ * override of a setting. Throws ConfigError naming every problem.
  */
-export function parsePublicUrl(text: string): string | undefined {
-  let url: URL;
-  try {
-    url = new URL(text);
-  } catch {
-    return undefined;
-  }
-  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
-    return undefined;
-  }
-  if (url.pathname !== "/") {
-    return undefined;
-  }
-  if (url.protocol === "https:") {
-    return url.origin;
-  }
-  if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)) {
-    return url.origin;
-  }
-  return undefined;
-}
-
-/**
- * Whether passkeys can work with this origin. Browsers refuse an IP address
- * as the WebAuthn relying-party ID, so passkeys need a host name.
- */
-export function passkeysSupported(publicOrigin: string): boolean {
-  const host = new URL(publicOrigin).hostname;
-  return !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) && !host.startsWith("[");
-}
-
-/** Reads and validates the server settings. Throws ConfigError naming every problem. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const problems: string[] = [];
 
@@ -107,36 +50,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     problems.push("PORT must be a whole number from 1 to 65535");
   }
 
-  // The key and its length are never part of the message.
-  const appKeyText = env.MASHKIF_APP_KEY?.trim() ?? "";
-  const appKey = appKeyText === "" ? undefined : parseAppKey(appKeyText);
-  if (appKeyText === "") {
-    problems.push("MASHKIF_APP_KEY is required (generate one with: openssl rand -base64 32)");
-  } else if (appKey === undefined) {
+  // The secret and its length are never part of the message.
+  const authSecret = env.BETTER_AUTH_SECRET?.trim() ?? "";
+  if (authSecret === "") {
+    problems.push("BETTER_AUTH_SECRET is required (generate one with: openssl rand -base64 32)");
+  } else if (authSecret.length < AUTH_SECRET_MIN_LENGTH) {
     problems.push(
-      `MASHKIF_APP_KEY must be at least ${APP_KEY_MIN_BYTES} random bytes in base64 (generate one with: openssl rand -base64 32)`,
+      `BETTER_AUTH_SECRET must be at least ${AUTH_SECRET_MIN_LENGTH} random characters (generate one with: openssl rand -base64 32)`,
     );
   }
 
-  const publicUrlText = env.MASHKIF_PUBLIC_URL?.trim() ?? "";
-  const publicOrigin = publicUrlText === "" ? undefined : parsePublicUrl(publicUrlText);
-  if (publicUrlText === "") {
-    problems.push("MASHKIF_PUBLIC_URL is required (for example https://mashkif.co.il)");
-  } else if (publicOrigin === undefined) {
-    problems.push(
-      "MASHKIF_PUBLIC_URL must be an https:// origin without a path (http:// only for localhost or 127.0.0.1)",
-    );
-  }
+  problems.push(...settingEnvProblems(env));
 
-  const proxies = parseTrustedProxies(env.MASHKIF_TRUSTED_PROXIES ?? "");
-  if (!proxies.ok) {
-    problems.push(
-      `MASHKIF_TRUSTED_PROXIES must list IP addresses or CIDR ranges, separated by commas; "${proxies.invalid.slice(0, 64)}" is neither`,
-    );
-  }
-
-  if (problems.length > 0 || appKey === undefined || publicOrigin === undefined || !proxies.ok) {
+  if (problems.length > 0) {
     throw new ConfigError(problems.join("; "));
   }
-  return { databaseUrl, geoipAsnPath, port, appKey, publicOrigin, trustedProxies: proxies.entries };
+  return { databaseUrl, geoipAsnPath, port, authSecret };
 }
