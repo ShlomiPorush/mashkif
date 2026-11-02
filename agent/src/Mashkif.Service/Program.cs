@@ -11,7 +11,10 @@ builder.Logging.ClearProviders();
 builder.Logging.AddProvider(new FileLoggerProvider(new FileLog(AgentLogPaths.ServiceLogFile)));
 builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
 builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Information);
+// HttpClient logs request URLs and headers at Information; the agent logs its own outcomes.
+builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
 
+builder.Services.AddSingleton<IAgentRunner, AgentRuntime>();
 builder.Services.AddHostedService<AgentService>();
 
 builder.Build().Run();
