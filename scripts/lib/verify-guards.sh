@@ -205,7 +205,7 @@ guard_env_example() {
   offenders="$(_env_example_offenders "$MASHKIF_ROOT/.env.example")"
   if [[ -n "$offenders" ]]; then
     fail ".env.example lists variables that are neither environment-only nor a setting override:"
-    sed 's/^/  /' <<<"$offenders" >&2
+    printf '  %s\n' "${offenders//$'\n'/$'\n'  }" >&2
     return "$MASHKIF_EXIT_FAILED"
   fi
 }

@@ -206,7 +206,8 @@ describe("sign-in", () => {
     const admin = await setUpAdmin(harness);
     await enrollTotp(admin);
     const read = async () => {
-      const [row] = await database.sql`select extract(epoch from expires_at - created_at)::float as seconds,
+      const [row] =
+        await database.sql`select extract(epoch from expires_at - created_at)::float as seconds,
         expires_at::text as expires from auth_session`;
       return row;
     };
