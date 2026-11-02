@@ -36,18 +36,22 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Trade a single-use enrollment key for an agent identity.
-         * @description Uses the enrollment key and creates the agent in one transaction. The
-         *     agent must save its token before it calls this operation.
+         * Register an agent identity.
+         * @description Creates the agent, starting at the trust tier the admin set for new
+         *     agents. The agent must save its install ID and token before it calls
+         *     this operation.
          *
-         *     A retry with the same enrollment key, install ID, and token succeeds
-         *     again with the same `agentId` (200), even after the key expired, so a
-         *     lost response or a crash between the request and saving the answer is
-         *     harmless. Any other use of a used key is refused with
-         *     `enrollment_key_used`.
+         *     A retry with the same install ID and token succeeds again with the
+         *     same `agentId` (200), also while registration is closed, so a lost
+         *     response or a crash between the request and saving the answer is
+         *     harmless. A request whose install ID or token belongs to another
+         *     identity gets `install_id_conflict`; a repeat of a revoked identity
+         *     gets `agent_revoked`.
          *
-         *     After `agent_revoked`, an agent that is enrolled again uses a new
-         *     install ID and a new token.
+         *     After a 401 `token_invalid`, the agent registers a new token with the
+         *     same install ID, at most once per hour. After `agent_revoked`, an
+         *     agent joins again only when its user asks, with a new install ID and
+         *     a new token.
          */
         post: operations["registerAgent"];
         delete?: never;
@@ -103,7 +107,10 @@ export interface paths {
          * @description The server checks each event on its own and answers with one result
          *     per event, in request order, so one bad event never blocks the rest.
          *     The agent removes an event from its queue when its result is
-         *     `accepted`, `duplicate`, or `rejected`. A whole request is refused
+         *     `accepted`, `duplicate`, or `rejected`, and keeps a `deferred` event
+         *     for a later request after `retryAfterSeconds`. Each agent has an event
+         *     budget per hour (lower for a new agent at the trust tier `low`); events
+         *     past it are `deferred`. A whole request is refused
          *     only for authentication, address, size, rate, or a body that is not
          *     an events request.
          *
@@ -147,7 +154,7 @@ export interface components {
          * @description Stable error code. New codes may be added; treat an unknown code like a server error.
          * @enum {string}
          */
-        AgentErrorCode: "request_invalid" | "payload_too_large" | "too_many_events" | "request_timeout" | "rate_limited" | "token_invalid" | "agent_revoked" | "agent_blocked" | "address_blocked" | "enrollment_key_invalid" | "enrollment_key_expired" | "enrollment_key_revoked" | "enrollment_key_used" | "install_id_conflict" | "internal_error";
+        AgentErrorCode: "request_invalid" | "payload_too_large" | "too_many_events" | "request_timeout" | "rate_limited" | "token_invalid" | "agent_revoked" | "agent_blocked" | "address_blocked" | "registration_closed" | "install_id_conflict" | "internal_error";
         AgentError: {
             error: components["schemas"]["AgentErrorCode"];
             /** @description With `request_invalid`, the first request field that failed. */
@@ -173,8 +180,7 @@ export interface components {
          */
         AreaCell: string | null;
         RegisterRequest: {
-            /** @description The single-use key shown once in the admin panel. */
-            enrollmentKey: string;
+            /** @description Random, generated once per installation and saved before this request. */
             installId: components["schemas"]["Uuid"];
             /** @description 32 random bytes in base64url without padding, saved before this request. */
             token: string;
@@ -253,10 +259,14 @@ export interface components {
             /** @description The event's ID, or null when it had no valid ID. */
             id: components["schemas"]["Uuid"] | null;
             /**
-             * @description `duplicate`: an event with this ID was accepted before.
+             * @description `duplicate`: an event with this ID is already stored. `deferred`:
+             *     the agent used up its event budget for the hour; the event was not
+             *     stored, stays in the agent's queue, and is sent again after
+             *     `retryAfterSeconds`. An ID repeated within one request gets the
+             *     result of its first occurrence.
              * @enum {string}
              */
-            status: "accepted" | "duplicate" | "rejected";
+            status: "accepted" | "duplicate" | "rejected" | "deferred";
             /**
              * @description With `rejected`, why. The agent drops the event.
              * @enum {string}
@@ -268,6 +278,8 @@ export interface components {
         EventsResponse: {
             /** @description One result per request event, in the same order. */
             results: components["schemas"]["EventResult"][];
+            /** @description Seconds until the event budget renews; present whenever a result is `deferred`. */
+            retryAfterSeconds?: number;
         };
     };
     responses: {
@@ -299,11 +311,13 @@ export interface components {
             };
         };
         /**
-         * @description `token_invalid`: the bearer token is missing, malformed, or unknown.
-         *     The agent keeps its token and tries again later, because the cause
-         *     can be on the server side (for example a proxy that drops the
-         *     `Authorization` header). An admin can enroll the PC again with a new
-         *     enrollment key; that registration uses a new install ID and token.
+         * @description `token_invalid`: the bearer token is missing, malformed, or unknown,
+         *     for example after the server was restored from a backup or an agent
+         *     that never reported was cleaned up. The agent keeps its old token and,
+         *     at most once per hour, first tries a heartbeat with it and then
+         *     registers a new token with the same install ID. A 409 to that
+         *     registration means the server still knows the install ID with the old
+         *     token; the agent keeps the old token and tries again an hour later.
          */
         Unauthorized: {
             headers: {
@@ -315,9 +329,11 @@ export interface components {
             };
         };
         /**
-         * @description - `enrollment_key_invalid`, `enrollment_key_expired`,
-         *       `enrollment_key_revoked`, `enrollment_key_used`: ask for a new key.
-         *     - `agent_revoked`: the admin revoked this agent; discard the token.
+         * @description - `registration_closed`: the admin closed registration for new
+         *       agents; keep the install ID and token and try again in an hour.
+         *     - `agent_revoked`: the admin revoked this agent; discard the token
+         *       and stop. Only an explicit revoke gives this code; a token whose
+         *       agent no longer exists gets 401 `token_invalid`.
          *     - `agent_blocked`, `address_blocked`: refused for now; keep the
          *       token and try again later with backoff.
          */
@@ -331,8 +347,9 @@ export interface components {
             };
         };
         /**
-         * @description `install_id_conflict`: another agent already uses this install ID.
-         *     Generate a new install ID and token and register again.
+         * @description `install_id_conflict`: the install ID or the token belongs to another
+         *     identity. Keep the install ID and the token you have and try again
+         *     an hour later; never generate a new install ID because of this answer.
          */
         Conflict: {
             headers: {
@@ -448,7 +465,7 @@ export interface operations {
                     "application/json": components["schemas"]["RegisterResponse"];
                 };
             };
-            /** @description The key was used and the agent was created. */
+            /** @description The agent was created. */
             201: {
                 headers: {
                     "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];

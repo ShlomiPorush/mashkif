@@ -15,12 +15,17 @@ info:
 
     ## Identity
 
-    An admin creates a single-use enrollment key in the admin panel. The agent
-    generates its own token (32 random bytes, base64url without padding),
-    saves it durably, and only then calls `registerAgent` with the key, a
-    random install ID, and the token. The server stores only a hash of the
+    Registration is open: an installed agent registers by itself, without a
+    key. The agent generates a random install ID and its own token (32 random
+    bytes, base64url without padding), saves both durably, and only then
+    calls `registerAgent` with them. The server stores only a hash of the
     token. Every later request sends the token as `Authorization: Bearer
     <token>`. The agent never sends a host name, a user name, or coordinates.
+
+    The install ID stays the same when the agent registers a new token after
+    its token became unknown to the server (401). An agent that the admin
+    revoked joins again only when its user asks, with a new install ID and a
+    new token. The admin can close registration for new agents.
 
     ## Time
 
@@ -43,8 +48,9 @@ info:
     events, whichever limit comes first: about 350 events with sync IDs fit
     in 64 KB. Heartbeat and events requests are rate limited per client
     address (a missing or unknown token counts heavily) and per agent;
-    `registerAgent` is limited per client address. A limited request gets
-    429 with `Retry-After` in seconds.
+    new registrations are limited per site (an IPv4 address or an IPv6 /64)
+    and across all sites; a repeat of an existing registration is not
+    counted. A limited request gets 429 with `Retry-After` in seconds.
   license:
     name: MIT
     identifier: MIT
@@ -85,19 +91,23 @@ paths:
       tags:
         - agent
       operationId: registerAgent
-      summary: Trade a single-use enrollment key for an agent identity.
+      summary: Register an agent identity.
       description: |
-        Uses the enrollment key and creates the agent in one transaction. The
-        agent must save its token before it calls this operation.
+        Creates the agent, starting at the trust tier the admin set for new
+        agents. The agent must save its install ID and token before it calls
+        this operation.
 
-        A retry with the same enrollment key, install ID, and token succeeds
-        again with the same `agentId` (200), even after the key expired, so a
-        lost response or a crash between the request and saving the answer is
-        harmless. Any other use of a used key is refused with
-        `enrollment_key_used`.
+        A retry with the same install ID and token succeeds again with the
+        same `agentId` (200), also while registration is closed, so a lost
+        response or a crash between the request and saving the answer is
+        harmless. A request whose install ID or token belongs to another
+        identity gets `install_id_conflict`; a repeat of a revoked identity
+        gets `agent_revoked`.
 
-        After `agent_revoked`, an agent that is enrolled again uses a new
-        install ID and a new token.
+        After a 401 `token_invalid`, the agent registers a new token with the
+        same install ID, at most once per hour. After `agent_revoked`, an
+        agent joins again only when its user asks, with a new install ID and
+        a new token.
       security: []
       parameters:
         - $ref: "#/components/parameters/ProtocolVersion"
@@ -121,7 +131,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/RegisterResponse"
         "201":
-          description: The key was used and the agent was created.
+          description: The agent was created.
           headers:
             Mashkif-Protocol-Version:
               $ref: "#/components/headers/ProtocolVersion"
@@ -213,7 +223,10 @@ paths:
         The server checks each event on its own and answers with one result
         per event, in request order, so one bad event never blocks the rest.
         The agent removes an event from its queue when its result is
-        `accepted`, `duplicate`, or `rejected`. A whole request is refused
+        `accepted`, `duplicate`, or `rejected`, and keeps a `deferred` event
+        for a later request after `retryAfterSeconds`. Each agent has an event
+        budget per hour (lower for a new agent at the trust tier `low`); events
+        past it are `deferred`. A whole request is refused
         only for authentication, address, size, rate, or a body that is not
         an events request.
 
@@ -244,6 +257,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EventsResponse"
+              examples:
+                past-the-budget:
+                  $ref: "examples/responses/events-200.json"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -318,11 +334,13 @@ components:
               $ref: "examples/responses/protocol-error-400.json"
     Unauthorized:
       description: |
-        `token_invalid`: the bearer token is missing, malformed, or unknown.
-        The agent keeps its token and tries again later, because the cause
-        can be on the server side (for example a proxy that drops the
-        `Authorization` header). An admin can enroll the PC again with a new
-        enrollment key; that registration uses a new install ID and token.
+        `token_invalid`: the bearer token is missing, malformed, or unknown,
+        for example after the server was restored from a backup or an agent
+        that never reported was cleaned up. The agent keeps its old token and,
+        at most once per hour, first tries a heartbeat with it and then
+        registers a new token with the same install ID. A 409 to that
+        registration means the server still knows the install ID with the old
+        token; the agent keeps the old token and tries again an hour later.
       headers:
         Mashkif-Protocol-Version:
           $ref: "#/components/headers/ProtocolVersion"
@@ -332,9 +350,11 @@ components:
             $ref: "#/components/schemas/AgentError"
     Forbidden:
       description: |
-        - `enrollment_key_invalid`, `enrollment_key_expired`,
-          `enrollment_key_revoked`, `enrollment_key_used`: ask for a new key.
-        - `agent_revoked`: the admin revoked this agent; discard the token.
+        - `registration_closed`: the admin closed registration for new
+          agents; keep the install ID and token and try again in an hour.
+        - `agent_revoked`: the admin revoked this agent; discard the token
+          and stop. Only an explicit revoke gives this code; a token whose
+          agent no longer exists gets 401 `token_invalid`.
         - `agent_blocked`, `address_blocked`: refused for now; keep the
           token and try again later with backoff.
       headers:
@@ -347,10 +367,13 @@ components:
           examples:
             agent-revoked:
               $ref: "examples/responses/agent-error-403.json"
+            registration-closed:
+              $ref: "examples/responses/registration-closed-403.json"
     Conflict:
       description: |
-        `install_id_conflict`: another agent already uses this install ID.
-        Generate a new install ID and token and register again.
+        `install_id_conflict`: the install ID or the token belongs to another
+        identity. Keep the install ID and the token you have and try again
+        an hour later; never generate a new install ID because of this answer.
       headers:
         Mashkif-Protocol-Version:
           $ref: "#/components/headers/ProtocolVersion"
@@ -445,10 +468,7 @@ components:
         - agent_revoked
         - agent_blocked
         - address_blocked
-        - enrollment_key_invalid
-        - enrollment_key_expired
-        - enrollment_key_revoked
-        - enrollment_key_used
+        - registration_closed
         - install_id_conflict
         - internal_error
     AgentError:
@@ -506,17 +526,13 @@ components:
       type: object
       additionalProperties: false
       required:
-        - enrollmentKey
         - installId
         - token
         - agentVersion
       properties:
-        enrollmentKey:
-          type: string
-          pattern: "^[A-Za-z0-9_-]{32}$"
-          description: The single-use key shown once in the admin panel.
         installId:
           $ref: "#/components/schemas/Uuid"
+          description: Random, generated once per installation and saved before this request.
         token:
           type: string
           pattern: "^[A-Za-z0-9_-]{43}$"
@@ -702,7 +718,13 @@ components:
             - accepted
             - duplicate
             - rejected
-          description: "`duplicate`: an event with this ID was accepted before."
+            - deferred
+          description: |
+            `duplicate`: an event with this ID is already stored. `deferred`:
+            the agent used up its event budget for the hour; the event was not
+            stored, stays in the agent's queue, and is sent again after
+            `retryAfterSeconds`. An ID repeated within one request gets the
+            result of its first occurrence.
         error:
           type: string
           enum:
@@ -723,3 +745,8 @@ components:
           description: One result per request event, in the same order.
           items:
             $ref: "#/components/schemas/EventResult"
+        retryAfterSeconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          description: Seconds until the event budget renews; present whenever a result is `deferred`.
