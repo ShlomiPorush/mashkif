@@ -120,6 +120,26 @@ public sealed class PipeTests : IDisposable
     }
 
     [Fact]
+    public async Task Clients_that_connect_and_close_at_once_do_not_stop_the_server()
+    {
+        _f.Create().Initialize();
+        using var stop = new CancellationTokenSource();
+        var running = Server().RunAsync(stop.Token);
+        var ct = TestContext.Current.CancellationToken;
+
+        for (var i = 0; i < 30; i++)
+        {
+            using var pipe = new NamedPipeClientStream(".", _pipeName, PipeClient.Rights, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification, HandleInheritability.None);
+            await pipe.ConnectAsync(5000, ct);
+        }
+
+        var reply = await new PipeClient(_pipeName, static () => Environment.ProcessId).SendAsync(new PipeRequest { Command = PipeProtocol.StatusCommand }, ct);
+        Assert.Equal(PipeFailure.None, reply.Failure);
+        Assert.False(running.IsCompleted, running.Exception?.ToString());
+        await StopAsync(stop, running);
+    }
+
+    [Fact]
     public async Task A_client_with_only_the_interactive_rights_can_connect()
     {
         // The service SID here is LocalService, so this process gets access

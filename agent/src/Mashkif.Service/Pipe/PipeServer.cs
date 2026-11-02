@@ -71,7 +71,21 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
                     listening = TryCreate(first: false);
                 }
 
-                await listening.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                try
+                {
+                    await listening.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    // A client connected and closed before the wait completed
+                    // ("the pipe is being closed"). Replace the instance and go on;
+                    // the replacement is created first, so the name stays ours.
+                    var replacement = TryCreate(first: false);
+                    await listening.DisposeAsync().ConfigureAwait(false);
+                    listening = replacement;
+                    continue;
+                }
+
                 await handlers.WaitAsync(stoppingToken).ConfigureAwait(false);
 
                 // Create the next instance before this one is handed off, so the
