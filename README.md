@@ -4,7 +4,7 @@ Mashkif is a community internet outage map for Israel. Its goal is to answer one
 
 ## Status
 
-The repository holds the project foundation (toolchains, the server and web shells, a Windows agent that only starts and logs, container definitions, workflow scripts, and CI) and the admin sign-in, the first step of MVP stage 1. There are no heartbeats, outage detection, or map data yet, and nothing for end users to install.
+The repository holds the project foundation (toolchains, the server and web shells, a Windows agent that only starts and logs, container definitions, workflow scripts, and CI) and the admin sign-in, the first step of MVP stage 1. The server accepts agent registrations, heartbeats, and events, and the admin panel manages agents (step 2a). The agent does not register yet, and there is no outage detection, no map, and nothing for end users to install.
 
 The design, decisions, and current state are in [docs/project-foundation.md](docs/project-foundation.md) and [docs/mvp-stage-1.md](docs/mvp-stage-1.md).
 
@@ -39,8 +39,9 @@ The server reads its settings from `.env` (template: `.env.example`). Besides th
 
 - `MASHKIF_APP_KEY`: a secret of at least 32 random bytes in base64. Generate one with `openssl rand -base64 32` and back it up together with `.env`. A new key signs the admin out and makes the enrolled TOTP unusable; run `reset-admin` afterwards.
 - `MASHKIF_PUBLIC_URL`: the origin of the web app, for example `https://mashkif.co.il`. Passkeys are bound to its host name, so use `http://localhost:8180` for local development: browsers refuse passkeys on an IP address such as 127.0.0.1.
+- `MASHKIF_TRUSTED_PROXIES` (optional): addresses or CIDR ranges of the reverse proxies whose `X-Forwarded-For` is believed. Behind Traefik, put the app and Traefik on a Docker network that nothing else uses and list that network's subnet; otherwise every client counts as Traefik's address for rate limits and agent sites.
 
-The admin panel is at `/admin`. Mashkif has one admin. Run these commands next to the Compose file on the server:
+The admin panel is at `/admin`. Mashkif has one admin. There the admin creates single-use enrollment keys for agents, sees the agents and their sites, sets trust tiers, blocks addresses, groups ASNs into providers, and sets the heartbeat interval and how long raw data is kept. Thresholds and similar values live only in the database; the repository holds development defaults. Run these commands next to the Compose file on the server:
 
 | Command | Purpose |
 |---|---|

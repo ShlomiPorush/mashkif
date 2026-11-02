@@ -1,3 +1,5 @@
+import { parseTrustedProxies } from "./http/client-address.js";
+
 /** Runtime settings read from environment variables. */
 export interface ServerConfig {
   /** PostgreSQL connection URL. Never log it: it contains the password. */
@@ -10,6 +12,11 @@ export interface ServerConfig {
   appKey: Buffer;
   /** Origin the browser uses for the web app, for example https://mashkif.co.il. */
   publicOrigin: string;
+  /**
+   * Addresses and CIDR ranges of the reverse proxies whose X-Forwarded-For is
+   * believed (MASHKIF_TRUSTED_PROXIES). Empty: the TCP peer is the client.
+   */
+  trustedProxies: string[];
 }
 
 export const DEFAULT_PORT = 8080;
@@ -121,8 +128,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     );
   }
 
-  if (problems.length > 0 || appKey === undefined || publicOrigin === undefined) {
+  const proxies = parseTrustedProxies(env.MASHKIF_TRUSTED_PROXIES ?? "");
+  if (!proxies.ok) {
+    problems.push(
+      `MASHKIF_TRUSTED_PROXIES must list IP addresses or CIDR ranges, separated by commas; "${proxies.invalid.slice(0, 64)}" is neither`,
+    );
+  }
+
+  if (problems.length > 0 || appKey === undefined || publicOrigin === undefined || !proxies.ok) {
     throw new ConfigError(problems.join("; "));
   }
-  return { databaseUrl, geoipAsnPath, port, appKey, publicOrigin };
+  return { databaseUrl, geoipAsnPath, port, appKey, publicOrigin, trustedProxies: proxies.entries };
 }

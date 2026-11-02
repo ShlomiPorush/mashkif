@@ -1,14 +1,14 @@
 import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Context } from "hono";
+import { canonicalAddress } from "./ip.js";
 
 /** Resolves the client address of a request, or undefined when unknown. */
 export type ClientAddressResolver = (c: Context) => string | undefined;
 
 /**
- * The TCP peer address. Forwarded headers are not trusted yet: behind a
- * reverse proxy every client shares the proxy's address, which makes the
- * sign-in rate limit stricter, never weaker. Trusted proxies come with the
- * agent API (MVP stage 1, step 2a).
+ * The TCP peer address. The server resolves the client address through
+ * clientAddressResolver (client-address.ts), which reads X-Forwarded-For only
+ * from trusted proxies; this is its fallback and the default in tests.
  */
 export const peerAddress: ClientAddressResolver = (c) => {
   try {
@@ -18,13 +18,12 @@ export const peerAddress: ClientAddressResolver = (c) => {
   }
 };
 
-/** An IPv4 address the socket reports as IPv4-mapped IPv6 (::ffff:a.b.c.d) becomes plain IPv4. */
+/**
+ * The canonical client address (see ip.ts): every IPv4-mapped IPv6 spelling
+ * becomes IPv4. Undefined when the value is not an IP address.
+ */
 export function normalizeAddress(address: string | undefined): string | undefined {
-  if (address === undefined || address === "") {
-    return undefined;
-  }
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
-  return mapped?.[1] ?? address;
+  return canonicalAddress(address);
 }
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);

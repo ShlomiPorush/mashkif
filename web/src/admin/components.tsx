@@ -112,7 +112,7 @@ export function Button({
   ...button
 }: {
   busy?: boolean;
-  variant?: "primary" | "secondary" | "quiet";
+  variant?: "primary" | "secondary" | "quiet" | "danger";
   children: ReactNode;
 } & ButtonHTMLAttributes<HTMLButtonElement>) {
   const { t } = useTranslation();

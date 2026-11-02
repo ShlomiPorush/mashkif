@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import type { Auth } from "../auth/auth.js";
 import type { Db } from "../db/client.js";
+import type { AsnLookup } from "../geoip.js";
 import {
   type ClientAddressResolver,
   normalizeAddress,
@@ -17,6 +18,10 @@ export interface AdminDeps {
   bodyTimeoutMs?: number;
   /** Defaults to the TCP peer address. */
   clientAddress?: ClientAddressResolver;
+  /** For the GeoLite2-ASN status in the settings. */
+  asn?: AsnLookup;
+  /** Test seams. */
+  testHooks?: { afterSettingsRead?: () => Promise<void> };
 }
 
 export interface RequestMeta {

@@ -26,6 +26,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trade a single-use enrollment key for an agent identity.
+         * @description Uses the enrollment key and creates the agent in one transaction. The
+         *     agent must save its token before it calls this operation.
+         *
+         *     A retry with the same enrollment key, install ID, and token succeeds
+         *     again with the same `agentId` (200), even after the key expired, so a
+         *     lost response or a crash between the request and saving the answer is
+         *     harmless. Any other use of a used key is refused with
+         *     `enrollment_key_used`.
+         *
+         *     After `agent_revoked`, an agent that is enrolled again uses a new
+         *     install ID and a new token.
+         */
+        post: operations["registerAgent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report that the agent is up, with its area and latency.
+         * @description The agent sends a heartbeat every `nextIntervalSeconds` of the last
+         *     response it received (60 seconds before the first response). The
+         *     server records the time it received the heartbeat and the client
+         *     address it came from; the address decides the agent's site.
+         *
+         *     Every request, also a retry of the same heartbeat (same `bootId` and
+         *     `sequence`) after a lost answer, gets a new sync ID anchored at the
+         *     time the server received that request, and moves the agent to the
+         *     address it came from. A retry is stored once as a heartbeat sample.
+         *     The agent uses the sync ID of the answer it actually received.
+         *
+         *     Until the agent reports the interval the server last sent in
+         *     `intervalSeconds`, the server judges silence by the larger of the two,
+         *     so a lost response never makes the agent look silent.
+         */
+        post: operations["sendHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deliver recorded events, also those from a time offline.
+         * @description The server checks each event on its own and answers with one result
+         *     per event, in request order, so one bad event never blocks the rest.
+         *     The agent removes an event from its queue when its result is
+         *     `accepted`, `duplicate`, or `rejected`. A whole request is refused
+         *     only for authentication, address, size, rate, or a body that is not
+         *     an events request.
+         *
+         *     The event time is the server time recorded for `syncId` plus
+         *     `elapsedMs`. An event is stored with `timeUncertain: true`, and does
+         *     not refine history, when it has no sync from the same boot (for
+         *     example after a reboot while offline), when its sync ID is unknown,
+         *     when the computed time is later than the moment the server received
+         *     the request, or when it is older than 7 days. An event never changes
+         *     the current state of an agent that sent a newer heartbeat.
+         */
+        post: operations["sendEvents"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -47,8 +143,238 @@ export interface components {
             /** @description Protocol versions the server accepts, oldest first. */
             supportedVersions: number[];
         };
+        /**
+         * @description Stable error code. New codes may be added; treat an unknown code like a server error.
+         * @enum {string}
+         */
+        AgentErrorCode: "request_invalid" | "payload_too_large" | "too_many_events" | "request_timeout" | "rate_limited" | "token_invalid" | "agent_revoked" | "agent_blocked" | "address_blocked" | "enrollment_key_invalid" | "enrollment_key_expired" | "enrollment_key_revoked" | "enrollment_key_used" | "install_id_conflict" | "internal_error";
+        AgentError: {
+            error: components["schemas"]["AgentErrorCode"];
+            /** @description With `request_invalid`, the first request field that failed. */
+            field?: string;
+        };
+        /** Format: uuid */
+        Uuid: string;
+        /** @description Opaque identifier of one heartbeat response. */
+        SyncId: string;
+        /** @example 0.1.0 */
+        Version: string;
+        /**
+         * @description The access infrastructure the user chose in the tray. It is never
+         *     inferred from the provider; `unknown` until the user chooses.
+         * @enum {string}
+         */
+        Infrastructure: "unknown" | "bezeq" | "hot" | "ibc" | "partner_fiber" | "cellcom_fiber" | "other";
+        /**
+         * @description H3 cell at resolution 7 that the agent computed on the PC, in
+         *     lowercase hexadecimal, or null when the area is unknown. A cell
+         *     whose center is outside the service area is stored as unknown.
+         * @example 873f5a4e8ffffff
+         */
+        AreaCell: string | null;
+        RegisterRequest: {
+            /** @description The single-use key shown once in the admin panel. */
+            enrollmentKey: string;
+            installId: components["schemas"]["Uuid"];
+            /** @description 32 random bytes in base64url without padding, saved before this request. */
+            token: string;
+            agentVersion: components["schemas"]["Version"];
+            /** @description Windows version, for example `10.0.26100`. */
+            osVersion?: string;
+        };
+        RegisterResponse: {
+            agentId: components["schemas"]["Uuid"];
+            /** @description Interval for the first heartbeat. */
+            heartbeatIntervalSeconds: number;
+            /** Format: date-time */
+            serverTime: string;
+        };
+        HeartbeatRequest: {
+            /**
+             * Format: int64
+             * @description Grows by one with every new heartbeat; a retry repeats it.
+             */
+            sequence: number;
+            bootId: components["schemas"]["Uuid"];
+            areaCell: components["schemas"]["AreaCell"];
+            infrastructure: components["schemas"]["Infrastructure"];
+            /** @description The heartbeat interval the agent is using now. */
+            intervalSeconds: number;
+            /** @description Round trip of the previous heartbeat request, or null when unknown. */
+            roundTripMs: number | null;
+            /** @description Time to resolve the server name for this request, or null when unknown. */
+            dnsMs: number | null;
+            agentVersion?: components["schemas"]["Version"];
+        };
+        HeartbeatResponse: {
+            syncId: components["schemas"]["SyncId"];
+            /**
+             * Format: date-time
+             * @description The time the server recorded for this sync ID.
+             */
+            serverTime: string;
+            /** @description Interval to use from now on. */
+            nextIntervalSeconds: number;
+        };
+        /** @enum {string} */
+        EventKind: "connectivity_lost" | "connectivity_restored" | "shutdown" | "sleep" | "resume" | "service_stop";
+        Event: {
+            id: components["schemas"]["Uuid"];
+            kind: components["schemas"]["EventKind"];
+            bootId: components["schemas"]["Uuid"];
+            /**
+             * @description Sync ID of the last heartbeat response received in this boot, or
+             *     null when none was received since the PC started.
+             */
+            syncId: components["schemas"]["SyncId"] | null;
+            /**
+             * @description Milliseconds on the monotonic clock from receiving that response
+             *     to the event, at most 400 days; null exactly when `syncId` is
+             *     null. An event with a larger value is rejected on its own.
+             */
+            elapsedMs: number | null;
+        };
+        EventsRequest: {
+            events: components["schemas"]["Event"][];
+            droppedEvents?: components["schemas"]["DroppedEvents"];
+        };
+        /**
+         * @description Events the agent dropped from its queue (by age or size) since the PC
+         *     started, as a cumulative count for that boot. The server keeps the
+         *     largest count it has seen per boot, so sending the same count again
+         *     changes nothing, and keeps counts for at most 10 boots per agent,
+         *     always including the boot of its latest heartbeat.
+         */
+        DroppedEvents: {
+            bootId: components["schemas"]["Uuid"];
+            count: number;
+        };
+        EventResult: {
+            /** @description The event's ID, or null when it had no valid ID. */
+            id: components["schemas"]["Uuid"] | null;
+            /**
+             * @description `duplicate`: an event with this ID was accepted before.
+             * @enum {string}
+             */
+            status: "accepted" | "duplicate" | "rejected";
+            /**
+             * @description With `rejected`, why. The agent drops the event.
+             * @enum {string}
+             */
+            error?: "event_invalid" | "event_kind_unknown";
+            /** @description With `accepted`, whether the server could not place the event in time. */
+            timeUncertain?: boolean;
+        };
+        EventsResponse: {
+            /** @description One result per request event, in the same order. */
+            results: components["schemas"]["EventResult"][];
+        };
     };
-    responses: never;
+    responses: {
+        /**
+         * @description The protocol version header is missing, malformed, or names a
+         *     version that the server does not support.
+         */
+        ProtocolVersionRejected: {
+            headers: {
+                "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ProtocolError"];
+            };
+        };
+        /**
+         * @description The protocol version was refused (`ProtocolError`), or the body is
+         *     not valid JSON of the expected shape (`AgentError` with
+         *     `request_invalid` and the first field that failed).
+         */
+        BadRequest: {
+            headers: {
+                "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ProtocolError"] | components["schemas"]["AgentError"];
+            };
+        };
+        /**
+         * @description `token_invalid`: the bearer token is missing, malformed, or unknown.
+         *     Register again with a new enrollment key, install ID, and token.
+         */
+        Unauthorized: {
+            headers: {
+                "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AgentError"];
+            };
+        };
+        /**
+         * @description - `enrollment_key_invalid`, `enrollment_key_expired`,
+         *       `enrollment_key_revoked`, `enrollment_key_used`: ask for a new key.
+         *     - `agent_revoked`: the admin revoked this agent; discard the token.
+         *     - `agent_blocked`, `address_blocked`: refused for now; keep the
+         *       token and try again later with backoff.
+         */
+        Forbidden: {
+            headers: {
+                "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AgentError"];
+            };
+        };
+        /**
+         * @description `install_id_conflict`: another agent already uses this install ID.
+         *     Generate a new install ID and token and register again.
+         */
+        Conflict: {
+            headers: {
+                "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AgentError"];
+            };
+        };
+        /** @description `request_timeout`: the body did not arrive within 10 seconds. */
+        RequestTimeout: {
+            headers: {
+                "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AgentError"];
+            };
+        };
+        /**
+         * @description `payload_too_large`: the body is larger than 64 KB.
+         *     `too_many_events`: more than 500 events. Send smaller batches.
+         */
+        PayloadTooLarge: {
+            headers: {
+                "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AgentError"];
+            };
+        };
+        /** @description `rate_limited`: wait the number of seconds in `Retry-After`. */
+        TooManyRequests: {
+            headers: {
+                "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                "Retry-After": components["headers"]["RetryAfter"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AgentError"];
+            };
+        };
+    };
     parameters: {
         /** @description Protocol version the agent speaks, a positive integer. */
         ProtocolVersion: components["schemas"]["ProtocolVersionValue"];
@@ -57,9 +383,12 @@ export interface components {
     headers: {
         /**
          * @description Protocol version the server used for this response. On a 400
-         *     response it is the server's current protocol version.
+         *     response for the protocol version it is the server's current
+         *     protocol version.
          */
         ProtocolVersion: components["schemas"]["ProtocolVersionValue"];
+        /** @description Seconds to wait before the next attempt. */
+        RetryAfter: string;
     };
     pathItems: never;
 }
@@ -87,19 +416,119 @@ export interface operations {
                     "application/json": components["schemas"]["AgentHealth"];
                 };
             };
-            /**
-             * @description The protocol version header is missing, malformed, or names a
-             *     version that the server does not support.
-             */
-            400: {
+            400: components["responses"]["ProtocolVersionRejected"];
+        };
+    };
+    registerAgent: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Protocol version the agent speaks, a positive integer. */
+                "Mashkif-Protocol-Version": components["parameters"]["ProtocolVersion"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description The same registration was already made; nothing changed. */
+            200: {
                 headers: {
                     "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProtocolError"];
+                    "application/json": components["schemas"]["RegisterResponse"];
                 };
             };
+            /** @description The key was used and the agent was created. */
+            201: {
+                headers: {
+                    "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegisterResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            408: components["responses"]["RequestTimeout"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
+    sendHeartbeat: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Protocol version the agent speaks, a positive integer. */
+                "Mashkif-Protocol-Version": components["parameters"]["ProtocolVersion"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HeartbeatRequest"];
+            };
+        };
+        responses: {
+            /** @description The heartbeat was recorded. */
+            200: {
+                headers: {
+                    "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HeartbeatResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            408: components["responses"]["RequestTimeout"];
+            413: components["responses"]["PayloadTooLarge"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
+    sendEvents: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Protocol version the agent speaks, a positive integer. */
+                "Mashkif-Protocol-Version": components["parameters"]["ProtocolVersion"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EventsRequest"];
+            };
+        };
+        responses: {
+            /** @description Every event has a result. */
+            200: {
+                headers: {
+                    "Mashkif-Protocol-Version": components["headers"]["ProtocolVersion"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventsResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            408: components["responses"]["RequestTimeout"];
+            413: components["responses"]["PayloadTooLarge"];
+            429: components["responses"]["TooManyRequests"];
         };
     };
 }

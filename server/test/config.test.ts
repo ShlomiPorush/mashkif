@@ -19,6 +19,7 @@ describe("loadConfig", () => {
       port: DEFAULT_PORT,
       appKey,
       publicOrigin: "https://mashkif.co.il",
+      trustedProxies: [],
     });
     expect(DEFAULT_PORT).toBe(8080);
   });
@@ -115,6 +116,21 @@ describe("MASHKIF_PUBLIC_URL", () => {
     expect(() => loadConfig({ ...valid, MASHKIF_PUBLIC_URL: value })).toThrow(
       /MASHKIF_PUBLIC_URL must be an https:\/\/ origin without a path/,
     );
+  });
+});
+
+describe("MASHKIF_TRUSTED_PROXIES", () => {
+  it("is optional and reads addresses and ranges", () => {
+    expect(loadConfig(valid).trustedProxies).toEqual([]);
+    expect(
+      loadConfig({ ...valid, MASHKIF_TRUSTED_PROXIES: "172.18.0.0/16, fd00::/8" }).trustedProxies,
+    ).toEqual(["172.18.0.0/16", "fd00::/8"]);
+  });
+
+  it("refuses an entry that is not an address or a range", () => {
+    expect(() =>
+      loadConfig({ ...valid, MASHKIF_TRUSTED_PROXIES: "172.18.0.0/16,traefik" }),
+    ).toThrow(/MASHKIF_TRUSTED_PROXIES must list IP addresses or CIDR ranges.*"traefik"/);
   });
 });
 

@@ -21,11 +21,29 @@ export const AUDIT_ACTIONS = [
   "passkey.removed",
   "credential_change.started",
   "credential_change.failed",
+  // MVP stage 1, step 2a.
+  "enrollment_key.created",
+  "enrollment_key.revoked",
+  "agent.registered",
+  "agent.trust_tier_changed",
+  "agent.label_changed",
+  "agent.area_assigned",
+  "agent.area_cleared",
+  "agent.revoked",
+  "blocked_range.added",
+  "blocked_range.removed",
+  "provider.created",
+  "provider.updated",
+  "provider.deleted",
+  "settings.updated",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 export interface AuditEntry {
-  /** Admin username, "cli" for operator commands, or "-" when nobody is signed in. */
+  /**
+   * Admin username, "cli" for operator commands, "agent" for an agent's own
+   * request, or "-" when nobody is signed in.
+   */
   actor: string;
   action: AuditAction;
   ipAddress?: string | undefined;

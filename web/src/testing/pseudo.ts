@@ -15,16 +15,21 @@ export function pseudoResources(): Resource {
   return Object.fromEntries(languages.map((language) => [language, { translation: tree }]));
 }
 
-const MARKER = /^\[\[[a-zA-Z]+\.[a-zA-Z]+\]\]$/;
+const MARKER = /^\[\[[a-zA-Z]+\.[a-zA-Z0-9]+\]\]$/;
 
 /**
  * Asserts that every visible text and every text attribute in the container
- * comes from the locale files. Render with pseudoResources() first.
+ * comes from the locale files. Render with pseudoResources() first. Text
+ * inside an element marked data-value is user data (an address, a label, a
+ * date) and is skipped.
  */
 export function expectOnlyLocaleText(container: HTMLElement): void {
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
   const texts: string[] = [];
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node.parentElement?.closest("[data-value]")) {
+      continue;
+    }
     const text = node.textContent?.trim() ?? "";
     if (text !== "") {
       texts.push(text);

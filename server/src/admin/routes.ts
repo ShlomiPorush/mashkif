@@ -6,13 +6,14 @@ import { user } from "../db/schema.js";
 import { fromOwnOrigin, isMutation } from "../http/request-guards.js";
 import { type AdminDeps, requestMeta } from "./context.js";
 import { AdminLockBusyError, withAdminLock } from "./lock.js";
+import { mountManagementRoutes } from "./manage.js";
 import { completeReset, validateResetInput } from "./reset.js";
 import { completeSetup, validateSetupInput } from "./setup.js";
 
 /**
  * The admin API (/api/admin/*). Every mutation must come from Mashkif's own
- * origin. Later steps add routes that need a full session (password plus
- * TOTP, or a passkey with user verification) through checkSession.
+ * origin. The management routes (src/admin/manage.ts) need a full session:
+ * password plus TOTP, or a passkey with user verification.
  */
 export function adminRoutes(deps: AdminDeps): Hono {
   const app = new Hono();
@@ -139,6 +140,8 @@ export function adminRoutes(deps: AdminDeps): Hono {
       idleAt: deadlines.idleAt.toISOString(),
     });
   });
+
+  mountManagementRoutes(app, deps);
 
   app.all("*", (c) => c.json({ error: "not_found" }, 404));
 

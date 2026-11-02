@@ -10,7 +10,41 @@ info:
     header, and it keeps accepting the previous protocol version so that
     agents on managed endpoints can update slowly.
 
-    `info.version` is the current protocol version.
+    `info.version` is the current protocol version. Fields added to version 1
+    after its first deployment are optional.
+
+    ## Identity
+
+    An admin creates a single-use enrollment key in the admin panel. The agent
+    generates its own token (32 random bytes, base64url without padding),
+    saves it durably, and only then calls `registerAgent` with the key, a
+    random install ID, and the token. The server stores only a hash of the
+    token. Every later request sends the token as `Authorization: Bearer
+    <token>`. The agent never sends a host name, a user name, or coordinates.
+
+    ## Time
+
+    Each heartbeat response carries a sync ID and the server time. An event
+    names the sync ID of the last heartbeat response the agent received in
+    the same boot and the milliseconds elapsed since then on the monotonic
+    clock. The server computes the event time from the server time it
+    recorded for that sync ID, so wall-clock changes on the PC do not move
+    events.
+
+    The server keeps a sync ID as long as fewer than 1440 newer sync IDs exist
+    for that agent (about one day of heartbeats at the default interval),
+    counting heartbeats whose responses were lost. No sync ID is created
+    while an agent is offline, so time offline alone never removes the one it
+    holds. After that, events that refer to it are stored as time uncertain.
+
+    ## Limits
+
+    A request body is at most 64 KB, and an events request holds at most 500
+    events, whichever limit comes first: about 350 events with sync IDs fit
+    in 64 KB. Heartbeat and events requests are rate limited per client
+    address (a missing or unknown token counts heavily) and per agent;
+    `registerAgent` is limited per client address. A limited request gets
+    429 with `Retry-After` in seconds.
   license:
     name: MIT
     identifier: MIT
@@ -45,17 +79,179 @@ paths:
               schema:
                 $ref: "#/components/schemas/AgentHealth"
         "400":
-          description: |
-            The protocol version header is missing, malformed, or names a
-            version that the server does not support.
+          $ref: "#/components/responses/ProtocolVersionRejected"
+  /api/agent/register:
+    post:
+      tags:
+        - agent
+      operationId: registerAgent
+      summary: Trade a single-use enrollment key for an agent identity.
+      description: |
+        Uses the enrollment key and creates the agent in one transaction. The
+        agent must save its token before it calls this operation.
+
+        A retry with the same enrollment key, install ID, and token succeeds
+        again with the same `agentId` (200), even after the key expired, so a
+        lost response or a crash between the request and saving the answer is
+        harmless. Any other use of a used key is refused with
+        `enrollment_key_used`.
+
+        After `agent_revoked`, an agent that is enrolled again uses a new
+        install ID and a new token.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ProtocolVersion"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "200":
+          description: The same registration was already made; nothing changed.
           headers:
             Mashkif-Protocol-Version:
               $ref: "#/components/headers/ProtocolVersion"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ProtocolError"
+                $ref: "#/components/schemas/RegisterResponse"
+        "201":
+          description: The key was used and the agent was created.
+          headers:
+            Mashkif-Protocol-Version:
+              $ref: "#/components/headers/ProtocolVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /api/agent/heartbeat:
+    post:
+      tags:
+        - agent
+      operationId: sendHeartbeat
+      summary: Report that the agent is up, with its area and latency.
+      description: |
+        The agent sends a heartbeat every `nextIntervalSeconds` of the last
+        response it received (60 seconds before the first response). The
+        server records the time it received the heartbeat and the client
+        address it came from; the address decides the agent's site.
+
+        Every request, also a retry of the same heartbeat (same `bootId` and
+        `sequence`) after a lost answer, gets a new sync ID anchored at the
+        time the server received that request, and moves the agent to the
+        address it came from. A retry is stored once as a heartbeat sample.
+        The agent uses the sync ID of the answer it actually received.
+
+        Until the agent reports the interval the server last sent in
+        `intervalSeconds`, the server judges silence by the larger of the two,
+        so a lost response never makes the agent look silent.
+      security:
+        - agentToken: []
+      parameters:
+        - $ref: "#/components/parameters/ProtocolVersion"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeartbeatRequest"
+      responses:
+        "200":
+          description: The heartbeat was recorded.
+          headers:
+            Mashkif-Protocol-Version:
+              $ref: "#/components/headers/ProtocolVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /api/agent/events:
+    post:
+      tags:
+        - agent
+      operationId: sendEvents
+      summary: Deliver recorded events, also those from a time offline.
+      description: |
+        The server checks each event on its own and answers with one result
+        per event, in request order, so one bad event never blocks the rest.
+        The agent removes an event from its queue when its result is
+        `accepted`, `duplicate`, or `rejected`. A whole request is refused
+        only for authentication, address, size, rate, or a body that is not
+        an events request.
+
+        The event time is the server time recorded for `syncId` plus
+        `elapsedMs`. An event is stored with `timeUncertain: true`, and does
+        not refine history, when it has no sync from the same boot (for
+        example after a reboot while offline), when its sync ID is unknown,
+        when the computed time is later than the moment the server received
+        the request, or when it is older than 7 days. An event never changes
+        the current state of an agent that sent a newer heartbeat.
+      security:
+        - agentToken: []
+      parameters:
+        - $ref: "#/components/parameters/ProtocolVersion"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventsRequest"
+      responses:
+        "200":
+          description: Every event has a result.
+          headers:
+            Mashkif-Protocol-Version:
+              $ref: "#/components/headers/ProtocolVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
 components:
+  securitySchemes:
+    agentToken:
+      type: http
+      scheme: bearer
+      description: |
+        The token the agent generated and sent to `registerAgent`: 32 random
+        bytes in base64url without padding (43 characters).
   parameters:
     ProtocolVersion:
       name: Mashkif-Protocol-Version
@@ -68,10 +264,110 @@ components:
     ProtocolVersion:
       description: |
         Protocol version the server used for this response. On a 400
-        response it is the server's current protocol version.
+        response for the protocol version it is the server's current
+        protocol version.
       required: true
       schema:
         $ref: "#/components/schemas/ProtocolVersionValue"
+    RetryAfter:
+      description: Seconds to wait before the next attempt.
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9]{1,6}$"
+  responses:
+    ProtocolVersionRejected:
+      description: |
+        The protocol version header is missing, malformed, or names a
+        version that the server does not support.
+      headers:
+        Mashkif-Protocol-Version:
+          $ref: "#/components/headers/ProtocolVersion"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProtocolError"
+    BadRequest:
+      description: |
+        The protocol version was refused (`ProtocolError`), or the body is
+        not valid JSON of the expected shape (`AgentError` with
+        `request_invalid` and the first field that failed).
+      headers:
+        Mashkif-Protocol-Version:
+          $ref: "#/components/headers/ProtocolVersion"
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/ProtocolError"
+              - $ref: "#/components/schemas/AgentError"
+    Unauthorized:
+      description: |
+        `token_invalid`: the bearer token is missing, malformed, or unknown.
+        Register again with a new enrollment key, install ID, and token.
+      headers:
+        Mashkif-Protocol-Version:
+          $ref: "#/components/headers/ProtocolVersion"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentError"
+    Forbidden:
+      description: |
+        - `enrollment_key_invalid`, `enrollment_key_expired`,
+          `enrollment_key_revoked`, `enrollment_key_used`: ask for a new key.
+        - `agent_revoked`: the admin revoked this agent; discard the token.
+        - `agent_blocked`, `address_blocked`: refused for now; keep the
+          token and try again later with backoff.
+      headers:
+        Mashkif-Protocol-Version:
+          $ref: "#/components/headers/ProtocolVersion"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentError"
+    Conflict:
+      description: |
+        `install_id_conflict`: another agent already uses this install ID.
+        Generate a new install ID and token and register again.
+      headers:
+        Mashkif-Protocol-Version:
+          $ref: "#/components/headers/ProtocolVersion"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentError"
+    RequestTimeout:
+      description: "`request_timeout`: the body did not arrive within 10 seconds."
+      headers:
+        Mashkif-Protocol-Version:
+          $ref: "#/components/headers/ProtocolVersion"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentError"
+    PayloadTooLarge:
+      description: |
+        `payload_too_large`: the body is larger than 64 KB.
+        `too_many_events`: more than 500 events. Send smaller batches.
+      headers:
+        Mashkif-Protocol-Version:
+          $ref: "#/components/headers/ProtocolVersion"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentError"
+    TooManyRequests:
+      description: "`rate_limited`: wait the number of seconds in `Retry-After`."
+      headers:
+        Mashkif-Protocol-Version:
+          $ref: "#/components/headers/ProtocolVersion"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentError"
   schemas:
     ProtocolVersionValue:
       type: string
@@ -112,3 +408,294 @@ components:
             type: integer
             minimum: 1
           description: Protocol versions the server accepts, oldest first.
+    AgentErrorCode:
+      type: string
+      description: Stable error code. New codes may be added; treat an unknown code like a server error.
+      enum:
+        - request_invalid
+        - payload_too_large
+        - too_many_events
+        - request_timeout
+        - rate_limited
+        - token_invalid
+        - agent_revoked
+        - agent_blocked
+        - address_blocked
+        - enrollment_key_invalid
+        - enrollment_key_expired
+        - enrollment_key_revoked
+        - enrollment_key_used
+        - install_id_conflict
+        - internal_error
+    AgentError:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          $ref: "#/components/schemas/AgentErrorCode"
+        field:
+          type: string
+          maxLength: 64
+          description: With `request_invalid`, the first request field that failed.
+    Uuid:
+      type: string
+      format: uuid
+      pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    SyncId:
+      type: string
+      pattern: "^[A-Za-z0-9_-]{1,64}$"
+      description: Opaque identifier of one heartbeat response.
+    Version:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[0-9A-Za-z.+_-]+$"
+      examples:
+        - 0.1.0
+    Infrastructure:
+      type: string
+      description: |
+        The access infrastructure the user chose in the tray. It is never
+        inferred from the provider; `unknown` until the user chooses.
+      enum:
+        - unknown
+        - bezeq
+        - hot
+        - ibc
+        - partner_fiber
+        - cellcom_fiber
+        - other
+    AreaCell:
+      type:
+        - string
+        - "null"
+      pattern: "^[0-9a-f]{15}$"
+      description: |
+        H3 cell at resolution 7 that the agent computed on the PC, in
+        lowercase hexadecimal, or null when the area is unknown. A cell
+        whose center is outside the service area is stored as unknown.
+      examples:
+        - 873f5a4e8ffffff
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - enrollmentKey
+        - installId
+        - token
+        - agentVersion
+      properties:
+        enrollmentKey:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{32}$"
+          description: The single-use key shown once in the admin panel.
+        installId:
+          $ref: "#/components/schemas/Uuid"
+        token:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: 32 random bytes in base64url without padding, saved before this request.
+        agentVersion:
+          $ref: "#/components/schemas/Version"
+        osVersion:
+          type: string
+          maxLength: 64
+          pattern: "^[0-9A-Za-z .+_()-]*$"
+          description: Windows version, for example `10.0.26100`.
+    RegisterResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - agentId
+        - heartbeatIntervalSeconds
+        - serverTime
+      properties:
+        agentId:
+          $ref: "#/components/schemas/Uuid"
+        heartbeatIntervalSeconds:
+          type: integer
+          minimum: 30
+          maximum: 600
+          description: Interval for the first heartbeat.
+        serverTime:
+          type: string
+          format: date-time
+    HeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - sequence
+        - bootId
+        - areaCell
+        - infrastructure
+        - intervalSeconds
+        - roundTripMs
+        - dnsMs
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Grows by one with every new heartbeat; a retry repeats it.
+        bootId:
+          $ref: "#/components/schemas/Uuid"
+        areaCell:
+          $ref: "#/components/schemas/AreaCell"
+        infrastructure:
+          $ref: "#/components/schemas/Infrastructure"
+        intervalSeconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          description: The heartbeat interval the agent is using now.
+        roundTripMs:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          maximum: 600000
+          description: Round trip of the previous heartbeat request, or null when unknown.
+        dnsMs:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          maximum: 600000
+          description: Time to resolve the server name for this request, or null when unknown.
+        agentVersion:
+          $ref: "#/components/schemas/Version"
+    HeartbeatResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - syncId
+        - serverTime
+        - nextIntervalSeconds
+      properties:
+        syncId:
+          $ref: "#/components/schemas/SyncId"
+        serverTime:
+          type: string
+          format: date-time
+          description: The time the server recorded for this sync ID.
+        nextIntervalSeconds:
+          type: integer
+          minimum: 30
+          maximum: 600
+          description: Interval to use from now on.
+    EventKind:
+      type: string
+      enum:
+        - connectivity_lost
+        - connectivity_restored
+        - shutdown
+        - sleep
+        - resume
+        - service_stop
+    Event:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - kind
+        - bootId
+        - syncId
+        - elapsedMs
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        kind:
+          $ref: "#/components/schemas/EventKind"
+        bootId:
+          $ref: "#/components/schemas/Uuid"
+        syncId:
+          description: |
+            Sync ID of the last heartbeat response received in this boot, or
+            null when none was received since the PC started.
+          oneOf:
+            - $ref: "#/components/schemas/SyncId"
+            - type: "null"
+        elapsedMs:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          maximum: 34560000000
+          description: |
+            Milliseconds on the monotonic clock from receiving that response
+            to the event, at most 400 days; null exactly when `syncId` is
+            null. An event with a larger value is rejected on its own.
+    EventsRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - events
+      properties:
+        events:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/Event"
+        droppedEvents:
+          $ref: "#/components/schemas/DroppedEvents"
+    DroppedEvents:
+      type: object
+      additionalProperties: false
+      required:
+        - bootId
+        - count
+      description: |
+        Events the agent dropped from its queue (by age or size) since the PC
+        started, as a cumulative count for that boot. The server keeps the
+        largest count it has seen per boot, so sending the same count again
+        changes nothing, and keeps counts for at most 10 boots per agent,
+        always including the boot of its latest heartbeat.
+      properties:
+        bootId:
+          $ref: "#/components/schemas/Uuid"
+        count:
+          type: integer
+          minimum: 0
+          maximum: 1000000000
+    EventResult:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - status
+      properties:
+        id:
+          description: The event's ID, or null when it had no valid ID.
+          oneOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+        status:
+          type: string
+          enum:
+            - accepted
+            - duplicate
+            - rejected
+          description: "`duplicate`: an event with this ID was accepted before."
+        error:
+          type: string
+          enum:
+            - event_invalid
+            - event_kind_unknown
+          description: With `rejected`, why. The agent drops the event.
+        timeUncertain:
+          type: boolean
+          description: With `accepted`, whether the server could not place the event in time.
+    EventsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          description: One result per request event, in the same order.
+          items:
+            $ref: "#/components/schemas/EventResult"
