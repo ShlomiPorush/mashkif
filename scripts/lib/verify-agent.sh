@@ -278,6 +278,13 @@ _agent_install_tests() {
       MASHKIF_INSTALL_TEST_EXE MASHKIF_INSTALL_TEST_UPGRADE_EXE MASHKIF_TEST_UPGRADE_BUNDLE_BA
     _agent_step "install tests" test --project "$_AGENT_INSTALL_TESTS" -c Release --no-build || rc=$?
   fi
+  # Sizes the install tests measured (the Package Cache), for the record.
+  if [[ -s "$scratch/measurements.txt" ]]; then
+    local line
+    while IFS= read -r line; do
+      log "  measured: $line"
+    done < <(tr -d '\r' <"$scratch/measurements.txt")
+  fi
   rm -rf -- "$upgrade_root"
   return "$rc"
 }

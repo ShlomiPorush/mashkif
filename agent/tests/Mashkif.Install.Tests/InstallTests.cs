@@ -39,13 +39,14 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
         Assert.True(gate.Passed);
         var msi = RequiredFile("MASHKIF_INSTALL_TEST_MSI");
         var upgradeMsi = RequiredFile("MASHKIF_INSTALL_TEST_UPGRADE_MSI");
-        var logs = Environment.GetEnvironmentVariable("MASHKIF_TEST_TMP") ?? Path.GetTempPath();
-        Directory.CreateDirectory(logs);
+        var logs = LogFolder("msi");
 
-        using var api = new FakeAgentApi();
-        var userCreated = false;
-        try
+        // 7. Cleanup (RunWithCleanupAsync) removes only what this test created;
+        //    the gate proved that none of it existed before.
+        await RunWithCleanupAsync(async () =>
         {
+            using var api = new FakeAgentApi();
+
             // 1. Install with no property but the loopback server: the service registers by itself.
             var installLog = Path.Combine(logs, "install.log");
             Msiexec("/i", msi, $"SERVER_URL={api.Origin}", "/qn", "/l*v", installLog);
@@ -68,7 +69,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
             // At most 14 characters: net user asks for confirmation of a longer one.
             var password = "Mk1!" + Convert.ToHexString(RandomNumberGenerator.GetBytes(5));
             Run("net.exe", "user", InstallSafetyGate.TestUser, password, "/add");
-            userCreated = true;
+            _userCreated = true;
             AsUser(LogonInteractive, password, () =>
             {
                 Assert.Equal(AgentStates.Connected, Status()?.State);
@@ -115,29 +116,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
             Assert.True(File.Exists(StateFile));
             Assert.Equal(identity, Identity());
             AssertTokenAbsent(registration.Token, uninstallLog);
-        }
-        finally
-        {
-            // 7. Clean up only what this test created; the gate proved that none
-            //    of it existed before.
-            foreach (var product in ProductInstallation.GetRelatedProducts(InstallSafetyGate.UpgradeCode).ToList())
-            {
-                Run("msiexec.exe", "/x", product.ProductCode, "/qn");
-            }
-
-            if (userCreated)
-            {
-                Run("net.exe", "user", InstallSafetyGate.TestUser, "/delete");
-            }
-
-            if (Directory.Exists(InstallSafetyGate.ProductDirectory))
-            {
-                Directory.Delete(InstallSafetyGate.ProductDirectory, recursive: true);
-            }
-
-            using var machine = Hklm();
-            machine.DeleteSubKeyTree(InstallSafetyGate.ProductRegistryKey, throwOnMissingSubKey: false);
-        }
+        });
     }
 
     private static void AssertAcls()
@@ -234,35 +213,6 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
         Assert.False(string.IsNullOrEmpty(path), $"{variable} is not set");
         Assert.True(File.Exists(path), $"{path} does not exist");
         return path;
-    }
-
-    private static void Msiexec(params string[] arguments)
-    {
-        var output = RunWithExitCode("msiexec.exe", arguments, out var exitCode);
-        Assert.True(exitCode == 0, $"msiexec {string.Join(' ', arguments)} exited with {exitCode}: {output}");
-    }
-
-    private static string Run(string file, params string[] arguments)
-    {
-        var output = RunWithExitCode(file, arguments, out var exitCode);
-        Assert.True(exitCode == 0, $"{file} {arguments.FirstOrDefault()} exited with {exitCode}: {output}");
-        return output;
-    }
-
-    private static string RunWithExitCode(string file, string[] arguments, out int exitCode)
-    {
-        using var process = Process.Start(new ProcessStartInfo(file, arguments)
-        {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        })!;
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
-        process.WaitForExit();
-        exitCode = process.ExitCode;
-        return output.Result + error.Result;
     }
 
     private static async Task WaitForStatusAsync(string state)
