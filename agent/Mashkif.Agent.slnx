@@ -6,5 +6,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Mashkif.Agent.Tests/Mashkif.Agent.Tests.csproj" />
+    <Project Path="tests/Mashkif.Installer.Tests/Mashkif.Installer.Tests.csproj" />
   </Folder>
 </Solution>

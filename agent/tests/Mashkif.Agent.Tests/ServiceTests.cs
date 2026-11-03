@@ -13,7 +13,7 @@ public sealed class ServiceTests
         var path = scratch.File("service.log");
         using var provider = new FileLoggerProvider(new FileLog(path));
         using var factory = LoggerFactory.Create(builder => builder.AddProvider(provider));
-        using var service = new AgentService(factory.CreateLogger<AgentService>());
+        using var service = new AgentService(factory.CreateLogger<AgentService>(), new IdleRunner());
 
         await service.StartAsync(TestContext.Current.CancellationToken);
         await service.StopAsync(TestContext.Current.CancellationToken);
@@ -30,5 +30,10 @@ public sealed class ServiceTests
     public void Service_name_matches_the_installer()
     {
         Assert.Equal("Mashkif", AgentService.ServiceName);
+    }
+
+    private sealed class IdleRunner : IAgentRunner
+    {
+        public Task RunAsync(CancellationToken stoppingToken) => Task.Delay(Timeout.Infinite, stoppingToken);
     }
 }

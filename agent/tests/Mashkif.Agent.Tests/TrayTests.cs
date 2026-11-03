@@ -6,7 +6,7 @@ namespace Mashkif.Agent.Tests;
 
 public sealed class TrayTests
 {
-    private static readonly string[] Keys = ["ProductName", "Tooltip", "MenuExit"];
+    private static readonly string[] Keys = TrayStrings.Keys;
 
     public static TheoryData<string> NonHebrewCultures => ["en-US", "en", "fr-FR", "ar-SA", ""];
 
@@ -75,4 +75,58 @@ public sealed class TrayTests
     // file stays free of Hebrew text.
     private static bool HasHebrewLetter(string value) =>
         value.Any(static c => c is >= (char)0x05D0 and <= (char)0x05EA);
+}
+
+public sealed class TrayStatusTests
+{
+    private static readonly CultureInfo English = CultureInfo.GetCultureInfo("en-US");
+    private static readonly CultureInfo Hebrew = CultureInfo.GetCultureInfo("he-IL");
+
+    public static TheoryData<string, string?, string> StatusLines => new()
+    {
+        { Mashkif.Common.Pipe.AgentStates.Unregistered, null, "StatusUnregistered" },
+        { Mashkif.Common.Pipe.AgentStates.Registering, null, "StatusRegistering" },
+        { Mashkif.Common.Pipe.AgentStates.Connected, null, "StatusConnected" },
+        { Mashkif.Common.Pipe.AgentStates.Unreachable, null, "StatusUnreachable" },
+        { Mashkif.Common.Pipe.AgentStates.Revoked, null, "StatusRevoked" },
+        { Mashkif.Common.Pipe.AgentStates.Refused, "registration_closed", "StatusRefusedRegistrationClosed" },
+        { Mashkif.Common.Pipe.AgentStates.Refused, "token_invalid", "StatusRefusedTokenInvalid" },
+        { Mashkif.Common.Pipe.AgentStates.Refused, "server_changed", "StatusRefusedServerChanged" },
+    };
+
+    [Theory]
+    [MemberData(nameof(StatusLines))]
+    public void Each_state_has_its_own_line_in_both_languages(string state, string? reason, string key)
+    {
+        var status = new Mashkif.Common.Pipe.AgentStatus { State = state, Reason = reason };
+        Assert.Equal(TrayStrings.Get(key, English), TrayStrings.StatusLine(status, English));
+        Assert.Equal(TrayStrings.Get(key, Hebrew), TrayStrings.StatusLine(status, Hebrew));
+    }
+
+    [Fact]
+    public void Other_refusals_show_their_code()
+    {
+        var status = new Mashkif.Common.Pipe.AgentStatus { State = Mashkif.Common.Pipe.AgentStates.Refused, Reason = "agent_blocked" };
+        Assert.Contains("agent_blocked", TrayStrings.StatusLine(status, English), StringComparison.Ordinal);
+        Assert.Contains("agent_blocked", TrayStrings.StatusLine(status, Hebrew), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void No_status_means_the_service_is_not_running()
+    {
+        Assert.Equal(TrayStrings.Get("StatusServiceUnavailable", English), TrayStrings.StatusLine(null, English));
+    }
+
+    [Fact]
+    public void Every_status_line_fits_the_tooltip_with_the_product_name()
+    {
+        foreach (var culture in new[] { English, Hebrew })
+        {
+            foreach (var key in TrayStrings.Keys.Where(k => k.StartsWith("Status", StringComparison.Ordinal)))
+            {
+                var tooltip = $"{TrayStrings.ProductName(culture)}: {TrayStrings.Get(key, culture)}";
+                Assert.InRange(tooltip.Length, 1, 127);
+            }
+        }
+    }
 }

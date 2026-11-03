@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Installs, repairs, upgrades, and uninstalls the real MSI. It changes the
+    machine, so it is not in Mashkif.Agent.slnx and runs only in the agent
+    area's "install tests" step on a GitHub-hosted runner. InstallSafetyGate
+    refuses to run anywhere else, and on a machine where Mashkif was ever
+    installed, before it changes anything.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>Mashkif.Install.Tests</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Test names read as sentences with underscores. -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Dtf.WindowsInstaller" />
+    <PackageReference Include="xunit.v3" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Mashkif.Common\Mashkif.Common.csproj" />
+  </ItemGroup>
+</Project>

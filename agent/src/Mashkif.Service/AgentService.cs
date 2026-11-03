@@ -2,16 +2,22 @@ using Mashkif.Common;
 
 namespace Mashkif.Service;
 
+/// <summary>The work the service runs between start and stop.</summary>
+internal interface IAgentRunner
+{
+    Task RunAsync(CancellationToken stoppingToken);
+}
+
 /// <summary>
-/// The Mashkif Windows service. In this skeleton it only records that it
-/// started and stopped.
+/// The Mashkif Windows service: logs start and stop and runs the agent
+/// (registration, heartbeats, and the local pipe).
 /// </summary>
-internal sealed partial class AgentService(ILogger<AgentService> logger) : BackgroundService
+internal sealed partial class AgentService(ILogger<AgentService> logger, IAgentRunner runner) : BackgroundService
 {
     /// <summary>Windows service name registered by the installer.</summary>
     public const string ServiceName = "Mashkif";
 
-    private static readonly string Version = AgentInfo.VersionOf(typeof(AgentService).Assembly);
+    public static readonly string Version = AgentInfo.VersionOf(typeof(AgentService).Assembly);
 
     public override Task StartAsync(CancellationToken cancellationToken)
     {
@@ -25,12 +31,17 @@ internal sealed partial class AgentService(ILogger<AgentService> logger) : Backg
         LogStopped(logger);
     }
 
-    protected override Task ExecuteAsync(CancellationToken stoppingToken) =>
-        Task.Delay(Timeout.Infinite, stoppingToken).ContinueWith(
-            static _ => { },
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await runner.RunAsync(stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal stop.
+        }
+    }
 
     [LoggerMessage(EventId = 1, Level = LogLevel.Information, Message = "Mashkif service {Version} started (process {ProcessId})")]
     private static partial void LogStarted(ILogger logger, string version, int processId);

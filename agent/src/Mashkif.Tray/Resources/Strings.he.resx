@@ -21,4 +21,43 @@
   <data name="MenuExit" xml:space="preserve">
     <value>יציאה</value>
   </data>
+  <data name="StatusUnregistered" xml:space="preserve">
+    <value>המחשב עוד לא רשום. משקיף רושם אותו לבד.</value>
+  </data>
+  <data name="StatusRegistering" xml:space="preserve">
+    <value>רושם את המחשב...</value>
+  </data>
+  <data name="StatusConnected" xml:space="preserve">
+    <value>מחובר. משקיף מדווח.</value>
+  </data>
+  <data name="StatusUnreachable" xml:space="preserve">
+    <value>אין חיבור לשרת משקיף. משקיף ממשיך לנסות.</value>
+  </data>
+  <data name="StatusRefused" xml:space="preserve">
+    <value>השרת דוחה את המחשב כרגע ({0}). משקיף ממשיך לנסות.</value>
+  </data>
+  <data name="StatusRefusedRegistrationClosed" xml:space="preserve">
+    <value>משקיף לא מקבל כרגע מחשבים חדשים. הוא ינסה שוב בכל שעה.</value>
+  </data>
+  <data name="StatusRefusedTokenInvalid" xml:space="preserve">
+    <value>השרת לא מזהה את המחשב. משקיף ירשום אותו מחדש לבד.</value>
+  </data>
+  <data name="StatusRefusedServerChanged" xml:space="preserve">
+    <value>משקיף עובד עכשיו מול שרת אחר. בחרו &quot;הצטרפות מחדש&quot; כדי לדווח אליו.</value>
+  </data>
+  <data name="StatusRevoked" xml:space="preserve">
+    <value>המנהל הסיר את המחשב ממשקיף. בחרו &quot;הצטרפות מחדש&quot; כדי לדווח שוב.</value>
+  </data>
+  <data name="StatusServiceUnavailable" xml:space="preserve">
+    <value>שירות משקיף לא פועל.</value>
+  </data>
+  <data name="StatusLastContact" xml:space="preserve">
+    <value>חיבור אחרון: {0}</value>
+  </data>
+  <data name="MenuRejoin" xml:space="preserve">
+    <value>הצטרפות מחדש</value>
+  </data>
+  <data name="RejoinFailed" xml:space="preserve">
+    <value>משקיף לא הצליח להצטרף מחדש כרגע. הפרטים ביומן השירות.</value>
+  </data>
 </root>

@@ -21,4 +21,43 @@
   <data name="MenuExit" xml:space="preserve">
     <value>Exit</value>
   </data>
+  <data name="StatusUnregistered" xml:space="preserve">
+    <value>Not registered yet. Mashkif registers this PC by itself.</value>
+  </data>
+  <data name="StatusRegistering" xml:space="preserve">
+    <value>Registering this PC...</value>
+  </data>
+  <data name="StatusConnected" xml:space="preserve">
+    <value>Connected. Mashkif is reporting.</value>
+  </data>
+  <data name="StatusUnreachable" xml:space="preserve">
+    <value>The Mashkif server cannot be reached. Mashkif keeps trying.</value>
+  </data>
+  <data name="StatusRefused" xml:space="preserve">
+    <value>The server refuses this PC for now ({0}). Mashkif keeps trying.</value>
+  </data>
+  <data name="StatusRefusedRegistrationClosed" xml:space="preserve">
+    <value>Mashkif is not accepting new PCs right now. It tries again every hour.</value>
+  </data>
+  <data name="StatusRefusedTokenInvalid" xml:space="preserve">
+    <value>The server does not recognize this PC. Mashkif registers it again by itself.</value>
+  </data>
+  <data name="StatusRefusedServerChanged" xml:space="preserve">
+    <value>Mashkif now uses a different server. Choose Join again to report to it.</value>
+  </data>
+  <data name="StatusRevoked" xml:space="preserve">
+    <value>The admin removed this PC from Mashkif. Choose Join again to report again.</value>
+  </data>
+  <data name="StatusServiceUnavailable" xml:space="preserve">
+    <value>The Mashkif service is not running.</value>
+  </data>
+  <data name="StatusLastContact" xml:space="preserve">
+    <value>Last contact: {0}</value>
+  </data>
+  <data name="MenuRejoin" xml:space="preserve">
+    <value>Join again</value>
+  </data>
+  <data name="RejoinFailed" xml:space="preserve">
+    <value>Mashkif could not join again right now. The service log has the details.</value>
+  </data>
 </root>
