@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { REGISTER_PRE_LIMIT_MIN } from "../src/agent/routes.js";
 import { hashToken } from "../src/http/token-hash.js";
 import { cachedSettings, invalidateSettingsCache, resetSettingsCache } from "../src/settings.js";
-import { setSetting, TestAgent } from "./support/agent.js";
+import { fullAdmin, setSetting, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import { createHarness, type Harness, pauseOnce } from "./support/harness.js";
 
@@ -345,6 +345,40 @@ describe("register (open registration)", () => {
       // Only the real creation used quota: a different PC still fits.
       expect((await new TestAgent(harness, "203.0.113.60").register()).status).toBe(201);
       expect((await new TestAgent(harness, "203.0.113.60").register()).status).toBe(429);
+    });
+
+    it("never answers a registration after a save with a refresh that started before it", async () => {
+      const browser = await fullAdmin(harness);
+      expect((await cachedSettings(database.db)).registrationOpen).toBe(true);
+      // The cache expires, and a refresh starts and is held: its query answers
+      // only when released, with the rows from before the save (none: defaults).
+      invalidateSettingsCache();
+      let release: (rows: unknown[]) => void = () => {};
+      const held = new Promise<unknown[]>((resolve) => {
+        release = resolve;
+      });
+      const select = vi
+        .spyOn(database.db, "select")
+        .mockImplementationOnce(() => ({ from: () => ({ where: () => held }) }) as never);
+      const before = cachedSettings(database.db);
+      // The admin closes registration in the panel; the save invalidates the cache.
+      const saved = await browser.post("/api/admin/settings", { registrationOpen: false });
+      select.mockRestore();
+      expect(saved.status).toBe(200);
+      // A registration after the save must not join the refresh from before it:
+      // it answers while that refresh is still held. One that joined would wait
+      // for the release and then register with the old value.
+      const after = new TestAgent(harness, "203.0.113.70").register();
+      const outcome = await Promise.race([
+        after,
+        new Promise<string>((resolve) => setTimeout(() => resolve("joined the old refresh"), 3000)),
+      ]);
+      release([]);
+      expect(outcome).toMatchObject({ status: 403, body: { error: "registration_closed" } });
+      // The held refresh answers its own callers with the old value but is not cached.
+      expect((await before).registrationOpen).toBe(true);
+      expect((await cachedSettings(database.db)).registrationOpen).toBe(false);
+      expect(await agentRows()).toHaveLength(0);
     });
 
     it("refuses a flood from one site before any database work", async () => {

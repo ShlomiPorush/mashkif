@@ -388,7 +388,7 @@ export const SETTINGS_CACHE_TTL_MS = 5_000;
 
 let cacheGeneration = 0;
 let cached = new WeakMap<object, { at: number; generation: number; values: Settings }>();
-let refreshing = new WeakMap<object, Promise<Settings>>();
+let refreshing = new WeakMap<object, { generation: number; promise: Promise<Settings> }>();
 
 /** For tests: forgets every loaded value, as in a process that just started. */
 export function resetSettingsCache(): void {
@@ -423,14 +423,19 @@ export async function cachedSettings(db: Database, now = Date.now()): Promise<Se
   ) {
     return hit.values;
   }
+  // Join a refresh only if it started in the current generation: one that
+  // started before a save would answer with the settings from before it.
   const inFlight = refreshing.get(db);
-  if (inFlight !== undefined) {
-    return inFlight;
+  if (inFlight !== undefined && inFlight.generation === cacheGeneration) {
+    return inFlight.promise;
   }
   const generation = cacheGeneration;
-  const refresh = readSettings(db)
+  const refresh: Promise<Settings> = readSettings(db)
     .then((values) => {
-      cached.set(db, { at: now, generation, values });
+      // Stored only while still current; a save since then made it stale.
+      if (generation === cacheGeneration) {
+        cached.set(db, { at: now, generation, values });
+      }
       return values;
     })
     .catch((error: unknown) => {
@@ -440,8 +445,12 @@ export async function cachedSettings(db: Database, now = Date.now()): Promise<Se
       console.error("settings refresh failed; using the last loaded settings");
       return hit.values;
     })
-    .finally(() => refreshing.delete(db));
-  refreshing.set(db, refresh);
+    .finally(() => {
+      if (refreshing.get(db)?.promise === refresh) {
+        refreshing.delete(db);
+      }
+    });
+  refreshing.set(db, { generation, promise: refresh });
   return refresh;
 }
 
