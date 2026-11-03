@@ -1,13 +1,16 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.ExceptionServices;
 using WixToolset.Dtf.WindowsInstaller;
+using RunResult = Mashkif.Install.Tests.CleanupLogic.RunResult;
 
 namespace Mashkif.Install.Tests;
 
 /// <summary>
 /// Shared harness of the install tests: processes with a timeout, the
-/// cleanup that runs after every test, and the Apps and Features views.
+/// cleanup that runs after every test (its logic is in CleanupLogic), and the
+/// Apps and Features views.
 /// </summary>
 public sealed partial class InstallTests
 {
@@ -23,43 +26,51 @@ public sealed partial class InstallTests
     /// <summary>Whether the current test created the test user.</summary>
     private bool _userCreated;
 
-    private sealed record RunResult(int ExitCode, string Output, bool TimedOut)
-    {
-        public bool Succeeded => !TimedOut && ExitCode == 0;
-    }
-
     /// <summary>
-    /// Runs a process and never throws for its exit code. After the timeout it
-    /// kills the whole process tree (Burn runs an engine, an elevated
-    /// companion, and the bootstrapper application as separate processes).
+    /// Runs a process and never throws: a file that cannot be started and a
+    /// nonzero exit code are results. After the timeout it kills the whole
+    /// process tree (Burn runs an engine, an elevated companion, and the
+    /// bootstrapper application as separate processes).
     /// </summary>
     private static RunResult TryRun(string file, params string[] arguments)
     {
-        using var process = Process.Start(new ProcessStartInfo(file, arguments)
+        Process process;
+        try
         {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        })!;
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
-        if (!process.WaitForExit(RunTimeout))
+            process = Process.Start(new ProcessStartInfo(file, arguments)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            })!;
+        }
+        catch (Exception exception) when (exception is Win32Exception or FileNotFoundException or InvalidOperationException)
         {
-            s_timedOut = true;
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch (InvalidOperationException)
-            {
-            }
-
-            return new RunResult(-1, $"timed out after {RunTimeout.TotalMinutes} minutes", TimedOut: true);
+            return new RunResult(-1, $"{file} could not be started: {exception.Message}", TimedOut: false);
         }
 
-        process.WaitForExit();
-        return new RunResult(process.ExitCode, output.Result + error.Result, TimedOut: false);
+        using (process)
+        {
+            var output = process.StandardOutput.ReadToEndAsync();
+            var error = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(RunTimeout))
+            {
+                s_timedOut = true;
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+
+                return new RunResult(-1, $"timed out after {RunTimeout.TotalMinutes} minutes", TimedOut: true);
+            }
+
+            process.WaitForExit();
+            return new RunResult(process.ExitCode, output.Result + error.Result, TimedOut: false);
+        }
     }
 
     private static string Run(string file, params string[] arguments)
@@ -84,41 +95,19 @@ public sealed partial class InstallTests
 
     /// <summary>
     /// Runs a bundle's registered QuietUninstallString with /norestart
-    /// appended: Burn registers it without /norestart, and a quiet run without
-    /// it restarts the machine when a restart is needed.
+    /// appended (CleanupLogic.QuietUninstallCommand). A test step: it asserts
+    /// that the string exists.
     /// </summary>
     private static RunResult QuietUninstall(InstallSafetyGate.BundleEntry entry)
     {
-        Assert.False(string.IsNullOrEmpty(entry.QuietUninstallString), $"{entry.Code} has no QuietUninstallString");
-        var (file, arguments) = SplitCommandLine(entry.QuietUninstallString);
-        return TryRun(file, [.. arguments, "/norestart"]);
-    }
-
-    private static (string File, string[] Arguments) SplitCommandLine(string commandLine)
-    {
-        commandLine = commandLine.Trim();
-        string file;
-        string rest;
-        if (commandLine.StartsWith('"'))
-        {
-            var end = commandLine.IndexOf('"', 1);
-            file = commandLine[1..end];
-            rest = commandLine[(end + 1)..];
-        }
-        else
-        {
-            var space = commandLine.IndexOf(' ', StringComparison.Ordinal);
-            file = space < 0 ? commandLine : commandLine[..space];
-            rest = space < 0 ? string.Empty : commandLine[space..];
-        }
-
-        return (file, rest.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        var command = CleanupLogic.QuietUninstallCommand(entry.QuietUninstallString);
+        Assert.True(command is not null, $"{entry.Code} has no QuietUninstallString");
+        return TryRun(command.Value.File, command.Value.Arguments);
     }
 
     /// <summary>
-    /// Runs one test body, then the cleanup, even when the body failed. The
-    /// cleanup tries every safe removal, collects every failure, and reports
-    /// all leftovers together. A failure of the body stays the primary error.
+    /// Runs one test body, then the cleanup, even when the body failed. A
+    /// failure of the body stays the primary error (CleanupLogic.Outcome).
     /// </summary>
     private async Task RunWithCleanupAsync(Func<Task> body)
     {
@@ -136,90 +125,42 @@ public sealed partial class InstallTests
             failure = ExceptionDispatchInfo.Capture(exception);
         }
 
-        var leftovers = CleanUp();
-        if (failure is not null)
+        var outcome = CleanupLogic.Outcome(failure?.SourceException, CleanUp());
+        if (failure is not null && ReferenceEquals(outcome, failure.SourceException))
         {
-            if (leftovers.Count > 0)
-            {
-                throw new InvalidOperationException(
-                    $"{failure.SourceException.Message}{Environment.NewLine}Cleanup also reports: {string.Join("; ", leftovers)}",
-                    failure.SourceException);
-            }
-
             failure.Throw();
         }
 
-        Assert.True(leftovers.Count == 0, "Cleanup left: " + string.Join("; ", leftovers));
+        if (outcome is not null)
+        {
+            throw outcome;
+        }
     }
 
     /// <summary>
-    /// Removes what a test created: every registered Mashkif EXE, then every
-    /// remaining Mashkif product, then the test user. Data
+    /// Runs CleanupLogic.CleanUp against this machine. Data
     /// (%ProgramData%\Mashkif, HKLM\SOFTWARE\Mashkif) is deleted only when
     /// nothing timed out and nothing is installed any more. Nothing in the
-    /// Package Cache is deleted by hand. Returns every failure and leftover.
+    /// Package Cache is deleted by hand.
     /// </summary>
-    private List<string> CleanUp()
-    {
-        var failures = new List<string>();
-        foreach (var entry in InstallSafetyGate.BundleEntries())
+    private List<string> CleanUp() => CleanupLogic.CleanUp(new CleanupLogic.Machine(
+        BundleEntries: () => [.. InstallSafetyGate.BundleEntries().Select(e => new CleanupLogic.BundleEntry(e.Code, e.QuietUninstallString))],
+        ProductCodes: () => [.. Products().Select(p => p.ProductCode)],
+        Run: TryRun,
+        UserCreated: _userCreated,
+        TestUser: InstallSafetyGate.TestUser,
+        TimedOut: () => s_timedOut,
+        DeleteData: () =>
         {
-            var result = QuietUninstall(entry);
-            if (!result.Succeeded)
+            if (Directory.Exists(InstallSafetyGate.ProductDirectory))
             {
-                failures.Add($"uninstalling the EXE {entry.Code} exited with {result.ExitCode}: {result.Output}");
+                Directory.Delete(InstallSafetyGate.ProductDirectory, recursive: true);
             }
-        }
 
-        foreach (var product in ProductInstallation.GetRelatedProducts(InstallSafetyGate.UpgradeCode).ToList())
-        {
-            var result = TryRun("msiexec.exe", "/x", product.ProductCode, "/qn", "/norestart");
-            if (!result.Succeeded)
-            {
-                failures.Add($"msiexec /x {product.ProductCode} exited with {result.ExitCode}: {result.Output}");
-            }
-        }
-
-        if (_userCreated)
-        {
-            var result = TryRun("net.exe", "user", InstallSafetyGate.TestUser, "/delete");
-            if (!result.Succeeded)
-            {
-                failures.Add($"deleting the test user exited with {result.ExitCode}: {result.Output}");
-            }
-        }
-
-        var stillInstalled = InstallSafetyGate.BundleEntries().Count > 0
-            || ProductInstallation.GetRelatedProducts(InstallSafetyGate.UpgradeCode).Any();
-        if (s_timedOut)
-        {
-            failures.Add("a run timed out, so cleanup deleted no data");
-        }
-        else if (stillInstalled)
-        {
-            failures.Add("Mashkif is still installed, so cleanup deleted no data");
-        }
-        else
-        {
-            try
-            {
-                if (Directory.Exists(InstallSafetyGate.ProductDirectory))
-                {
-                    Directory.Delete(InstallSafetyGate.ProductDirectory, recursive: true);
-                }
-
-                using var machine = Hklm();
-                machine.DeleteSubKeyTree(InstallSafetyGate.ProductRegistryKey, throwOnMissingSubKey: false);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                failures.Add($"deleting the Mashkif data failed: {exception.Message}");
-            }
-        }
-
-        failures.AddRange(InstallSafetyGate.Leftovers());
-        return failures;
-    }
+            using var machine = Hklm();
+            machine.DeleteSubKeyTree(InstallSafetyGate.ProductRegistryKey, throwOnMissingSubKey: false);
+        },
+        Leftovers: InstallSafetyGate.Leftovers));
 
     /// <summary>A fresh log folder under MASHKIF_TEST_TMP for one test.</summary>
     private static string LogFolder(string name)

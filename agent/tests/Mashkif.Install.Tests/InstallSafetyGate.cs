@@ -94,7 +94,7 @@ public sealed class InstallSafetyGate
         // Burn caches a bundle before it registers it and unregisters it before
         // it removes the cache, so an interrupted run can leave a cache folder
         // without an entry. The folders are named by IDs, never found by globs.
-        var cacheProblems = CacheFolders(out var folders);
+        var cacheProblems = CacheFolders(out var folders, out var bundleCodes);
         foreach (var problem in cacheProblems)
         {
             yield return problem;
@@ -103,6 +103,13 @@ public sealed class InstallSafetyGate
         foreach (var folder in folders.Where(Directory.Exists))
         {
             yield return $"{folder} exists";
+        }
+
+        // An interrupted install can also leave the Uninstall key of a bundle
+        // without a valid BundleUpgradeCode, so look for each bundle code too.
+        foreach (var code in bundleCodes.Where(UninstallKeyExists))
+        {
+            yield return $@"HKLM\{UninstallKey}\{code} exists";
         }
 
         using var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
@@ -137,10 +144,11 @@ public sealed class InstallSafetyGate
     /// The Package Cache folders of the bundles and MSIs under test: the bundle
     /// code from each manifest, and each MSI's cache ID ({ProductCode}v{ProductVersion}).
     /// </summary>
-    private static List<string> CacheFolders(out List<string> folders)
+    private static List<string> CacheFolders(out List<string> folders, out List<string> bundleCodes)
     {
         var problems = new List<string>();
         folders = [];
+        bundleCodes = [];
         foreach (var variable in BundleDataVariables)
         {
             var path = Environment.GetEnvironmentVariable(variable);
@@ -150,7 +158,9 @@ public sealed class InstallSafetyGate
                 continue;
             }
 
-            folders.Add(Path.Combine(PackageCache, BundleCode(path)));
+            var code = BundleCode(path);
+            bundleCodes.Add(code);
+            folders.Add(Path.Combine(PackageCache, code));
         }
 
         foreach (var variable in MsiVariables)
@@ -218,6 +228,22 @@ public sealed class InstallSafetyGate
         }
 
         return entries;
+    }
+
+    /// <summary>Whether HKLM\...\Uninstall\<paramref name="code"/> exists in either registry view.</summary>
+    private static bool UninstallKeyExists(string code)
+    {
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            using var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+            using var key = machine.OpenSubKey($@"{UninstallKey}\{code}");
+            if (key is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Whether the Apps and Features entry of an MSI product is hidden (SystemComponent=1).</summary>
