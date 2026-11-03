@@ -32,13 +32,19 @@ export const AGENT_BODY_TIMEOUT_MS = 10_000;
 /** Most events in one request. */
 export const MAX_EVENTS_PER_REQUEST = 500;
 
+/** The least register requests per site and minute that the pre-limit lets through. */
+export const REGISTER_PRE_LIMIT_MIN = 60;
+
 /**
  * Register requests per site (an IPv4 address or an IPv6 /64) and minute,
- * counted in memory before any database work, repeats included. A code
- * constant like the ingest pre-limit: it bounds the unauthenticated database
- * work per site to one registration transaction a second.
+ * counted in memory before any database work, repeats included: per minute
+ * per site = max(REGISTER_PRE_LIMIT_MIN, registerPerSitePer10Min). It bounds
+ * the unauthenticated database work per site and never caps a per-site
+ * registration limit that the admin raised.
  */
-export const REGISTER_PRE_LIMIT: RateLimitRule = { window: 60, max: 60 };
+export function registerPreLimit(perSitePer10Min: number): RateLimitRule {
+  return { window: 60, max: Math.max(REGISTER_PRE_LIMIT_MIN, perSitePer10Min) };
+}
 /** Window of the per-site register limit (its count is the setting registerPerSitePer10Min). */
 export const REGISTER_SITE_WINDOW_SECONDS = 600;
 /** Window of the global register limit (its count is the setting registerGlobalPerHour). */
@@ -191,8 +197,15 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
     // First, in memory and before any database work: every register request,
     // also a repeat, counts against its site (an IPv4 address or an IPv6 /64).
     // This bounds the unauthenticated database work per site.
+    // From the in-process cache, so a limited request does no query.
+    const settings = await cachedSettings(deps.db);
     const site = siteKeyOf(address) as string;
-    const throttled = await limited(registerLimits, c, `register:pre:${site}`, REGISTER_PRE_LIMIT);
+    const throttled = await limited(
+      registerLimits,
+      c,
+      `register:pre:${site}`,
+      registerPreLimit(settings.registerPerSitePer10Min),
+    );
     if (throttled !== undefined) {
       return throttled;
     }
@@ -200,8 +213,13 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
     if (!parsed.ok) {
       return refuse(c, 400, "request_invalid", parsed.field);
     }
-    // From the in-process cache, so this path adds no settings query.
-    const settings = await cachedSettings(deps.db);
+    // What admit counted, so release can give it back when nothing was created.
+    const counted: { key: string; windowStart: number }[] = [];
+    const release = () => {
+      for (const { key, windowStart } of counted.splice(0)) {
+        registerLimits.refund(key, windowStart);
+      }
+    };
     const at = now();
     const outcome = await registerAgent(
       deps.db,
@@ -226,11 +244,15 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
           ] as const) {
             const decision = await registerLimits.consume(key, rule);
             if (!decision.allowed) {
+              // A site unit already counted goes back when the global limit refuses.
+              release();
               return decision.retryAfter ?? rule.window;
             }
+            counted.push({ key, windowStart: decision.windowStart as number });
           }
           return undefined;
         },
+        release,
       },
       deps.testHooks,
     );

@@ -28,6 +28,11 @@ export interface RegisterPolicy {
    * that would create an agent, so a repeat of an existing agent never waits.
    */
   admit: () => Promise<number | undefined>;
+  /**
+   * Gives back what the last admit counted. Called when the insert found a
+   * concurrent registration: no agent was created, so no quota is used.
+   */
+  release: () => void;
 }
 
 export interface RegisterHooks {
@@ -148,7 +153,9 @@ export async function registerAgent(
   if (first !== "conflict") {
     return first;
   }
-  // A concurrent registration committed a row with this install ID or token.
+  // A concurrent registration committed a row with this install ID or token:
+  // this request created nothing, so it gives its creation quota back.
+  policy.release();
   const found = await classify(db, input.installId, tokenHash);
   if (found.kind === "none") {
     // Not reachable while conflicting rows are never deleted; fail safe.

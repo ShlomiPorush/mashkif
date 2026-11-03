@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { REGISTER_PRE_LIMIT } from "../src/agent/routes.js";
+import { REGISTER_PRE_LIMIT_MIN } from "../src/agent/routes.js";
 import { hashToken } from "../src/http/token-hash.js";
 import { setSetting, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
@@ -238,9 +238,46 @@ describe("register (open registration)", () => {
       expect((await new TestAgent(harness, "203.0.113.41").register()).status).toBe(429);
     });
 
+    it("lets a raised per-site limit through the pre-limit, which is max(60, that limit) a minute", async () => {
+      await setSetting(database, "register_per_site_per_10min", 1000);
+      const office = new TestAgent(harness, "203.0.113.50");
+      const statuses = new Set<number>();
+      for (let i = 0; i < REGISTER_PRE_LIMIT_MIN + 40; i++) {
+        statuses.add((await office.post("/register", {})).status);
+      }
+      expect([...statuses]).toEqual([400]);
+      // With the default per-site limit the pre-limit stays at 60 a minute.
+      await setSetting(database, "register_per_site_per_10min", 10);
+      const other = new TestAgent(harness, "203.0.113.51");
+      for (let i = 0; i < REGISTER_PRE_LIMIT_MIN; i++) {
+        expect((await other.post("/register", {})).status).toBe(400);
+      }
+      expect((await other.post("/register", {})).status).toBe(429);
+    });
+
+    it("gives the creation quota back when a racing copy of the registration created the agent", async () => {
+      await setSetting(database, "register_per_site_per_10min", 2);
+      const pause = pauseOnce();
+      harness = createHarness(database, { registerHooks: { beforeInsert: pause.hook } });
+      const agent = new TestAgent(harness, "203.0.113.60");
+      const twin = new TestAgent(harness, "203.0.113.60");
+      twin.installId = agent.installId;
+      twin.token = agent.token;
+      // The first copy counts its quota and waits before its insert; the
+      // second creates the agent; the first then conflicts and answers 200.
+      const first = agent.register();
+      await pause.atPause;
+      const second = await twin.register();
+      pause.resume();
+      expect([(await first).status, second.status].sort()).toEqual([200, 201]);
+      // Only the real creation used quota: a different PC still fits.
+      expect((await new TestAgent(harness, "203.0.113.60").register()).status).toBe(201);
+      expect((await new TestAgent(harness, "203.0.113.60").register()).status).toBe(429);
+    });
+
     it("refuses a flood from one site before any database work", async () => {
       const flood = new TestAgent(harness, "2001:db8:9::1");
-      for (let i = 0; i < REGISTER_PRE_LIMIT.max; i++) {
+      for (let i = 0; i < REGISTER_PRE_LIMIT_MIN; i++) {
         // Bodies that fail parsing: counted, but cheap.
         expect((await flood.post("/register", {})).status).toBe(400);
       }
