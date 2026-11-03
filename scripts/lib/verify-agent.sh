@@ -136,7 +136,7 @@ verify_agent() {
 # of the bundle. WixToolset.Sdk compiles every **/*.wxs below a project
 # folder, so a bundle source below agent/installer/ would join the MSI.
 _agent_check_msi_compile_items() {
-  local items
+  local items paths
   log "  -> msi compile items: $_AGENT_DOTNET msbuild installer/Mashkif.Installer.wixproj -getItem:Compile"
   if ! items="$(_agent_dotnet msbuild installer/Mashkif.Installer.wixproj -getItem:Compile -p:Configuration=Release -nologo 2>&1)"; then
     printf '%s\n' "$items" >&2
@@ -148,8 +148,12 @@ _agent_check_msi_compile_items() {
     fail "the MSI compile items do not list Package.wxs; the check cannot see the MSI sources"
     return "$MASHKIF_EXIT_FAILED"
   fi
-  # msbuild prints JSON, so backslashes in paths appear doubled.
-  if grep -qiF 'agent\\bundle\\' <<<"$items"; then
+  # msbuild prints JSON with Windows paths (backslashes escaped as \\);
+  # compare them with single forward slashes and in lower case.
+  local backslash=$'\\'
+  paths="${items//"$backslash"//}"
+  paths="${paths//\/\//\/}"
+  if [[ "${paths,,}" == *agent/bundle/* ]]; then
     printf '%s\n' "$items" >&2
     fail "the MSI project compiles a file under agent/bundle/"
     return "$MASHKIF_EXIT_FAILED"
