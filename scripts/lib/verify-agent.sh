@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Agent area: locked NuGet restore, format check, build with warnings as
-# errors, tests, and the unsigned MSI. Sourced by scripts/verify.sh.
+# errors, tests, the unsigned MSI, and the unsigned EXE. Sourced by scripts/verify.sh.
 #
 # Agent build contract:
 # - Every command runs with agent/ as the working directory, so agent/global.json

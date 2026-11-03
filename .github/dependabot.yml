@@ -54,6 +54,9 @@ updates:
       # decision, never an automatic update, so WiX stays on 7.x until then.
       - dependency-name: "WixToolset.*"
         versions: [">= 8"]
+      # The wix command-line tool (agent/.config/dotnet-tools.json), same rule.
+      - dependency-name: "wix"
+        versions: [">= 8"]
 
   # Application image: config/docker/app.Dockerfile (Dependabot matches any
   # file name containing "Dockerfile").

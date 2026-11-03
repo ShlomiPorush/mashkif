@@ -73,15 +73,15 @@ release_target_setup() {
   REL_TARGET="$1"
 }
 
-# release_signing_available <target>: agent releases ship a signed MSI only.
+# release_signing_available <target>: agent releases ship a signed MSI and EXE only.
 # Code signing is deferred (docs/project-foundation.md, "Code signing"), so the
 # agent target refuses before anything changes. When signing exists, this check
-# verifies the signing setup, and release_publish_agent signs the MSI before
-# any upload; there is no path that publishes an unsigned MSI.
+# verifies the signing setup, and release_publish_agent signs the MSI and the EXE
+# before any upload; there is no path that publishes an unsigned installer.
 release_signing_available() {
   case "$1" in
     agent)
-      fail "the agent target is not available yet: an agent release publishes a signed MSI, and code signing is not set up (see \"Code signing\" in docs/project-foundation.md). Nothing was changed."
+      fail "the agent target is not available yet: an agent release publishes a signed MSI and EXE, and code signing is not set up (see \"Code signing\" in docs/project-foundation.md). Nothing was changed."
       return 1
       ;;
     *) return 0 ;;

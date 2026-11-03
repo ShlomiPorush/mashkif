@@ -12,7 +12,7 @@ The design, decisions, and current state are in [docs/project-foundation.md](doc
 
 | Path | Contents | License |
 |---|---|---|
-| `agent/` | Windows service, tray app, and MSI installer (.NET 10) | [MIT](agent/LICENSE) |
+| `agent/` | Windows service, tray app, MSI installer, and EXE installer (.NET 10, WiX 7) | [MIT](agent/LICENSE) |
 | `contracts/` | OpenAPI definition of the agent-to-server protocol | [MIT](contracts/LICENSE) |
 | `server/` | Server (TypeScript, Node.js 24, Hono, PostgreSQL) | [AGPL-3.0](server/LICENSE) |
 | `web/` | Web app (React, Vite), served by the server | [AGPL-3.0](web/LICENSE) |
@@ -49,13 +49,21 @@ The admin panel is at `/admin`. Mashkif has one admin. The first visit creates t
 
 ## Installing the agent
 
-The agent is one MSI for manual installs, GPO, and Intune. There is no release yet; `scripts/verify.sh --area agent` builds `agent/artifacts/msi/Mashkif-<version>-x64.msi`.
+The agent comes as an EXE for manual installs and as an MSI for GPO and Intune. Both are unsigned, and there is no release yet; `scripts/verify.sh --area agent` builds `agent/artifacts/exe/Mashkif-<version>-x64.exe`, `agent/artifacts/msi/Mashkif-<version>-x64.msi`, and the Hebrew `Mashkif-<version>-x64-he-IL.msi`. CI keeps them as a downloadable artifact for 7 days.
 
-- Install: run the MSI, or `msiexec /i Mashkif-<version>-x64.msi /qn` for a silent install. Nothing else is needed: at its first start the service creates its own install ID and token and registers the PC. The tray shows the status.
-- Development server: `SERVER_URL=<origin>` points the agent at another server, for example `msiexec /i Mashkif-<version>-x64.msi SERVER_URL=http://localhost:8180 /qn`. Plain HTTP is accepted only to `localhost` or a loopback address. A repair or upgrade keeps the value.
+- Install with the EXE: double-click it, or right-click it and choose "Run as administrator". Nothing else is needed: at its first start the service creates its own install ID and token and registers the PC. The tray shows the status. The EXE window is in English; the tray follows the Windows language. It installs the English MSI and shows one entry in Apps and Features.
+- Elevation: a double-click shows one UAC prompt when the install starts; "Run as administrator" asks at launch and not again. A silent install (`/quiet`) still needs an elevated context, so GPO and Intune use the MSI. With UAC turned off, an administrator installs without a prompt and a standard user cannot install.
+- The EXE from the command line (always add `/norestart` to `/quiet`, or a quiet run restarts the PC by itself when a restart is needed):
+  - Silent install: `Mashkif-<version>-x64.exe /quiet /norestart /log <file>`
+  - Repair: `Mashkif-<version>-x64.exe /repair /quiet /norestart /log <file>`
+  - Uninstall: `Mashkif-<version>-x64.exe /uninstall /quiet /norestart /log <file>`, or the `QuietUninstallString` of its Apps and Features entry with ` /norestart` added (Windows registers it without `/norestart`).
+  - The log path must be writable by the user who runs the EXE; the MSI log is written next to it.
+- Install with the MSI: run it, or `msiexec /i Mashkif-<version>-x64.msi /qn` for a silent install.
+- Do not mix the EXE and the MSI: keep using the installer type you started with, and uninstall first to switch. Two combinations are supported: a newer EXE over an older EXE, and a newer EXE over the English MSI. A Hebrew MSI is not upgraded by the EXE, so uninstall it before you install the EXE. Other combinations leave a second or an orphaned entry in Apps and Features; the install tests on the GitHub runner pin what each of them does.
+- Development server: `SERVER_URL=<origin>` points the agent at another server, for example `msiexec /i Mashkif-<version>-x64.msi SERVER_URL=http://localhost:8180 /qn` or `Mashkif-<version>-x64.exe /quiet /norestart /log <file> SERVER_URL=http://localhost:8180` (write the name in upper case). Plain HTTP is accepted only to `localhost` or a loopback address. A repair or upgrade keeps the value.
 - Removed by the admin: the agent stops reporting, and the tray shows that the PC was removed and offers Join again. Joining again registers the PC as a new agent; it never happens without the user's choice. The same applies when the PC is pointed at a different server.
 - Not recognized by the server (for example after a restore): the agent keeps reporting with its token and, when the server still refuses it, registers again by itself with the same install ID, at most once an hour.
-- Uninstall: `msiexec /x Mashkif-<version>-x64.msi /qn`. The service, the program files, and the registry keys go; the state (`%ProgramData%\Mashkif\state`) and the logs stay, so a reinstall reports as the same PC. Revoke the agent in the admin panel to stop it for good, or delete `%ProgramData%\Mashkif` (as an administrator) to start over as a new PC.
+- Uninstall: from Apps and Features, with the EXE commands above, or `msiexec /x Mashkif-<version>-x64.msi /qn` for an MSI install. The service, the program files, and the registry keys go; the state (`%ProgramData%\Mashkif\state`) and the logs stay, so a reinstall reports as the same PC. Revoke the agent in the admin panel to stop it for good, or delete `%ProgramData%\Mashkif` (as an administrator) to start over as a new PC.
 - If the service reports an invalid state (the tray shows the code `state_invalid`), `%ProgramData%\Mashkif` was not created by the installer or was changed. Delete it and repair the installation.
 
 ## Contributing
