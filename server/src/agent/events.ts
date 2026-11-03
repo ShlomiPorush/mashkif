@@ -165,21 +165,30 @@ export async function recordEvents(
     const accepted: { event: EventInput; time: ValidTime }[] = [];
     let deferred = false;
     for (const item of parsed) {
-      if (!item.ok) {
-        results.push({ id: item.id, status: "rejected", error: item.error });
-        continue;
-      }
-      const { event } = item;
-      const earlier = first.get(event.id);
+      // The first occurrence of an ID in this request decides for every later
+      // one: stored (accepted or already there) makes a later one a duplicate,
+      // also a malformed later one; otherwise a later one gets the same result
+      // (deferred, or rejected, also when the first failed parsing). A later
+      // occurrence is never stored and costs no budget.
+      const id = item.ok ? item.event.id : item.id;
+      const earlier = id === null ? undefined : first.get(id);
       if (earlier !== undefined) {
-        // A repeat within this request: stored by its first occurrence, or not.
         results.push(
           earlier.status === "accepted" || earlier.status === "duplicate"
-            ? { id: event.id, status: "duplicate" }
+            ? { id, status: "duplicate" }
             : { ...earlier },
         );
         continue;
       }
+      if (!item.ok) {
+        const rejected: EventResult = { id: item.id, status: "rejected", error: item.error };
+        if (item.id !== null) {
+          first.set(item.id, rejected);
+        }
+        results.push(rejected);
+        continue;
+      }
+      const { event } = item;
       let result: EventResult;
       if (stored.has(event.id)) {
         result = { id: event.id, status: "duplicate" };
@@ -251,9 +260,10 @@ export async function recordEvents(
     if (!deferred) {
       return { ok: true, results };
     }
-    // From the stored window end, so a clock set back never gives 0 or less.
+    // The time until the stored window ends, at least 1 second. After the clock
+    // moved back it can be more than an hour; the budget renews only then.
     const renewsInMs = windowStart.getTime() + EVENT_WINDOW_MS - budgetRow.nowMs;
-    const retryAfterSeconds = Math.min(3600, Math.max(1, Math.ceil(renewsInMs / 1000)));
+    const retryAfterSeconds = Math.max(1, Math.ceil(renewsInMs / 1000));
     return { ok: true, results, retryAfterSeconds };
   });
 }

@@ -48,9 +48,10 @@ info:
     events, whichever limit comes first: about 350 events with sync IDs fit
     in 64 KB. Heartbeat and events requests are rate limited per client
     address (a missing or unknown token counts heavily) and per agent;
-    new registrations are limited per site (an IPv4 address or an IPv6 /64)
-    and across all sites; a repeat of an existing registration is not
-    counted. A limited request gets 429 with `Retry-After` in seconds.
+    every `registerAgent` request counts against a limit per site (an IPv4
+    address or an IPv6 /64), and new registrations against a lower one per
+    site and one across all sites, which a repeat of an existing registration
+    never uses up. A limited request gets 429 with `Retry-After` in seconds.
   license:
     name: MIT
     identifier: MIT
@@ -748,5 +749,7 @@ components:
         retryAfterSeconds:
           type: integer
           minimum: 1
-          maximum: 3600
-          description: Seconds until the event budget renews; present whenever a result is `deferred`.
+          description: |
+            Seconds until the event budget renews (the end of the stored budget
+            window), at least 1; present whenever a result is `deferred`. After
+            the server clock moved back it can be more than an hour.

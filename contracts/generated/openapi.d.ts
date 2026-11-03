@@ -278,7 +278,11 @@ export interface components {
         EventsResponse: {
             /** @description One result per request event, in the same order. */
             results: components["schemas"]["EventResult"][];
-            /** @description Seconds until the event budget renews; present whenever a result is `deferred`. */
+            /**
+             * @description Seconds until the event budget renews (the end of the stored budget
+             *     window), at least 1; present whenever a result is `deferred`. After
+             *     the server clock moved back it can be more than an hour.
+             */
             retryAfterSeconds?: number;
         };
     };

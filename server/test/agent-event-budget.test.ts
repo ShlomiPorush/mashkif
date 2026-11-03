@@ -99,6 +99,37 @@ describe("event budget", () => {
     expect(statuses(reply.body.results)).toEqual(["deferred", "deferred"]);
   });
 
+  it("lets a first occurrence that failed parsing decide for the later ones of its ID", async () => {
+    const agent = await new TestAgent(harness).enroll();
+    const good = agent.event("sleep", null);
+    const bad = { ...good, kind: "teleport" };
+    const reply = await agent.events([bad, good, { ...good }]);
+    expect(reply.body.results).toEqual([
+      { id: good.id, status: "rejected", error: "event_kind_unknown" },
+      { id: good.id, status: "rejected", error: "event_kind_unknown" },
+      { id: good.id, status: "rejected", error: "event_kind_unknown" },
+    ]);
+    expect(await stored()).toBe(0);
+    expect((await windowOf(agent))?.event_window_count).toBe(0);
+  });
+
+  it("answers a malformed later occurrence of a stored first one as a duplicate", async () => {
+    const agent = await new TestAgent(harness).enroll();
+    const good = agent.event("sleep", null);
+    const reply = await agent.events([
+      good,
+      { ...good, kind: "teleport" },
+      { ...good, bootId: "x" },
+    ]);
+    expect(reply.body.results).toEqual([
+      { id: good.id, status: "accepted", timeUncertain: true },
+      { id: good.id, status: "duplicate" },
+      { id: good.id, status: "duplicate" },
+    ]);
+    expect(await stored()).toBe(1);
+    expect((await windowOf(agent))?.event_window_count).toBe(1);
+  });
+
   it("never stores more than the budget across concurrent requests of one agent", async () => {
     const agent = await new TestAgent(harness).enroll();
     const replies = await Promise.all([
@@ -122,14 +153,17 @@ describe("event budget", () => {
     expect(statuses(reply.body.results)).toEqual(new Array(10).fill("accepted"));
   });
 
-  it("never moves the window back: a later stored window counts, and the retry time comes from it", async () => {
+  it("never moves the window back: a later stored window counts, and the retry time runs to its end", async () => {
     const agent = await new TestAgent(harness).enroll();
-    // As if a request in the next hour was processed first, or the clock moved back since.
-    await database.sql`update agent set event_window_start = date_trunc('hour', now()) + interval '2 hours',
+    // The clock moved back: it is 12:30 and the stored window starts at 14:00,
+    // so the budget renews at 15:00, two and a half hours from now.
+    await database.sql`update agent set event_window_start = now() + interval '90 minutes',
       event_window_count = 9 where id = ${agent.agentId ?? ""}`;
     const reply = await agent.events(batch(agent, 2));
     expect(statuses(reply.body.results)).toEqual(["accepted", "deferred"]);
-    expect(Number(reply.body.retryAfterSeconds)).toBe(3600);
+    const retry = Number(reply.body.retryAfterSeconds);
+    expect(retry).toBeGreaterThan(9000 - 5);
+    expect(retry).toBeLessThanOrEqual(9000);
     const [row] = await database.sql`select event_window_start > now() as later, event_window_count
       from agent where id = ${agent.agentId ?? ""}`;
     expect(row).toMatchObject({ later: true, event_window_count: 10 });
