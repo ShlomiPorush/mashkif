@@ -1,0 +1,40 @@
+<Project Sdk="WixToolset.Sdk">
+  <!--
+    Builds the unsigned EXE installer "Mashkif for Windows": a WiX Burn bundle
+    with the WiX Standard Bootstrapper Application that installs the English
+    MSI. Explorer offers "Run as administrator" for an EXE, not for an MSI;
+    the MSI stays the package for GPO and Intune.
+    Run from agent/, after the MSI build:
+      dotnet build bundle/Mashkif.Bundle.wixproj -c Release
+    The bundle lives outside agent/installer/ on purpose: WixToolset.Sdk
+    compiles every **/*.wxs below a project folder, so a bundle source there
+    would join the MSI build.
+  -->
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>Mashkif</OutputName>
+    <MsiPath>$(ArtifactsRoot)msi\Mashkif-$(Version)-x64.msi</MsiPath>
+    <ExeArtifactsDir>$(ArtifactsRoot)exe\</ExeArtifactsDir>
+    <DefineConstants>ProductVersion=$(Version);MsiPath=$(MsiPath)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.BootstrapperApplications.wixext" />
+  </ItemGroup>
+
+  <!-- The bundle embeds the English MSI that installer/Mashkif.Installer.wixproj built. -->
+  <Target Name="RequireMsi" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(MsiPath)')" Text="$(MsiPath) does not exist; build installer/Mashkif.Installer.wixproj first." />
+  </Target>
+
+  <!-- Copies the EXE to agent/artifacts/exe/Mashkif-<version>-x64.exe. -->
+  <Target Name="CopyBundleToArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <_StaleExe Include="$(ExeArtifactsDir)*.exe" />
+    </ItemGroup>
+    <Delete Files="@(_StaleExe)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ExeArtifactsDir)Mashkif-$(Version)-x64.exe" />
+    <Message Importance="high" Text="EXE: $(ExeArtifactsDir)Mashkif-$(Version)-x64.exe" />
+  </Target>
+</Project>
