@@ -41,6 +41,10 @@ function AgentEditor({
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
+  // Whether the admin changed the tier in this edit. A refreshed agent (for
+  // example promoted in the background) must never make an untouched select
+  // send its stale value, which would demote the agent and restart its trial.
+  const [tierChanged, setTierChanged] = useState(false);
   return (
     <form
       className="form agent-editor"
@@ -48,13 +52,9 @@ function AgentEditor({
         event.preventDefault();
         const form = new FormData(event.currentTarget);
         const cell = String(form.get("assignedCell")).trim().toLowerCase();
-        const tier = String(form.get("trustTier"));
-        // The tier is sent only when the admin changed it: a form opened before
-        // a promotion must never send the old tier back (it would demote the
-        // agent and restart its trial).
         void onSave({
           label: String(form.get("label")).trim(),
-          ...(tier === agent.trustTier ? {} : { trustTier: tier }),
+          ...(tierChanged ? { trustTier: String(form.get("trustTier")) } : {}),
           assignedCell: cell === "" ? null : cell,
         });
       }}
@@ -75,6 +75,7 @@ function AgentEditor({
           className="field-input"
           name="trustTier"
           defaultValue={agent.trustTier}
+          onChange={() => setTierChanged(true)}
           aria-describedby={`tier-help-${agent.id}`}
         >
           {TIERS.map((tier) => (

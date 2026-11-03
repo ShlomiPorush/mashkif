@@ -830,6 +830,39 @@ describe("management pages", () => {
     );
   });
 
+  it("never send a stale tier when the agent was promoted while its form was open", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    const routes = managed({
+      [`POST /api/admin/agents/${AGENT.id}/revoke`]: { ok: true },
+      [`POST /api/admin/agents/${LOW_AGENT.id}`]: { ok: true },
+    });
+    const calls = serve(routes);
+    renderAdmin(createI18n("en"));
+    // The admin opens the low agent's form.
+    fireEvent.click(
+      (await screen.findAllByRole("button", { name: en.common.edit }))[1] as HTMLElement,
+    );
+    expect((screen.getByLabelText(en.agents.tierField) as HTMLSelectElement).value).toBe("low");
+    // Meanwhile the agent is promoted; another change reloads the list.
+    routes["/api/admin/agents"] = {
+      agents: [AGENT, { ...LOW_AGENT, trustTier: "normal" }],
+      promotionDays: 7,
+    };
+    fireEvent.click(screen.getByRole("button", { name: en.agents.revoke }));
+    fireEvent.click(screen.getByRole("button", { name: en.agents.revokeConfirm }));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.path === "/api/admin/agents").length).toBe(2),
+    );
+    // The label is saved; the untouched tier select is not sent.
+    fireEvent.change(screen.getByLabelText(en.agents.labelField), { target: { value: "Den" } });
+    fireEvent.click(screen.getByRole("button", { name: en.common.save }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.path === `/api/admin/agents/${LOW_AGENT.id}`)?.body).toEqual(
+        { label: "Den", assignedCell: null },
+      ),
+    );
+  });
+
   it("show a low agent's trial as active days of the trial length", async () => {
     window.history.replaceState(null, "", "/admin/agents");
     serve(managed());
