@@ -13,12 +13,13 @@ namespace Mashkif.Agent.Tests;
 
 public sealed class PipeTests : IDisposable
 {
-    private const string Key = "ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7";
-
     private readonly EngineFixture _f = new();
     private readonly string _pipeName = $"Mashkif.Tests.{Guid.NewGuid():N}";
 
     public void Dispose() => _f.Dispose();
+
+    private static AgentState Revoked() =>
+        AgentState.Empty with { InstallId = EngineFixture.InstallId, IdentityState = IdentityStates.Revoked };
 
     private PipeServer Server(PipeSecurity? security = null, TimeProvider? time = null)
     {
@@ -72,11 +73,14 @@ public sealed class PipeTests : IDisposable
         Assert.True(status.Ok);
         Assert.Equal(AgentStates.Unregistered, status.Status!.State);
         Assert.Equal("mashkif.test", status.Status.ServerHost);
+        Assert.Equal(PipeErrors.NotRejoinable, server.Dispatch("""{"version":1,"command":"rejoin"}""").Error);
+        Assert.Equal(PipeErrors.UnknownCommand, server.Dispatch("""{"version":1,"command":"register","enrollmentKey":"x"}""").Error);
     }
 
     [Fact]
-    public async Task The_tray_client_gets_the_status_and_registers_over_a_real_pipe()
+    public async Task The_tray_client_gets_the_status_and_joins_again_over_a_real_pipe()
     {
+        _f.Seed(Revoked());
         _f.Create().Initialize();
         using var stop = new CancellationTokenSource();
         var running = Server().RunAsync(stop.Token);
@@ -85,12 +89,14 @@ public sealed class PipeTests : IDisposable
 
         var status = await client.SendAsync(new PipeRequest { Command = PipeProtocol.StatusCommand }, ct);
         Assert.Equal(PipeFailure.None, status.Failure);
-        Assert.Equal(AgentStates.Unregistered, status.Response!.Status!.State);
-        Assert.True(status.Response.Status.CanEnroll);
+        Assert.Equal(AgentStates.Revoked, status.Response!.Status!.State);
+        Assert.True(status.Response.Status.CanRejoin);
 
-        var register = await client.SendAsync(new PipeRequest { Command = PipeProtocol.RegisterCommand, EnrollmentKey = Key }, ct);
-        Assert.True(register.Response!.Ok);
-        Assert.Equal(Key, _f.LastEngine.State.Pending!.Key);
+        var rejoin = await client.SendAsync(new PipeRequest { Command = PipeProtocol.RejoinCommand }, ct);
+        Assert.True(rejoin.Response!.Ok);
+        Assert.False(rejoin.Response.Status!.CanRejoin);
+        Assert.Equal(EngineFixture.Origin, _f.LastEngine.State.Pending!.ServerOrigin);
+        Assert.NotEqual(EngineFixture.InstallId, _f.LastEngine.State.InstallId);
 
         // Several clients in a row and at once.
         var replies = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => client.SendAsync(new PipeRequest { Command = PipeProtocol.StatusCommand }, ct)));
@@ -103,6 +109,7 @@ public sealed class PipeTests : IDisposable
     [Fact]
     public async Task The_client_writes_nothing_when_the_server_end_is_not_the_service()
     {
+        _f.Seed(Revoked());
         _f.Create().Initialize();
         using var stop = new CancellationTokenSource();
         var running = Server().RunAsync(stop.Token);
@@ -111,10 +118,11 @@ public sealed class PipeTests : IDisposable
         foreach (var pid in new int?[] { null, Environment.ProcessId + 1 })
         {
             var client = new PipeClient(_pipeName, () => pid);
-            var reply = await client.SendAsync(new PipeRequest { Command = PipeProtocol.RegisterCommand, EnrollmentKey = Key }, ct);
+            var reply = await client.SendAsync(new PipeRequest { Command = PipeProtocol.RejoinCommand }, ct);
             Assert.Equal(PipeFailure.NotTheService, reply.Failure);
         }
 
+        Assert.Equal(IdentityStates.Revoked, _f.LastEngine.State.IdentityState);
         Assert.Null(_f.LastEngine.State.Pending);
         await StopAsync(stop, running);
     }

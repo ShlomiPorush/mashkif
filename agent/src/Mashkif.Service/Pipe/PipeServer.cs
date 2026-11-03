@@ -195,8 +195,8 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
         {
             case PipeProtocol.StatusCommand:
                 return PipeResponse.Success(engine.Status());
-            case PipeProtocol.RegisterCommand:
-                return engine.Register(request.EnrollmentKey);
+            case PipeProtocol.RejoinCommand:
+                return engine.Rejoin();
             default:
                 return PipeResponse.Failure(PipeErrors.UnknownCommand);
         }

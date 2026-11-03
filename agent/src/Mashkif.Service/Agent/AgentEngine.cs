@@ -24,8 +24,6 @@ internal sealed record AgentEngineOptions
     /// <summary>The normalized server origin, or null when <c>SERVER_URL</c> is invalid.</summary>
     public required Uri? Origin { get; init; }
 
-    public required IEnrollmentKeySource MsiKey { get; init; }
-
     public required HttpClient Http { get; init; }
 
     public required Guid BootId { get; init; }
@@ -43,14 +41,29 @@ internal sealed record AgentEngineOptions
 }
 
 /// <summary>
-/// The agent state machine. One loop owns the network work; pipe commands
-/// change the state under the same lock and wake the loop. The token and the
-/// enrollment key are sent only to the origin they are bound to and never logged.
+/// The agent state machine. One loop owns the network work; the pipe command
+/// <c>rejoin</c> changes the state under the same lock and wakes the loop.
+/// A token is sent only to the origin it is bound to and is never logged.
 /// </summary>
+/// <remarks>
+/// <para>A first start creates the install ID and a pending token, saves
+/// them, and registers. A 401 starts the cycle: the old token is kept, a
+/// pending token for the same install ID is saved, and every hour a heartbeat
+/// with the old token goes first; when it gets 401 again, the pending token is
+/// registered, at most once an hour.</para>
+/// <para>A revoke or a changed server stops all reporting until the user
+/// joins again, which creates a new install ID and token.</para>
+/// </remarks>
 internal sealed partial class AgentEngine : IDisposable
 {
     /// <summary>Time the DNS measurement may take.</summary>
     public static readonly TimeSpan DnsBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>Shortest time between two register requests of the 401 cycle.</summary>
+    public static readonly TimeSpan CycleRegisterSpacing = TimeSpan.FromHours(1);
+
+    /// <summary>Wait after a failed state write before the loop tries again.</summary>
+    public static readonly TimeSpan SaveRetryDelay = TimeSpan.FromMinutes(1);
 
     private readonly AgentEngineOptions _options;
     private readonly ILogger _logger;
@@ -66,10 +79,12 @@ internal sealed partial class AgentEngine : IDisposable
     private int _epoch;
     private CancellationTokenSource _wake = new();
 
+    // The 401 cycle waits this long before its next step; zero after a start.
+    private TimeSpan _cycleDelay = TimeSpan.Zero;
+
     // What the last attempt in the current phase found, for the status.
     private string? _attemptState;
     private string? _attemptReason;
-    private string? _enrollmentError;
     private DateTimeOffset? _lastContact;
     private int? _lastRoundTripMs;
 
@@ -100,8 +115,17 @@ internal sealed partial class AgentEngine : IDisposable
     }
 
     /// <summary>
-    /// Checks the configuration, the path, and the state, then adopts an MSI
-    /// key. Runs once, before <see cref="RunAsync"/> and before the pipe opens.
+    /// Whether the 401 cycle may send a register request now: an hour after
+    /// the last one, or at once when the clock is earlier than the saved time
+    /// (it was set back). A clock set forward allows one early request, which
+    /// saves the new time.
+    /// </summary>
+    internal static bool CycleRegisterAllowed(DateTimeOffset? lastAttempt, DateTimeOffset now) =>
+        lastAttempt is not { } last || now < last || now - last >= CycleRegisterSpacing;
+
+    /// <summary>
+    /// Checks the configuration, the path, and the state. Runs once, before
+    /// <see cref="RunAsync"/> and before the pipe opens.
     /// </summary>
     public void Initialize()
     {
@@ -123,7 +147,10 @@ internal sealed partial class AgentEngine : IDisposable
                 return;
             }
 
-            AdoptMsiKey();
+            if (ServerChanged())
+            {
+                LogServerChanged(_logger);
+            }
         }
     }
 
@@ -136,8 +163,13 @@ internal sealed partial class AgentEngine : IDisposable
         }
     }
 
-    /// <summary>The pipe command <c>register</c>.</summary>
-    public PipeResponse Register(string? key)
+    /// <summary>
+    /// The pipe command <c>rejoin</c>: after a revoke or a server change,
+    /// replaces the install ID, the identity, and any pending registration
+    /// with a new install ID and token for the configured server, in one
+    /// atomic write. The loop then registers them.
+    /// </summary>
+    public PipeResponse Rejoin()
     {
         lock (_gate)
         {
@@ -146,35 +178,35 @@ internal sealed partial class AgentEngine : IDisposable
                 return PipeResponse.Failure(PipeErrors.NotAvailable, BuildStatus());
             }
 
-            if (!EnrollmentKeyFormat.IsValid(key))
+            if (!CanRejoin())
             {
-                return PipeResponse.Failure(PipeErrors.EnrollmentKeyFormat, BuildStatus());
+                return PipeResponse.Failure(PipeErrors.NotRejoinable, BuildStatus());
             }
 
-            if (_state.Pending is not null)
+            var credentials = _options.NewCredentials();
+            var rejoined = _state with
             {
-                return PipeResponse.Failure(PipeErrors.RegistrationInProgress, BuildStatus());
-            }
-
-            if (!CanEnroll())
-            {
-                return PipeResponse.Failure(PipeErrors.AlreadyRegistered, BuildStatus());
-            }
-
-            if (!TrySave(_state with { Pending = NewPending(key!, AgentState.SourceTray) }))
+                InstallId = credentials.InstallId,
+                Identity = null,
+                IdentityState = IdentityStates.None,
+                Pending = new PendingRegistration { ServerOrigin = _origin!, Token = credentials.Token },
+                LastRegisterAttemptUtc = null,
+            };
+            if (!TrySave(rejoined))
             {
                 return PipeResponse.Failure(PipeErrors.NotAvailable, BuildStatus());
             }
 
-            _enrollmentError = null;
             ResetAttempt();
-            LogEnrollmentStarted(_logger, AgentState.SourceTray);
+            _lastContact = null;
+            _lastRoundTripMs = null;
+            LogRejoined(_logger);
             WakeLocked();
             return PipeResponse.Success(BuildStatus());
         }
     }
 
-    /// <summary>The network loop: registration, heartbeats, and waiting for commands.</summary>
+    /// <summary>The network loop: registration, heartbeats, the 401 cycle, and waiting for commands.</summary>
     public async Task RunAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
@@ -194,13 +226,23 @@ internal sealed partial class AgentEngine : IDisposable
             {
                 switch (phase)
                 {
+                    case Phase.CreateIdentity:
+                        if (!CreatePending(epoch))
+                        {
+                            await Task.Delay(SaveRetryDelay, _time, linked.Token).ConfigureAwait(false);
+                        }
+
+                        break;
                     case Phase.Register:
                         await _registerPipeline.ExecuteAsync(
-                            async token => await RegisterAttemptAsync(epoch, token).ConfigureAwait(false),
+                            async token => await RegisterAttemptAsync(epoch, cycle: false, token).ConfigureAwait(false),
                             linked.Token).ConfigureAwait(false);
                         break;
                     case Phase.Heartbeat:
                         await HeartbeatAsync(epoch, linked.Token).ConfigureAwait(false);
+                        break;
+                    case Phase.TokenCycle:
+                        await TokenCycleAsync(epoch, linked.Token).ConfigureAwait(false);
                         break;
                     default:
                         await Task.Delay(Timeout.InfiniteTimeSpan, _time, linked.Token).ConfigureAwait(false);
@@ -230,145 +272,93 @@ internal sealed partial class AgentEngine : IDisposable
     private enum Phase
     {
         Idle,
+        CreateIdentity,
         Register,
         Heartbeat,
+        TokenCycle,
     }
 
     private Phase CurrentPhase()
     {
-        if (_blockedReason is not null)
+        if (_blockedReason is not null || ServerChanged() || _state.IdentityState == IdentityStates.Revoked)
         {
             return Phase.Idle;
         }
 
-        if (_state.Pending is { } pending)
+        if (_state.Identity is null)
         {
-            return pending.ServerOrigin == _origin ? Phase.Register : Phase.Idle;
+            return _state.Pending is null ? Phase.CreateIdentity : Phase.Register;
         }
 
-        return _state.Identity is { } identity && identity.ServerOrigin == _origin
-            ? Phase.Heartbeat
-            : Phase.Idle;
+        return _state.IdentityState == IdentityStates.TokenRejected ? Phase.TokenCycle : Phase.Heartbeat;
     }
 
-    private bool CanEnroll() =>
-        _blockedReason is null
-        && _state.Pending is null
-        && (_state.Identity is null
-            || _state.IdentityState == IdentityStates.TokenRejected
-            || _state.Identity.ServerOrigin != _origin);
+    /// <summary>The identity or the pending registration belongs to another server than the configured one.</summary>
+    private bool ServerChanged() =>
+        (_state.Identity is { } identity && identity.ServerOrigin != _origin)
+        || (_state.Pending is { } pending && pending.ServerOrigin != _origin);
 
-    // MSI key adoption, in the fixed order of the plan: A (blocked, handled by
-    // Initialize), B, C, D, E. B always completes before C, so a key that was
-    // saved for one origin can never be adopted for another.
-    private void AdoptMsiKey()
+    private bool CanRejoin() =>
+        _blockedReason is null && (_state.IdentityState == IdentityStates.Revoked || ServerChanged());
+
+    /// <summary>First start: saves a new install ID and a pending token before anything is sent.</summary>
+    private bool CreatePending(int epoch)
     {
-        string? value;
-        try
-        {
-            value = _options.MsiKey.Read();
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-        {
-            LogMsiKeyFailed(_logger, "read", exception.GetType().Name);
-            return;
-        }
-
-        // B: a crash between saving pending and deleting the value.
-        if (value is not null && _state.Pending is { } saved && saved.Key == value)
-        {
-            if (!TryDeleteMsiKey())
-            {
-                return;
-            }
-
-            value = null;
-        }
-
-        // C: a pending registration for another server is dropped.
-        if (_state.Pending is { } other && other.ServerOrigin != _origin)
-        {
-            if (!TrySave(_state with { Pending = null }))
-            {
-                return;
-            }
-
-            LogPendingDiscarded(_logger);
-        }
-
-        if (value is null)
-        {
-            return;
-        }
-
-        // D: adopt the value for the current origin.
-        if (CanEnroll() && EnrollmentKeyFormat.IsValid(value))
-        {
-            if (!TrySave(_state with { Pending = NewPending(value, AgentState.SourceMsi) }))
-            {
-                return;
-            }
-
-            LogEnrollmentStarted(_logger, AgentState.SourceMsi);
-            TryDeleteMsiKey();
-            return;
-        }
-
-        // E: a value that cannot be used now.
-        if (!EnrollmentKeyFormat.IsValid(value))
-        {
-            _enrollmentError = StatusReasons.EnrollmentKeyInvalid;
-        }
-
-        LogMsiKeyIgnored(_logger);
-        TryDeleteMsiKey();
-    }
-
-    private bool TryDeleteMsiKey()
-    {
-        try
-        {
-            _options.MsiKey.Delete();
-            return true;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-        {
-            LogMsiKeyFailed(_logger, "delete", exception.GetType().Name);
-            return false;
-        }
-    }
-
-    private PendingRegistration NewPending(string key, string source)
-    {
-        var credentials = _options.NewCredentials();
-        return new PendingRegistration
-        {
-            ServerOrigin = _origin!,
-            Key = key,
-            Source = source,
-            InstallId = credentials.InstallId,
-            Token = credentials.Token,
-        };
-    }
-
-    private async Task<Step> RegisterAttemptAsync(int epoch, CancellationToken cancellationToken)
-    {
-        PendingRegistration pending;
         lock (_gate)
         {
-            if (_epoch != epoch || _state.Pending is null)
+            if (_epoch != epoch || CurrentPhase() != Phase.CreateIdentity)
+            {
+                return true;
+            }
+
+            var credentials = _options.NewCredentials();
+            var created = _state with
+            {
+                InstallId = _state.InstallId ?? credentials.InstallId,
+                Pending = new PendingRegistration { ServerOrigin = _origin!, Token = credentials.Token },
+            };
+            if (!TrySave(created))
+            {
+                return false;
+            }
+
+            LogRegistrationStarted(_logger);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// One register request with the pending token. The attempt time is saved
+    /// before the request is sent; when that fails, nothing is sent.
+    /// </summary>
+    private async Task<Step> RegisterAttemptAsync(int epoch, bool cycle, CancellationToken cancellationToken)
+    {
+        PendingRegistration pending;
+        Guid installId;
+        lock (_gate)
+        {
+            if (_epoch != epoch || _state.Pending is null || ServerChanged())
             {
                 return Step.Stop;
             }
 
             pending = _state.Pending;
+            installId = _state.InstallId!.Value;
+            if (!TrySave(_state with { LastRegisterAttemptUtc = _time.GetUtcNow() }))
+            {
+                if (!cycle)
+                {
+                    SetAttempt(AgentStates.Registering, null);
+                }
+
+                return cycle ? Step.Stop : Step.Retry;
+            }
         }
 
         var result = await _api!.RegisterAsync(
             new RegisterRequest
             {
-                EnrollmentKey = pending.Key,
-                InstallId = pending.InstallId,
+                InstallId = installId,
                 Token = pending.Token,
                 AgentVersion = _options.AgentVersion,
                 OsVersion = _options.OsVersion,
@@ -377,11 +367,11 @@ internal sealed partial class AgentEngine : IDisposable
 
         lock (_gate)
         {
-            return _epoch != epoch || !ReferenceEquals(_state.Pending, pending) ? Step.Stop : ApplyRegister(pending, result);
+            return _epoch != epoch || !ReferenceEquals(_state.Pending, pending) ? Step.Stop : ApplyRegister(pending, result, cycle);
         }
     }
 
-    private Step ApplyRegister(PendingRegistration pending, ApiResult<RegisterResponse> result)
+    private Step ApplyRegister(PendingRegistration pending, ApiResult<RegisterResponse> result, bool cycle)
     {
         if (result.Outcome == ApiOutcome.Success)
         {
@@ -389,18 +379,20 @@ internal sealed partial class AgentEngine : IDisposable
             var identity = new AgentIdentity
             {
                 ServerOrigin = pending.ServerOrigin,
-                InstallId = pending.InstallId,
                 Token = pending.Token,
                 AgentId = result.Value.AgentId,
             };
             if (!TrySave(_state with { Identity = identity, IdentityState = IdentityStates.Active, Pending = null, IntervalSeconds = interval }))
             {
                 // The server answers the same registration with 200 again.
-                SetAttempt(AgentStates.Registering, null);
-                return Step.Retry;
+                if (!cycle)
+                {
+                    SetAttempt(AgentStates.Registering, null);
+                }
+
+                return cycle ? Step.Stop : Step.Retry;
             }
 
-            _enrollmentError = null;
             _lastContact = _time.GetUtcNow();
             _lastRoundTripMs = null;
             SetAttempt(AgentStates.Connected, null);
@@ -408,7 +400,21 @@ internal sealed partial class AgentEngine : IDisposable
             return Step.Done;
         }
 
-        switch (Classify(result))
+        var refusal = Classify(result);
+        if (refusal == Refusal.Revoked)
+        {
+            return Revoke() ? Step.Stop : (cycle ? Step.Stop : Step.Retry);
+        }
+
+        if (cycle)
+        {
+            // Any other answer, or none, continues the cycle: the old token
+            // and the pending token are both kept for the next hour.
+            LogCycleRegisterFailed(_logger, result.ErrorCode ?? result.StatusCode.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            return Step.Stop;
+        }
+
+        switch (refusal)
         {
             case Refusal.RetryAfter:
                 return Step.After(result.RetryAfter!.Value);
@@ -421,43 +427,30 @@ internal sealed partial class AgentEngine : IDisposable
             case Refusal.Blocked:
                 SetAttempt(AgentStates.Refused, result.ErrorCode);
                 return Step.Retry;
-            case Refusal.KeyRefused:
-                return DropPending(result.ErrorCode!);
-            case Refusal.Revoked:
-                return DropPending(StatusReasons.AgentRevoked);
+            case Refusal.RegistrationClosed:
+                SetAttempt(AgentStates.Refused, StatusReasons.RegistrationClosed);
+                return Step.Slow;
             case Refusal.InstallIdConflict:
-                var credentials = _options.NewCredentials();
-                if (!TrySave(_state with { Pending = pending with { InstallId = credentials.InstallId, Token = credentials.Token } }))
-                {
-                    return Step.Retry;
-                }
-
-                return Step.After(TimeSpan.Zero);
+                // Random IDs never collide; the IDs are kept and tried hourly.
+                SetAttempt(AgentStates.Refused, StatusReasons.InstallIdConflict);
+                return Step.Slow;
             default:
                 SetAttempt(AgentStates.Registering, null);
                 return Step.Retry;
         }
     }
 
-    /// <summary>
-    /// A definitive failure of a new registration drops only <c>pending</c>.
-    /// A kept identity stays with its earlier status; without one, a revoke
-    /// leaves the agent revoked.
-    /// </summary>
-    private Step DropPending(string error)
+    /// <summary>Discards every token and stays revoked until the user joins again.</summary>
+    private bool Revoke()
     {
-        var identityState = _state.Identity is null && error == StatusReasons.AgentRevoked
-            ? IdentityStates.Revoked
-            : _state.IdentityState;
-        if (!TrySave(_state with { Pending = null, IdentityState = identityState }))
+        if (!TrySave(_state with { Identity = null, Pending = null, IdentityState = IdentityStates.Revoked }))
         {
-            return Step.Retry;
+            return false;
         }
 
-        _enrollmentError = error;
         ResetAttempt();
-        LogEnrollmentFailed(_logger, error);
-        return Step.Stop;
+        LogRevoked(_logger);
+        return true;
     }
 
     private async Task HeartbeatAsync(int epoch, CancellationToken cancellationToken)
@@ -495,14 +488,89 @@ internal sealed partial class AgentEngine : IDisposable
 
         if (step.Kind == StepKind.Done)
         {
-            int next;
-            lock (_gate)
+            await WaitForNextHeartbeatAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task WaitForNextHeartbeatAsync(CancellationToken cancellationToken)
+    {
+        int next;
+        lock (_gate)
+        {
+            next = _state.IntervalSeconds;
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(next), _time, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One step of the 401 cycle: a heartbeat with the old token first; when
+    /// it gets 401 again, the pending token is registered for the same
+    /// install ID, at most once an hour.
+    /// </summary>
+    private async Task TokenCycleAsync(int epoch, CancellationToken cancellationToken)
+    {
+        TimeSpan delay;
+        lock (_gate)
+        {
+            delay = _cycleDelay;
+        }
+
+        if (delay > TimeSpan.Zero)
+        {
+            await Task.Delay(delay, _time, cancellationToken).ConfigureAwait(false);
+        }
+
+        AgentIdentity identity;
+        lock (_gate)
+        {
+            if (_epoch != epoch || _state.Identity is null || _state.IdentityState != IdentityStates.TokenRejected)
             {
-                next = _state.IntervalSeconds;
+                return;
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(next), _time, cancellationToken).ConfigureAwait(false);
+            identity = _state.Identity;
+            _cycleDelay = RetryPolicies.SlowWithJitter();
         }
+
+        var body = await PrepareHeartbeatAsync(epoch, identity, cancellationToken).ConfigureAwait(false);
+        if (body is null)
+        {
+            return;
+        }
+
+        var result = await _api!.HeartbeatAsync(body, identity.Token, cancellationToken).ConfigureAwait(false);
+        lock (_gate)
+        {
+            if (_epoch != epoch || !ReferenceEquals(_state.Identity, identity))
+            {
+                return;
+            }
+
+            if (result.Outcome == ApiOutcome.Success || Classify(result) != Refusal.TokenInvalid)
+            {
+                if (ApplyHeartbeat(result).Kind != StepKind.Done)
+                {
+                    return;
+                }
+            }
+            else if (!CycleRegisterAllowed(_state.LastRegisterAttemptUtc, _time.GetUtcNow()))
+            {
+                // Wait until the hour since the last register request is over.
+                _cycleDelay = _state.LastRegisterAttemptUtc!.Value + CycleRegisterSpacing - _time.GetUtcNow();
+                return;
+            }
+        }
+
+        if (result.Outcome == ApiOutcome.Success)
+        {
+            await WaitForNextHeartbeatAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Success replaces the identity, and the loop sends its first heartbeat
+        // at once, as after a first registration.
+        await RegisterAttemptAsync(epoch, cycle: true, cancellationToken).ConfigureAwait(false);
     }
 
     private ResiliencePipeline<Step> HeartbeatPipeline(int interval)
@@ -555,7 +623,9 @@ internal sealed partial class AgentEngine : IDisposable
         if (result.Outcome == ApiOutcome.Success)
         {
             var interval = ClampInterval(result.Value!.NextIntervalSeconds);
-            var updated = _state with { IntervalSeconds = interval, IdentityState = IdentityStates.Active };
+
+            // A 200 for the old token ends the 401 cycle: the pending token is dropped.
+            var updated = _state with { IntervalSeconds = interval, IdentityState = IdentityStates.Active, Pending = null };
             if (updated != _state && !TrySave(updated))
             {
                 // Keep using the answer; the next save writes it.
@@ -583,28 +653,33 @@ internal sealed partial class AgentEngine : IDisposable
                 SetAttempt(AgentStates.Refused, result.ErrorCode);
                 return Step.Retry;
             case Refusal.TokenInvalid:
-                if (_state.IdentityState != IdentityStates.TokenRejected
-                    && !TrySave(_state with { IdentityState = IdentityStates.TokenRejected }))
-                {
-                    return Step.Retry;
-                }
-
-                ResetAttempt();
-                LogTokenRejected(_logger);
-                return Step.Slow;
+                return StartTokenCycle() ? Step.Stop : Step.Retry;
             case Refusal.Revoked:
-                if (!TrySave(_state with { Identity = null, IdentityState = IdentityStates.Revoked }))
-                {
-                    return Step.Retry;
-                }
-
-                ResetAttempt();
-                LogRevoked(_logger);
-                return Step.Stop;
+                return Revoke() ? Step.Stop : Step.Retry;
             default:
                 SetAttempt(AgentStates.Unreachable, null);
                 return Step.Retry;
         }
+    }
+
+    /// <summary>The first 401: keeps the old token and saves a pending token for the same install ID.</summary>
+    private bool StartTokenCycle()
+    {
+        if (_state.IdentityState == IdentityStates.TokenRejected)
+        {
+            return true;
+        }
+
+        var pending = new PendingRegistration { ServerOrigin = _state.Identity!.ServerOrigin, Token = _options.NewCredentials().Token };
+        if (!TrySave(_state with { IdentityState = IdentityStates.TokenRejected, Pending = pending }))
+        {
+            return false;
+        }
+
+        _cycleDelay = RetryPolicies.SlowWithJitter();
+        ResetAttempt();
+        LogTokenRejected(_logger);
+        return true;
     }
 
     private enum Refusal
@@ -614,7 +689,7 @@ internal sealed partial class AgentEngine : IDisposable
         Redirect,
         BadRequest,
         Blocked,
-        KeyRefused,
+        RegistrationClosed,
         Revoked,
         InstallIdConflict,
         TokenInvalid,
@@ -638,11 +713,10 @@ internal sealed partial class AgentEngine : IDisposable
             {
                 StatusReasons.AgentBlocked or StatusReasons.AddressBlocked => Refusal.Blocked,
                 StatusReasons.AgentRevoked => Refusal.Revoked,
-                StatusReasons.EnrollmentKeyInvalid or StatusReasons.EnrollmentKeyExpired
-                    or StatusReasons.EnrollmentKeyRevoked or StatusReasons.EnrollmentKeyUsed => Refusal.KeyRefused,
+                StatusReasons.RegistrationClosed => Refusal.RegistrationClosed,
                 _ => Refusal.Transient,
             },
-            409 when result.ErrorCode == "install_id_conflict" => Refusal.InstallIdConflict,
+            409 when result.ErrorCode == StatusReasons.InstallIdConflict => Refusal.InstallIdConflict,
             _ => Refusal.Transient,
         };
     }
@@ -724,40 +798,43 @@ internal sealed partial class AgentEngine : IDisposable
             state = AgentStates.Refused;
             reason = _blockedReason;
         }
-        else if (_state.Pending is { } pending && pending.ServerOrigin == _origin)
+        else if (ServerChanged())
         {
-            state = _attemptState is AgentStates.Refused ? AgentStates.Refused : AgentStates.Registering;
-            reason = state == AgentStates.Refused ? _attemptReason : null;
+            state = AgentStates.Refused;
+            reason = StatusReasons.ServerChanged;
         }
-        else if (_state.Identity is { } identity)
+        else if (_state.IdentityState == IdentityStates.Revoked)
         {
-            if (identity.ServerOrigin != _origin)
+            state = AgentStates.Revoked;
+        }
+        else if (_state.Identity is null)
+        {
+            if (_state.Pending is null)
             {
-                state = AgentStates.Refused;
-                reason = StatusReasons.ServerChanged;
-            }
-            else if (_state.IdentityState == IdentityStates.TokenRejected)
-            {
-                state = AgentStates.Refused;
-                reason = StatusReasons.TokenInvalid;
+                state = AgentStates.Unregistered;
             }
             else
             {
-                state = _attemptState ?? (_lastContact is null ? AgentStates.Unreachable : AgentStates.Connected);
-                reason = _attemptReason;
+                state = _attemptState is AgentStates.Refused ? AgentStates.Refused : AgentStates.Registering;
+                reason = state == AgentStates.Refused ? _attemptReason : null;
             }
+        }
+        else if (_state.IdentityState == IdentityStates.TokenRejected)
+        {
+            state = AgentStates.Refused;
+            reason = StatusReasons.TokenInvalid;
         }
         else
         {
-            state = _state.IdentityState == IdentityStates.Revoked ? AgentStates.Revoked : AgentStates.Unregistered;
+            state = _attemptState ?? (_lastContact is null ? AgentStates.Unreachable : AgentStates.Connected);
+            reason = _attemptReason;
         }
 
         return new AgentStatus
         {
             State = state,
             Reason = reason,
-            EnrollmentError = _enrollmentError,
-            CanEnroll = CanEnroll(),
+            CanRejoin = CanRejoin(),
             LastContactUtc = _lastContact,
             ServerHost = _options.Origin?.Host,
         };
@@ -769,28 +846,25 @@ internal sealed partial class AgentEngine : IDisposable
     [LoggerMessage(EventId = 11, Level = LogLevel.Error, Message = "SERVER_URL is not an https origin or a loopback http origin; nothing is sent")]
     private static partial void LogConfigInvalid(ILogger logger);
 
-    [LoggerMessage(EventId = 12, Level = LogLevel.Warning, Message = "Could not {Operation} the MSI enrollment key value: {Error}")]
-    private static partial void LogMsiKeyFailed(ILogger logger, string operation, string error);
+    [LoggerMessage(EventId = 12, Level = LogLevel.Warning, Message = "The agent is registered with another server than SERVER_URL; nothing is sent until the user joins again")]
+    private static partial void LogServerChanged(ILogger logger);
 
-    [LoggerMessage(EventId = 13, Level = LogLevel.Information, Message = "A pending registration for another server was discarded")]
-    private static partial void LogPendingDiscarded(ILogger logger);
+    [LoggerMessage(EventId = 13, Level = LogLevel.Information, Message = "A new install ID and token were saved; registering")]
+    private static partial void LogRegistrationStarted(ILogger logger);
 
-    [LoggerMessage(EventId = 14, Level = LogLevel.Information, Message = "Enrollment started from the {Source}")]
-    private static partial void LogEnrollmentStarted(ILogger logger, string source);
+    [LoggerMessage(EventId = 14, Level = LogLevel.Information, Message = "Joining again with a new install ID and token")]
+    private static partial void LogRejoined(ILogger logger);
 
-    [LoggerMessage(EventId = 15, Level = LogLevel.Information, Message = "The MSI enrollment key was ignored and deleted")]
-    private static partial void LogMsiKeyIgnored(ILogger logger);
+    [LoggerMessage(EventId = 15, Level = LogLevel.Warning, Message = "Registering the pending token failed ({Error}); trying again in an hour")]
+    private static partial void LogCycleRegisterFailed(ILogger logger, string error);
 
     [LoggerMessage(EventId = 16, Level = LogLevel.Information, Message = "Registered as agent {AgentId}")]
     private static partial void LogRegistered(ILogger logger, Guid agentId);
 
-    [LoggerMessage(EventId = 17, Level = LogLevel.Warning, Message = "Enrollment failed: {Error}")]
-    private static partial void LogEnrollmentFailed(ILogger logger, string error);
-
-    [LoggerMessage(EventId = 18, Level = LogLevel.Warning, Message = "The server does not recognize the token; it is kept and tried again hourly")]
+    [LoggerMessage(EventId = 18, Level = LogLevel.Warning, Message = "The server does not recognize the token; it is kept and tried hourly, and the PC registers again when it keeps failing")]
     private static partial void LogTokenRejected(ILogger logger);
 
-    [LoggerMessage(EventId = 19, Level = LogLevel.Warning, Message = "The admin revoked this agent; its identity was discarded")]
+    [LoggerMessage(EventId = 19, Level = LogLevel.Warning, Message = "The admin revoked this agent; its tokens were discarded and it stays removed until the user joins again")]
     private static partial void LogRevoked(ILogger logger);
 
     [LoggerMessage(EventId = 20, Level = LogLevel.Warning, Message = "The server sent the interval {Seconds} s; using {Clamped} s")]

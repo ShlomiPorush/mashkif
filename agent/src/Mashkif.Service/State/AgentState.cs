@@ -1,6 +1,5 @@
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
-using Mashkif.Common.Pipe;
 using Mashkif.Service.Protocol;
 
 namespace Mashkif.Service.State;
@@ -8,59 +7,55 @@ namespace Mashkif.Service.State;
 /// <summary>States of the stored identity.</summary>
 internal static class IdentityStates
 {
-    /// <summary>No identity: never enrolled, or reset.</summary>
+    /// <summary>No identity yet: a first registration, or one after joining again.</summary>
     public const string None = "none";
 
     /// <summary>The server accepts the token.</summary>
     public const string Active = "active";
 
-    /// <summary>The server answered 401; the token is kept and retried hourly.</summary>
+    /// <summary>
+    /// The server answered 401: the token is kept and tried hourly, and a
+    /// pending token for the same install ID is registered when it fails again.
+    /// </summary>
     public const string TokenRejected = "token_rejected";
 
-    /// <summary>The admin revoked the agent; the identity was discarded.</summary>
+    /// <summary>The admin revoked the agent; the tokens were discarded. Only joining again leaves this state.</summary>
     public const string Revoked = "revoked";
 }
 
-/// <summary>The agent identity for one server.</summary>
+/// <summary>The registered identity on one server; its install ID is <see cref="AgentState.InstallId"/>.</summary>
 internal sealed record AgentIdentity
 {
     public required string ServerOrigin { get; init; }
-
-    public required Guid InstallId { get; init; }
 
     public required string Token { get; init; }
 
     public required Guid AgentId { get; init; }
 }
 
-/// <summary>A registration that has not been answered with success yet.</summary>
+/// <summary>
+/// A registration that has not been answered with success yet. The token is
+/// saved before it is sent, so every retry sends the identical body.
+/// </summary>
 internal sealed record PendingRegistration
 {
     public required string ServerOrigin { get; init; }
-
-    public required string Key { get; init; }
-
-    /// <summary><c>tray</c> or <c>msi</c>.</summary>
-    public required string Source { get; init; }
-
-    public required Guid InstallId { get; init; }
 
     public required string Token { get; init; }
 }
 
 /// <summary>
-/// The content of <c>state.json</c>, schema version 1. The token and the
-/// enrollment key live only here and in requests to their own server.
+/// The content of <c>state.json</c>, schema version 1. The tokens live only
+/// here and in requests to the server they are bound to.
 /// </summary>
 internal sealed partial record AgentState
 {
     public const int CurrentSchemaVersion = 1;
 
-    public const string SourceTray = "tray";
-
-    public const string SourceMsi = "msi";
-
     public int SchemaVersion { get; init; } = CurrentSchemaVersion;
+
+    /// <summary>Created at the first start; replaced only by joining again.</summary>
+    public Guid? InstallId { get; init; }
 
     public AgentIdentity? Identity { get; init; }
 
@@ -68,11 +63,14 @@ internal sealed partial record AgentState
 
     public PendingRegistration? Pending { get; init; }
 
+    /// <summary>Saved before each register request; the 401 cycle sends at most one an hour.</summary>
+    public DateTimeOffset? LastRegisterAttemptUtc { get; init; }
+
     public int IntervalSeconds { get; init; } = ProtocolConstants.DefaultIntervalSeconds;
 
     public long NextSequence { get; init; }
 
-    /// <summary>A state with nothing in it, for a PC that never enrolled.</summary>
+    /// <summary>A state with nothing in it, for a PC that never registered.</summary>
     public static AgentState Empty { get; } = new();
 
     /// <summary>Whether the content is consistent and has the formats of the contract.</summary>
@@ -85,22 +83,30 @@ internal sealed partial record AgentState
             return false;
         }
 
+        if (InstallId == Guid.Empty || ((Identity is not null || Pending is not null) && InstallId is null))
+        {
+            return false;
+        }
+
+        // A pending token next to an identity is the 401 cycle, always for the identity's server.
+        if (Identity is not null && Pending is not null && Identity.ServerOrigin != Pending.ServerOrigin)
+        {
+            return false;
+        }
+
+        var shapeOk = IdentityState switch
+        {
+            IdentityStates.None => Identity is null,
+            IdentityStates.Active => Identity is not null && Pending is null,
+            IdentityStates.TokenRejected => Identity is not null,
+            IdentityStates.Revoked => Identity is null && Pending is null,
+            _ => false,
+        };
+
         var identityOk = Identity is null
-            ? IdentityState is IdentityStates.None or IdentityStates.Revoked
-            : IdentityState is IdentityStates.Active or IdentityStates.TokenRejected
-                && IsOrigin(Identity.ServerOrigin)
-                && Identity.InstallId != Guid.Empty
-                && Identity.AgentId != Guid.Empty
-                && IsToken(Identity.Token);
-
-        var pendingOk = Pending is null
-            || (IsOrigin(Pending.ServerOrigin)
-                && EnrollmentKeyFormat.IsValid(Pending.Key)
-                && Pending.Source is SourceTray or SourceMsi
-                && Pending.InstallId != Guid.Empty
-                && IsToken(Pending.Token));
-
-        return identityOk && pendingOk;
+            || (IsOrigin(Identity.ServerOrigin) && Identity.AgentId != Guid.Empty && IsToken(Identity.Token));
+        var pendingOk = Pending is null || (IsOrigin(Pending.ServerOrigin) && IsToken(Pending.Token));
+        return shapeOk && identityOk && pendingOk;
     }
 
     private static bool IsToken(string? token) => token is not null && TokenPattern().IsMatch(token);

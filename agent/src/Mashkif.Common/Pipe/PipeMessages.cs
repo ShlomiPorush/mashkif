@@ -1,5 +1,4 @@
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 
 namespace Mashkif.Common.Pipe;
 
@@ -27,21 +26,18 @@ public static class PipeProtocol
     /// <summary>Command that returns the agent status.</summary>
     public const string StatusCommand = "status";
 
-    /// <summary>Command that hands an enrollment key to the service.</summary>
-    public const string RegisterCommand = "register";
+    /// <summary>
+    /// Command that joins again after a revoke or a server change: a new
+    /// install ID and token for the configured server. It has no payload.
+    /// </summary>
+    public const string RejoinCommand = "rejoin";
 }
 
 /// <summary>Error codes of a refused pipe request.</summary>
 public static class PipeErrors
 {
-    /// <summary>The agent has an identity and cannot enroll again now.</summary>
-    public const string AlreadyRegistered = "already_registered";
-
-    /// <summary>A registration is already running.</summary>
-    public const string RegistrationInProgress = "registration_in_progress";
-
-    /// <summary>The key does not have the enrollment key format.</summary>
-    public const string EnrollmentKeyFormat = "enrollment_key_format";
+    /// <summary>Joining again is possible only after a revoke or a server change.</summary>
+    public const string NotRejoinable = "not_rejoinable";
 
     /// <summary>The command is not known.</summary>
     public const string UnknownCommand = "unknown_command";
@@ -52,7 +48,7 @@ public static class PipeErrors
     /// <summary>The request names a version the service does not speak.</summary>
     public const string VersionUnsupported = "version_unsupported";
 
-    /// <summary>The service cannot enroll now (invalid state or configuration, or a failed write).</summary>
+    /// <summary>The service cannot join again now (invalid state or configuration, or a failed write).</summary>
     public const string NotAvailable = "not_available";
 }
 
@@ -73,9 +69,6 @@ public sealed record PipeRequest
     public int Version { get; init; } = PipeProtocol.Version;
 
     public string? Command { get; init; }
-
-    /// <summary>The key for <c>register</c>; never logged.</summary>
-    public string? EnrollmentKey { get; init; }
 }
 
 /// <summary>The answer to one request.</summary>
@@ -104,11 +97,8 @@ public sealed record AgentStatus
     /// <summary>Why the state is what it is, as a stable code, or null.</summary>
     public string? Reason { get; init; }
 
-    /// <summary>Why the last enrollment attempt failed, or null.</summary>
-    public string? EnrollmentError { get; init; }
-
-    /// <summary>Whether the service accepts a <c>register</c> command now.</summary>
-    public bool CanEnroll { get; init; }
+    /// <summary>Whether the service accepts a <c>rejoin</c> command now.</summary>
+    public bool CanRejoin { get; init; }
 
     /// <summary>Last time the server answered with success.</summary>
     public DateTimeOffset? LastContactUtc { get; init; }
@@ -125,27 +115,15 @@ public sealed record AgentStatus
 [JsonSerializable(typeof(PipeResponse))]
 public sealed partial class PipeJsonContext : JsonSerializerContext;
 
-/// <summary>The enrollment key format of the contract (32 base64url characters).</summary>
-public static partial class EnrollmentKeyFormat
-{
-    /// <summary>Whether <paramref name="key"/> has the enrollment key format.</summary>
-    public static bool IsValid(string? key) => key is not null && Pattern().IsMatch(key);
-
-    [GeneratedRegex("^[A-Za-z0-9_-]{32}$", RegexOptions.CultureInvariant)]
-    private static partial Regex Pattern();
-}
-
-/// <summary>Codes in <see cref="AgentStatus.Reason"/> and <see cref="AgentStatus.EnrollmentError"/>.</summary>
+/// <summary>Codes in <see cref="AgentStatus.Reason"/>.</summary>
 public static class StatusReasons
 {
-    public const string EnrollmentKeyInvalid = "enrollment_key_invalid";
-    public const string EnrollmentKeyExpired = "enrollment_key_expired";
-    public const string EnrollmentKeyRevoked = "enrollment_key_revoked";
-    public const string EnrollmentKeyUsed = "enrollment_key_used";
     public const string AgentRevoked = "agent_revoked";
     public const string TokenInvalid = "token_invalid";
     public const string AgentBlocked = "agent_blocked";
     public const string AddressBlocked = "address_blocked";
+    public const string RegistrationClosed = "registration_closed";
+    public const string InstallIdConflict = "install_id_conflict";
     public const string RequestInvalid = "request_invalid";
     public const string ProtocolUnsupported = "protocol_unsupported";
     public const string ConfigInvalid = "config_invalid";

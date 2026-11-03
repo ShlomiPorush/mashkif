@@ -22,10 +22,10 @@
     <value>Exit</value>
   </data>
   <data name="StatusUnregistered" xml:space="preserve">
-    <value>Not enrolled. Enter an enrollment key to start.</value>
+    <value>Not registered yet. Mashkif registers this PC by itself.</value>
   </data>
   <data name="StatusRegistering" xml:space="preserve">
-    <value>Enrolling this PC...</value>
+    <value>Registering this PC...</value>
   </data>
   <data name="StatusConnected" xml:space="preserve">
     <value>Connected. Mashkif is reporting.</value>
@@ -36,14 +36,17 @@
   <data name="StatusRefused" xml:space="preserve">
     <value>The server refuses this PC for now ({0}). Mashkif keeps trying.</value>
   </data>
+  <data name="StatusRefusedRegistrationClosed" xml:space="preserve">
+    <value>Mashkif is not accepting new PCs right now. It tries again every hour.</value>
+  </data>
   <data name="StatusRefusedTokenInvalid" xml:space="preserve">
-    <value>The server no longer recognizes this PC. Enter a new enrollment key.</value>
+    <value>The server does not recognize this PC. Mashkif registers it again by itself.</value>
   </data>
   <data name="StatusRefusedServerChanged" xml:space="preserve">
-    <value>Mashkif now uses a different server. Enter an enrollment key for it.</value>
+    <value>Mashkif now uses a different server. Choose Join again to report to it.</value>
   </data>
   <data name="StatusRevoked" xml:space="preserve">
-    <value>This PC was removed from Mashkif. Enter a new enrollment key to report again.</value>
+    <value>The admin removed this PC from Mashkif. Choose Join again to report again.</value>
   </data>
   <data name="StatusServiceUnavailable" xml:space="preserve">
     <value>The Mashkif service is not running.</value>
@@ -51,46 +54,10 @@
   <data name="StatusLastContact" xml:space="preserve">
     <value>Last contact: {0}</value>
   </data>
-  <data name="MenuEnroll" xml:space="preserve">
-    <value>Enroll this PC...</value>
+  <data name="MenuRejoin" xml:space="preserve">
+    <value>Join again</value>
   </data>
-  <data name="EnrollTitle" xml:space="preserve">
-    <value>Enroll this PC</value>
-  </data>
-  <data name="EnrollPrompt" xml:space="preserve">
-    <value>Enter the enrollment key from the Mashkif admin panel.</value>
-  </data>
-  <data name="EnrollOk" xml:space="preserve">
-    <value>Enroll</value>
-  </data>
-  <data name="EnrollCancel" xml:space="preserve">
-    <value>Cancel</value>
-  </data>
-  <data name="EnrollFormatInvalid" xml:space="preserve">
-    <value>An enrollment key has 32 letters, digits, dashes, or underscores. Check the key and try again.</value>
-  </data>
-  <data name="EnrollErrorKeyInvalid" xml:space="preserve">
-    <value>This enrollment key is not valid. Ask for a new key.</value>
-  </data>
-  <data name="EnrollErrorKeyExpired" xml:space="preserve">
-    <value>This enrollment key expired. Ask for a new key.</value>
-  </data>
-  <data name="EnrollErrorKeyRevoked" xml:space="preserve">
-    <value>This enrollment key was revoked. Ask for a new key.</value>
-  </data>
-  <data name="EnrollErrorKeyUsed" xml:space="preserve">
-    <value>This enrollment key was already used. Ask for a new key.</value>
-  </data>
-  <data name="EnrollErrorAgentRevoked" xml:space="preserve">
-    <value>The server refused this enrollment because the PC was removed. Ask for a new key.</value>
-  </data>
-  <data name="EnrollErrorAlreadyRegistered" xml:space="preserve">
-    <value>This PC is already enrolled.</value>
-  </data>
-  <data name="EnrollErrorInProgress" xml:space="preserve">
-    <value>An enrollment is already running. Wait a moment.</value>
-  </data>
-  <data name="EnrollErrorNotAvailable" xml:space="preserve">
-    <value>Mashkif cannot enroll this PC right now. The service log has the details.</value>
+  <data name="RejoinFailed" xml:space="preserve">
+    <value>Mashkif could not join again right now. The service log has the details.</value>
   </data>
 </root>

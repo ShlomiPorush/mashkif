@@ -5,7 +5,7 @@ using Mashkif.Common.Pipe;
 namespace Mashkif.Tray;
 
 /// <summary>
-/// Notification area icon with the agent status, enrollment, and Exit. A
+/// Notification area icon with the agent status, Join again, and Exit. A
 /// hidden top-level window lets Windows Installer and Restart Manager close
 /// the app during uninstall or upgrade.
 /// </summary>
@@ -22,12 +22,12 @@ internal sealed class TrayContext : ApplicationContext
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu;
     private readonly ToolStripMenuItem _statusItem;
-    private readonly ToolStripMenuItem _enrollItem;
+    private readonly ToolStripMenuItem _rejoinItem;
     private readonly System.Windows.Forms.Timer _timer;
     private readonly SessionEndWindow _sessionWindow;
     private AgentStatus? _status;
     private bool _polling;
-    private EnrollForm? _enrollForm;
+    private bool _rejoining;
 
     public TrayContext(FileLog log, PipeClient pipe)
     {
@@ -39,9 +39,9 @@ internal sealed class TrayContext : ApplicationContext
         };
         _menu.Items.Add(new ToolStripLabel(TrayStrings.ProductName()) { Font = new Font(_menu.Font, FontStyle.Bold) });
         _statusItem = new ToolStripMenuItem(TrayStrings.StatusLine(null)) { Enabled = false };
-        _enrollItem = new ToolStripMenuItem(TrayStrings.Get("MenuEnroll"), null, (_, _) => ShowEnrollForm()) { Visible = false };
+        _rejoinItem = new ToolStripMenuItem(TrayStrings.Get("MenuRejoin"), null, async (_, _) => await RejoinAsync().ConfigureAwait(true)) { Visible = false };
         _menu.Items.Add(_statusItem);
-        _menu.Items.Add(_enrollItem);
+        _menu.Items.Add(_rejoinItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(TrayStrings.MenuExit(), null, (_, _) => Exit("user chose Exit"));
 
@@ -91,48 +91,42 @@ internal sealed class TrayContext : ApplicationContext
         }
 
         _statusItem.Text = line;
-        _enrollItem.Visible = status?.CanEnroll == true;
+        _rejoinItem.Visible = status?.CanRejoin == true;
         var tooltip = $"{TrayStrings.ProductName()}: {TrayStrings.StatusLine(status)}";
         _icon.Text = tooltip.Length <= TooltipLimit ? tooltip : tooltip[..TooltipLimit];
         _timer.Interval = (int)(status?.State == AgentStates.Registering ? FastPollInterval : PollInterval).TotalMilliseconds;
     }
 
-    private void ShowEnrollForm()
+    /// <summary>Asks the service to join again; one click sends one request.</summary>
+    private async Task RejoinAsync()
     {
-        if (_enrollForm is { IsDisposed: false })
+        if (_rejoining)
         {
-            _enrollForm.Activate();
             return;
         }
 
-        _enrollForm = new EnrollForm(SubmitKeyAsync);
-        _enrollForm.FormClosed += (_, _) => _enrollForm = null;
-        _enrollForm.Show();
-    }
-
-    /// <summary>Sends the key; returns null on success or the message to show.</summary>
-    private async Task<string?> SubmitKeyAsync(string key)
-    {
-        var reply = await _pipe.SendAsync(
-            new PipeRequest { Command = PipeProtocol.RegisterCommand, EnrollmentKey = key },
-            CancellationToken.None).ConfigureAwait(true);
-        if (reply.Response is null)
+        _rejoining = true;
+        try
         {
-            return TrayStrings.StatusLine(null);
-        }
+            var reply = await _pipe.SendAsync(new PipeRequest { Command = PipeProtocol.RejoinCommand }, CancellationToken.None).ConfigureAwait(true);
+            if (reply.Response?.Status is { } status)
+            {
+                Show(status);
+            }
 
-        if (reply.Response.Status is { } status)
+            if (reply.Response?.Ok == true)
+            {
+                _log.Write("info", "Asked the service to join again");
+                return;
+            }
+
+            _log.Write("warning", $"Joining again was refused: {reply.Response?.Error ?? reply.Failure.ToString()}");
+            _icon.ShowBalloonTip(10_000, TrayStrings.ProductName(), TrayStrings.Get("RejoinFailed"), ToolTipIcon.Warning);
+        }
+        finally
         {
-            Show(status);
+            _rejoining = false;
         }
-
-        if (reply.Response.Ok)
-        {
-            _log.Write("info", "Enrollment key sent to the service");
-            return null;
-        }
-
-        return TrayStrings.EnrollmentMessage(reply.Response.Error) ?? TrayStrings.StatusLine(_status);
     }
 
     private void Exit(string reason)
@@ -148,7 +142,6 @@ internal sealed class TrayContext : ApplicationContext
         if (disposing)
         {
             _timer.Dispose();
-            _enrollForm?.Dispose();
             _sessionWindow.DestroyHandle();
             _icon.Dispose();
             _menu.Dispose();

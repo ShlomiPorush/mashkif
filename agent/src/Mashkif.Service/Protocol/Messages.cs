@@ -9,8 +9,6 @@ namespace Mashkif.Service.Protocol;
 /// <summary><c>RegisterRequest</c>.</summary>
 internal sealed record RegisterRequest
 {
-    public required string EnrollmentKey { get; init; }
-
     public required Guid InstallId { get; init; }
 
     public required string Token { get; init; }

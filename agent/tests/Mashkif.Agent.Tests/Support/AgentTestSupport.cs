@@ -88,32 +88,6 @@ internal sealed class ScriptedHandler : HttpMessageHandler
     }
 }
 
-/// <summary>An in-memory MSI key source.</summary>
-internal sealed class FakeMsiKey(string? value = null) : IEnrollmentKeySource
-{
-    public string? Value { get; set; } = value;
-
-    public int Reads { get; private set; }
-
-    public bool FailDelete { get; set; }
-
-    public string? Read()
-    {
-        Reads++;
-        return Value;
-    }
-
-    public void Delete()
-    {
-        if (FailDelete)
-        {
-            throw new IOException("delete failed");
-        }
-
-        Value = null;
-    }
-}
-
 /// <summary>Collects log lines, to check that no secret reaches the log.</summary>
 internal sealed class ListLoggerProvider : ILoggerProvider
 {
@@ -234,8 +208,6 @@ internal sealed class EngineFixture : IDisposable
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 11, 2, 9, 0, 0, TimeSpan.Zero));
 
-    public FakeMsiKey MsiKey { get; } = new();
-
     public ListLoggerProvider Logs { get; } = new();
 
     public Guid BootId { get; } = Guid.Parse("7c9e6679-7425-40de-944b-e07fc1f90ae7");
@@ -260,7 +232,6 @@ internal sealed class EngineFixture : IDisposable
             {
                 Store = Store,
                 Origin = origin is null ? null : ServerOrigin.Parse(origin),
-                MsiKey = MsiKey,
                 Http = Http,
                 BootId = BootId,
                 AgentVersion = "0.1.0",
@@ -311,10 +282,16 @@ internal sealed class EngineFixture : IDisposable
     /// <summary>Saves a state directly, as an earlier run would have left it.</summary>
     public void Seed(AgentState state) => State.CreateStore().Save(state);
 
+    /// <summary>The install ID of a seeded state.</summary>
+    public static readonly Guid InstallId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+
+    /// <summary>An active identity on <paramref name="origin"/>, as an earlier run would have saved it.</summary>
+    public static AgentState Registered(string origin = Origin) =>
+        AgentState.Empty with { InstallId = InstallId, Identity = Identity(origin), IdentityState = IdentityStates.Active };
+
     public static AgentIdentity Identity(string origin = Origin, string token = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8") => new()
     {
         ServerOrigin = origin,
-        InstallId = Guid.Parse("11111111-1111-4111-8111-111111111111"),
         Token = token,
         AgentId = Guid.Parse("22222222-2222-4222-8222-222222222222"),
     };

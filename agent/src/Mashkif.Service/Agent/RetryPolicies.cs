@@ -55,6 +55,9 @@ internal static class RetryPolicies
     /// <summary>Most jitter added to the slow retry delay.</summary>
     public static readonly TimeSpan SlowJitter = TimeSpan.FromMinutes(5);
 
+    /// <summary>The slow retry delay with its jitter.</summary>
+    public static TimeSpan SlowWithJitter() => SlowDelay + (SlowJitter * Random.Shared.NextDouble());
+
     public static ResiliencePipeline<Step> Create(TimeSpan maxDelay, TimeProvider time) =>
         new ResiliencePipelineBuilder<Step> { TimeProvider = time }
             .AddRetry(new RetryStrategyOptions<Step>
@@ -70,7 +73,7 @@ internal static class RetryPolicies
                 DelayGenerator = static args => ValueTask.FromResult<TimeSpan?>(args.Outcome.Result.Kind switch
                 {
                     StepKind.RetryAfter => args.Outcome.Result.Delay,
-                    StepKind.Slow => SlowDelay + (SlowJitter * Random.Shared.NextDouble()),
+                    StepKind.Slow => SlowWithJitter(),
                     _ => null,
                 }),
             })

@@ -16,6 +16,7 @@ public sealed class StateTests : IDisposable
 
     private static AgentState Sample() => AgentState.Empty with
     {
+        InstallId = EngineFixture.InstallId,
         Identity = EngineFixture.Identity(),
         IdentityState = IdentityStates.Active,
         IntervalSeconds = 120,
@@ -81,8 +82,15 @@ public sealed class StateTests : IDisposable
     [InlineData("""{"schemaVersion":1,"identityState":"active","intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"identityState":"none","intervalSeconds":5,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"identityState":"none","intervalSeconds":60,"nextSequence":0,"surprise":true}""")]
-    [InlineData("""{"schemaVersion":1,"identity":{"serverOrigin":"https://mashkif.test","installId":"11111111-1111-4111-8111-111111111111","token":"short","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"identityState":"none","pending":{"serverOrigin":"https://mashkif.test/path","key":"ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7","source":"tray","installId":"11111111-1111-4111-8111-111111111111","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"short","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"none","pending":{"serverOrigin":"https://mashkif.test/path","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"none","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"revoked","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","pending":{"serverOrigin":"https://other.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"suspended","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"00000000-0000-0000-0000-000000000000","identityState":"none","intervalSeconds":60,"nextSequence":0}""")]
     public void An_unreadable_or_inconsistent_state_is_a_problem_and_stays_untouched(string content)
     {
         File.WriteAllText(_f.StateFile, content);
@@ -90,6 +98,18 @@ public sealed class StateTests : IDisposable
         Assert.NotNull(load.Problem);
         Assert.Null(load.State);
         Assert.Equal(content, File.ReadAllText(_f.StateFile));
+    }
+
+    [Theory]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"none","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"lastRegisterAttemptUtc":"2026-11-02T09:00:00+00:00","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"revoked","intervalSeconds":60,"nextSequence":0}""")]
+    public void The_states_of_registration_the_401_cycle_and_a_revoke_are_valid(string content)
+    {
+        File.WriteAllText(_f.StateFile, content);
+        var load = _f.CreateStore().Load();
+        Assert.Null(load.Problem);
+        Assert.NotNull(load.State);
     }
 
     [Fact]
@@ -246,25 +266,16 @@ public sealed class StateTests : IDisposable
     }
 
     [Fact]
-    public void The_MSI_key_and_the_server_URL_are_read_from_the_registry()
+    public void The_server_URL_is_read_from_the_registry()
     {
         using var registry = new TestRegistry();
+        Assert.Null(registry.Agent.ReadServerUrl());
         using (var agent = registry.Root.CreateSubKey(registry.Agent.AgentKeyPath))
         {
             agent.SetValue(AgentRegistry.ServerUrlValue, "http://localhost:8080");
         }
 
-        using (var enrollment = registry.Root.CreateSubKey(registry.Agent.EnrollmentKeyPath))
-        {
-            enrollment.SetValue(AgentRegistry.EnrollmentKeyValue, "ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7");
-        }
-
         Assert.Equal("http://localhost:8080", registry.Agent.ReadServerUrl());
-        var source = new RegistryEnrollmentKeySource(registry.Agent);
-        Assert.Equal("ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7", source.Read());
-        source.Delete();
-        Assert.Null(source.Read());
-        source.Delete();
     }
 
     private string Check() => PathSecurity.Check(_f.ProductDirectory, _f.StateDirectory, _f.StateFile, _f.Policy) ?? "(no problem)";

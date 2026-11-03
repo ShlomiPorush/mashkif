@@ -37,7 +37,6 @@ public sealed class ProtocolTests
         var example = Example(VersionFolder, "register-request.json");
         var request = new RegisterRequest
         {
-            EnrollmentKey = example["enrollmentKey"]!.GetValue<string>(),
             InstallId = Guid.Parse(example["installId"]!.GetValue<string>()),
             Token = example["token"]!.GetValue<string>(),
             AgentVersion = AgentService.Version,
@@ -99,6 +98,9 @@ public sealed class ProtocolTests
 
         var revoked = await Answer<HeartbeatResponse>(HttpStatusCode.Forbidden, "agent-error-403.json", (api, ct) => api.HeartbeatAsync(SampleHeartbeat(), "t", ct));
         Assert.Equal("agent_revoked", revoked.ErrorCode);
+
+        var closed = await Answer<RegisterResponse>(HttpStatusCode.Forbidden, "registration-closed-403.json", (api, ct) => api.RegisterAsync(SampleRegister(), ct));
+        Assert.Equal("registration_closed", closed.ErrorCode);
 
         var protocol = await Answer<HeartbeatResponse>(HttpStatusCode.BadRequest, "protocol-error-400.json", (api, ct) => api.HeartbeatAsync(SampleHeartbeat(), "t", ct));
         Assert.Equal("protocol_version_unsupported", protocol.ErrorCode);
@@ -212,7 +214,6 @@ public sealed class ProtocolTests
 
     private static RegisterRequest SampleRegister() => new()
     {
-        EnrollmentKey = "ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7",
         InstallId = Guid.NewGuid(),
         Token = new string('A', 43),
         AgentVersion = "0.1.0",

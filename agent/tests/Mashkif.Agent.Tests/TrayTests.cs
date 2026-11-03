@@ -89,6 +89,7 @@ public sealed class TrayStatusTests
         { Mashkif.Common.Pipe.AgentStates.Connected, null, "StatusConnected" },
         { Mashkif.Common.Pipe.AgentStates.Unreachable, null, "StatusUnreachable" },
         { Mashkif.Common.Pipe.AgentStates.Revoked, null, "StatusRevoked" },
+        { Mashkif.Common.Pipe.AgentStates.Refused, "registration_closed", "StatusRefusedRegistrationClosed" },
         { Mashkif.Common.Pipe.AgentStates.Refused, "token_invalid", "StatusRefusedTokenInvalid" },
         { Mashkif.Common.Pipe.AgentStates.Refused, "server_changed", "StatusRefusedServerChanged" },
     };
@@ -116,21 +117,6 @@ public sealed class TrayStatusTests
         Assert.Equal(TrayStrings.Get("StatusServiceUnavailable", English), TrayStrings.StatusLine(null, English));
     }
 
-    [Theory]
-    [InlineData("enrollment_key_invalid", "EnrollErrorKeyInvalid")]
-    [InlineData("enrollment_key_expired", "EnrollErrorKeyExpired")]
-    [InlineData("enrollment_key_revoked", "EnrollErrorKeyRevoked")]
-    [InlineData("enrollment_key_used", "EnrollErrorKeyUsed")]
-    [InlineData("agent_revoked", "EnrollErrorAgentRevoked")]
-    [InlineData("already_registered", "EnrollErrorAlreadyRegistered")]
-    [InlineData("registration_in_progress", "EnrollErrorInProgress")]
-    [InlineData("enrollment_key_format", "EnrollFormatInvalid")]
-    [InlineData("not_available", "EnrollErrorNotAvailable")]
-    public void Enrollment_errors_have_messages(string code, string key)
-    {
-        Assert.Equal(TrayStrings.Get(key, Hebrew), TrayStrings.EnrollmentMessage(code, Hebrew));
-    }
-
     [Fact]
     public void Every_status_line_fits_the_tooltip_with_the_product_name()
     {
@@ -142,25 +128,5 @@ public sealed class TrayStatusTests
                 Assert.InRange(tooltip.Length, 1, 127);
             }
         }
-    }
-
-    [Fact]
-    public async Task The_enrollment_form_checks_the_key_format_before_sending_it()
-    {
-        var sent = new List<string>();
-        using var form = new EnrollForm(key =>
-        {
-            sent.Add(key);
-            return Task.FromResult<string?>("server says no");
-        });
-        form.SetKey("too-short");
-        await form.SubmitAsync();
-        Assert.Empty(sent);
-        Assert.Equal(TrayStrings.Get("EnrollFormatInvalid"), form.MessageText);
-
-        form.SetKey("  ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7 ");
-        await form.SubmitAsync();
-        Assert.Equal(["ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7"], sent);
-        Assert.Equal("server says no", form.MessageText);
     }
 }

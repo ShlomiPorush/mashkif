@@ -3,15 +3,16 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Mashkif.Agent.Tests.Support;
 using Mashkif.Common.Pipe;
+using Mashkif.Service.Agent;
 using Mashkif.Service.State;
 
 namespace Mashkif.Agent.Tests;
 
 public sealed class EngineTests : IDisposable
 {
-    private const string KeyA = "ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7";
-    private const string KeyB = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC";
     private const string AgentId = "0b5f3c1a-9d2e-4f6a-8b7c-1d2e3f4a5b6c";
+    private const string OldOrigin = "https://old.test";
+    private static readonly string PendingToken = new('P', 43);
 
     private readonly EngineFixture _f = new();
 
@@ -27,44 +28,49 @@ public sealed class EngineTests : IDisposable
 
     private static JsonNode Body(RecordedRequest request) => JsonNode.Parse(request.Body)!;
 
+    private static bool IsRegister(RecordedRequest request) => request.Uri.AbsolutePath.EndsWith("/register", StringComparison.Ordinal);
+
     private static async Task Advance(EngineFixture f, TimeSpan by)
     {
         await Eventually.SettleAsync();
         f.Time.Advance(by);
     }
 
-    private async Task<Mashkif.Service.Agent.AgentEngine> RegisteredAgentAsync(int interval = 60, int next = 60)
+    private async Task<AgentEngine> RegisteredAgentAsync(int interval = 60, int next = 60)
     {
-        var engine = _f.Start();
         _f.Handler.Enqueue(HttpStatusCode.Created, Registered(interval));
         _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(next));
-        Assert.True(engine.Register(KeyA).Ok);
+        var engine = _f.Start();
         await _f.Handler.WaitForRequestsAsync(2);
         await Eventually.TrueAsync(() => engine.Status().State == AgentStates.Connected, "connected");
         return engine;
     }
 
-    [Fact]
-    public async Task Tray_registration_saves_the_identity_before_sending_and_then_sends_heartbeats()
+    /// <summary>The 401 cycle as a restart finds it: the old token kept, a pending token for the same install ID.</summary>
+    private static AgentState InTokenCycle(DateTimeOffset? lastAttempt) => EngineFixture.Registered() with
     {
-        var engine = _f.Start();
-        Assert.Equal(AgentStates.Unregistered, engine.Status().State);
-        Assert.True(engine.Status().CanEnroll);
+        IdentityState = IdentityStates.TokenRejected,
+        Pending = new PendingRegistration { ServerOrigin = EngineFixture.Origin, Token = PendingToken },
+        LastRegisterAttemptUtc = lastAttempt,
+    };
 
-        string? tokenOnDisk = null;
+    // First start.
+
+    [Fact]
+    public async Task The_first_start_registers_by_itself_with_the_install_ID_and_token_saved_before_sending()
+    {
+        JsonNode? onDisk = null;
         _f.Handler.OnRequest = request =>
         {
-            if (request.Uri.AbsolutePath.EndsWith("/register", StringComparison.Ordinal))
+            if (IsRegister(request))
             {
-                tokenOnDisk = JsonNode.Parse(File.ReadAllText(_f.State.StateFile))!["pending"]!["token"]!.GetValue<string>();
+                onDisk = JsonNode.Parse(File.ReadAllText(_f.State.StateFile));
             }
         };
         _f.Handler.Enqueue(HttpStatusCode.Created, Registered(30));
         _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(120));
 
-        var reply = engine.Register(KeyA);
-        Assert.True(reply.Ok);
-        Assert.Equal(AgentStates.Registering, reply.Status!.State);
+        var engine = _f.Start();
         await _f.Handler.WaitForRequestsAsync(2);
 
         var register = _f.Handler.Requests[0];
@@ -72,32 +78,179 @@ public sealed class EngineTests : IDisposable
         Assert.Equal("1", register.ProtocolVersion);
         Assert.Null(register.Authorization);
         var issued = _f.IssuedCredentials.Single();
-        Assert.Equal(issued.Token, Body(register)["token"]!.GetValue<string>());
-        Assert.Equal(issued.Token, tokenOnDisk);
-        Assert.Equal(KeyA, Body(register)["enrollmentKey"]!.GetValue<string>());
-        Assert.Equal("10.0.26100", Body(register)["osVersion"]!.GetValue<string>());
+        var body = Body(register).AsObject();
+        Assert.Equal(["agentVersion", "installId", "osVersion", "token"], body.Select(p => p.Key).Order());
+        Assert.Equal(issued.InstallId.ToString(), body["installId"]!.GetValue<string>());
+        Assert.Equal(issued.Token, body["token"]!.GetValue<string>());
+        Assert.Equal("10.0.26100", body["osVersion"]!.GetValue<string>());
+
+        // Saved before the request went out.
+        Assert.Equal(issued.InstallId.ToString(), onDisk!["installId"]!.GetValue<string>());
+        Assert.Equal(issued.Token, onDisk["pending"]!["token"]!.GetValue<string>());
+        Assert.Equal(EngineFixture.Origin, onDisk["pending"]!["serverOrigin"]!.GetValue<string>());
+        Assert.NotNull(onDisk["lastRegisterAttemptUtc"]);
 
         var heartbeat = _f.Handler.Requests[1];
         Assert.Equal("https://mashkif.test/api/agent/heartbeat", heartbeat.Uri.ToString());
         Assert.Equal($"Bearer {issued.Token}", heartbeat.Authorization);
-        var body = Body(heartbeat);
-        Assert.Equal(0, body["sequence"]!.GetValue<long>());
-        Assert.Equal(30, body["intervalSeconds"]!.GetValue<int>());
-        Assert.Null(body["roundTripMs"]);
-        Assert.Equal(4, body["dnsMs"]!.GetValue<int>());
-        Assert.Null(body["areaCell"]);
-        Assert.Equal("unknown", body["infrastructure"]!.GetValue<string>());
-        Assert.Equal(_f.BootId.ToString(), body["bootId"]!.GetValue<string>());
+        var beat = Body(heartbeat);
+        Assert.Equal(0, beat["sequence"]!.GetValue<long>());
+        Assert.Equal(30, beat["intervalSeconds"]!.GetValue<int>());
+        Assert.Null(beat["roundTripMs"]);
+        Assert.Equal(4, beat["dnsMs"]!.GetValue<int>());
+        Assert.Null(beat["areaCell"]);
+        Assert.Equal("unknown", beat["infrastructure"]!.GetValue<string>());
+        Assert.Equal(_f.BootId.ToString(), beat["bootId"]!.GetValue<string>());
 
         await Eventually.TrueAsync(() => engine.Status().State == AgentStates.Connected, "connected");
         var state = engine.State;
         Assert.Null(state.Pending);
+        Assert.Equal(issued.InstallId, state.InstallId);
         Assert.Equal(IdentityStates.Active, state.IdentityState);
         Assert.Equal(Guid.Parse(AgentId), state.Identity!.AgentId);
         Assert.Equal(120, state.IntervalSeconds);
         Assert.Equal(1, state.NextSequence);
-        Assert.False(engine.Status().CanEnroll);
+        Assert.False(engine.Status().CanRejoin);
     }
+
+    [Fact]
+    public async Task A_failed_first_save_sends_nothing_and_is_tried_again_a_minute_later()
+    {
+        var engine = _f.Create();
+        _f.Store.BeforeReplace = () => throw new IOException("disk full");
+        engine.Initialize();
+        _f.Run(engine);
+        await Eventually.SettleAsync();
+        Assert.Empty(_f.Handler.Requests);
+        Assert.Equal(AgentStates.Unregistered, engine.Status().State);
+
+        _f.Store.BeforeReplace = null;
+        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        await Advance(_f, AgentEngine.SaveRetryDelay);
+        await WaitForState(AgentStates.Connected);
+    }
+
+    [Fact]
+    public async Task Registration_closed_is_shown_and_retried_hourly_with_the_same_body()
+    {
+        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("registration_closed"));
+        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        _f.Start();
+
+        var status = await WaitForState(AgentStates.Refused);
+        Assert.Equal(StatusReasons.RegistrationClosed, status.Reason);
+        Assert.False(status.CanRejoin);
+        await Advance(_f, TimeSpan.FromMinutes(59));
+        await Eventually.SettleAsync();
+        Assert.Single(_f.Handler.Requests);
+
+        _f.Time.Advance(TimeSpan.FromMinutes(6));
+        await _f.Handler.WaitForRequestsAsync(2);
+        Assert.Equal(_f.Handler.Requests[0].Body, _f.Handler.Requests[1].Body);
+        await WaitForState(AgentStates.Connected);
+    }
+
+    [Fact]
+    public async Task An_install_ID_conflict_at_the_first_registration_keeps_the_IDs_and_retries_hourly()
+    {
+        _f.Handler.Enqueue(HttpStatusCode.Conflict, Error("install_id_conflict"));
+        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        var engine = _f.Start();
+
+        var status = await WaitForState(AgentStates.Refused);
+        Assert.Equal(StatusReasons.InstallIdConflict, status.Reason);
+        await Advance(_f, TimeSpan.FromMinutes(59));
+        await Eventually.SettleAsync();
+        Assert.Single(_f.Handler.Requests);
+
+        _f.Time.Advance(TimeSpan.FromMinutes(6));
+        await _f.Handler.WaitForRequestsAsync(2);
+        Assert.Equal(_f.Handler.Requests[0].Body, _f.Handler.Requests[1].Body);
+        await WaitForState(AgentStates.Connected);
+        Assert.Single(_f.IssuedCredentials);
+        Assert.Equal(_f.IssuedCredentials[0].InstallId, engine.State.InstallId);
+    }
+
+    [Fact]
+    public async Task A_lost_register_response_is_retried_with_the_identical_body()
+    {
+        _f.Handler.EnqueueLost();
+        _f.Handler.Enqueue(HttpStatusCode.OK, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        _f.Start();
+
+        await _f.Handler.WaitForRequestsAsync(1);
+        await Advance(_f, TimeSpan.FromSeconds(60));
+        await _f.Handler.WaitForRequestsAsync(2);
+        Assert.Equal(_f.Handler.Requests[0].Body, _f.Handler.Requests[1].Body);
+        await WaitForState(AgentStates.Connected);
+    }
+
+    [Fact]
+    public async Task A_crash_after_saving_the_registration_resends_the_same_registration_after_a_restart()
+    {
+        _f.Handler.Enqueue(async (_, token) =>
+        {
+            await Task.Delay(Timeout.Infinite, token);
+            throw new InvalidOperationException("unreachable");
+        });
+        _f.Start();
+        await _f.Handler.WaitForRequestsAsync(1);
+        await _f.StopAllAsync();
+
+        _f.Handler.Enqueue(HttpStatusCode.OK, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        var restarted = _f.Start();
+        await _f.Handler.WaitForRequestsAsync(3);
+        Assert.Equal(_f.Handler.Requests[0].Body, _f.Handler.Requests[1].Body);
+        await Eventually.TrueAsync(() => restarted.Status().State == AgentStates.Connected, "connected after restart");
+        Assert.Single(_f.IssuedCredentials);
+    }
+
+    [Fact]
+    public async Task A_failed_state_write_after_a_successful_register_retries_and_is_answered_again()
+    {
+        var failNext = false;
+        _f.Handler.OnRequest = request => failNext = IsRegister(request) && _f.Handler.Requests.Count == 0;
+        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        var engine = _f.Create();
+        engine.Initialize();
+        _f.Store.BeforeReplace = () =>
+        {
+            if (failNext)
+            {
+                failNext = false;
+                throw new IOException("disk full");
+            }
+        };
+        _f.Run(engine);
+
+        await _f.Handler.WaitForRequestsAsync(1);
+        await Eventually.TrueAsync(() => engine.Status().State == AgentStates.Registering, "still registering");
+        await Advance(_f, TimeSpan.FromSeconds(60));
+        await _f.Handler.WaitForRequestsAsync(2);
+        Assert.Equal(_f.Handler.Requests[0].Body, _f.Handler.Requests[1].Body);
+        await WaitForState(AgentStates.Connected);
+        await _f.Handler.WaitForRequestsAsync(3);
+        await Eventually.SettleAsync();
+        Assert.NotNull(_f.State.CreateStore().Load().State!.Identity);
+    }
+
+    [Fact]
+    public async Task Unknown_response_fields_are_ignored()
+    {
+        _f.Handler.Enqueue(HttpStatusCode.Created, Registered().Replace("}", ""","futureField":{"a":1}}""", StringComparison.Ordinal));
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        _f.Start();
+        await WaitForState(AgentStates.Connected);
+    }
+
+    // Heartbeats.
 
     [Fact]
     public async Task The_next_heartbeat_waits_for_the_interval_from_the_last_response()
@@ -128,7 +281,6 @@ public sealed class EngineTests : IDisposable
 
         await Advance(_f, TimeSpan.FromSeconds(60));
         await _f.Handler.WaitForRequestsAsync(3);
-        await Eventually.TrueAsync(() => _f.Handler.Requests.Count == 3 && _f.Handler.Requests[2].Body.Length > 0, "lost attempt");
         Assert.Equal(AgentStates.Unreachable, (await WaitForState(AgentStates.Unreachable)).State);
 
         // The retry comes after the backoff, never later than the interval.
@@ -231,55 +383,6 @@ public sealed class EngineTests : IDisposable
         Assert.Equal(AgentStates.Connected, engine.Status().State);
     }
 
-    [Fact]
-    public async Task A_401_keeps_the_token_and_a_later_200_makes_it_active_again_also_after_a_restart()
-    {
-        var engine = await RegisteredAgentAsync();
-        var token = engine.State.Identity!.Token;
-        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
-        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-
-        await Advance(_f, TimeSpan.FromSeconds(60));
-        await _f.Handler.WaitForRequestsAsync(3);
-        var status = await WaitForState(AgentStates.Refused);
-        Assert.Equal(StatusReasons.TokenInvalid, status.Reason);
-        Assert.True(status.CanEnroll);
-        Assert.Equal(IdentityStates.TokenRejected, _f.State.CreateStore().Load().State!.IdentityState);
-        Assert.Equal(token, engine.State.Identity!.Token);
-
-        await Advance(_f, TimeSpan.FromMinutes(66));
-        await _f.Handler.WaitForRequestsAsync(4);
-        status = await WaitForState(AgentStates.Connected);
-        Assert.Null(status.Reason);
-        Assert.False(status.CanEnroll);
-        Assert.Equal(IdentityStates.Active, _f.State.CreateStore().Load().State!.IdentityState);
-
-        await _f.StopAllAsync();
-        var restarted = _f.Create();
-        restarted.Initialize();
-        Assert.Equal(IdentityStates.Active, restarted.State.IdentityState);
-        Assert.False(restarted.Status().CanEnroll);
-    }
-
-    [Fact]
-    public async Task A_revoked_agent_discards_its_identity_and_can_enroll_again()
-    {
-        var engine = await RegisteredAgentAsync();
-        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("agent_revoked"));
-
-        await Advance(_f, TimeSpan.FromSeconds(60));
-        var status = await WaitForState(AgentStates.Revoked);
-        Assert.True(status.CanEnroll);
-        Assert.Null(engine.State.Identity);
-        Assert.Null(_f.State.CreateStore().Load().State!.Identity);
-
-        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
-        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-        Assert.True(engine.Register(KeyB).Ok);
-        await WaitForState(AgentStates.Connected);
-        Assert.NotEqual(_f.IssuedCredentials[0].Token, engine.State.Identity!.Token);
-    }
-
     [Theory]
     [InlineData("agent_blocked")]
     [InlineData("address_blocked")]
@@ -331,80 +434,350 @@ public sealed class EngineTests : IDisposable
         await WaitForState(AgentStates.Connected);
     }
 
+    // Revoke.
+
     [Fact]
-    public async Task Unknown_response_fields_are_ignored()
+    public async Task A_revoke_stops_reporting_survives_a_restart_and_never_registers_by_itself()
     {
+        var engine = await RegisteredAgentAsync();
+        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("agent_revoked"));
+
+        await Advance(_f, TimeSpan.FromSeconds(60));
+        var status = await WaitForState(AgentStates.Revoked);
+        Assert.True(status.CanRejoin);
+        Assert.Null(engine.State.Identity);
+        Assert.Null(engine.State.Pending);
+        var saved = _f.State.CreateStore().Load().State!;
+        Assert.Equal(IdentityStates.Revoked, saved.IdentityState);
+        Assert.Null(saved.Identity);
+
+        await Advance(_f, TimeSpan.FromHours(3));
+        await Eventually.SettleAsync();
+        Assert.Equal(3, _f.Handler.Requests.Count);
+
+        await _f.StopAllAsync();
+        var restarted = _f.Start();
+        await Advance(_f, TimeSpan.FromHours(3));
+        await Eventually.SettleAsync();
+        Assert.Equal(AgentStates.Revoked, restarted.Status().State);
+        Assert.Equal(3, _f.Handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A_revoke_answered_to_the_first_registration_leaves_the_agent_revoked()
+    {
+        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("agent_revoked"));
         var engine = _f.Start();
-        _f.Handler.Enqueue(HttpStatusCode.Created, Registered().Replace("}", ""","futureField":{"a":1}}""", StringComparison.Ordinal));
+        var status = await WaitForState(AgentStates.Revoked);
+        Assert.True(status.CanRejoin);
+        Assert.Null(engine.State.Pending);
+        await Advance(_f, TimeSpan.FromHours(2));
+        await Eventually.SettleAsync();
+        Assert.Single(_f.Handler.Requests);
+    }
+
+    // The 401 cycle.
+
+    [Fact]
+    public async Task A_401_keeps_the_token_and_registers_a_pending_token_for_the_same_install_ID_when_it_fails_again()
+    {
+        // The agent was deleted by cleanup: 401, then 401 again, then 201.
+        var engine = await RegisteredAgentAsync();
+        var installId = engine.State.InstallId;
+        var oldToken = engine.State.Identity!.Token;
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+
+        await Advance(_f, TimeSpan.FromSeconds(60));
+        var status = await WaitForState(AgentStates.Refused);
+        Assert.Equal(StatusReasons.TokenInvalid, status.Reason);
+        Assert.False(status.CanRejoin);
+        var saved = _f.State.CreateStore().Load().State!;
+        Assert.Equal(IdentityStates.TokenRejected, saved.IdentityState);
+        Assert.Equal(oldToken, saved.Identity!.Token);
+        Assert.Equal(installId, saved.InstallId);
+        var pendingToken = saved.Pending!.Token;
+        Assert.NotEqual(oldToken, pendingToken);
+
+        // Nothing for the next hour.
+        await Advance(_f, TimeSpan.FromMinutes(59));
+        await Eventually.SettleAsync();
+        Assert.Equal(3, _f.Handler.Requests.Count);
+
+        // Then the old token first, and on 401 the pending token for the same install ID.
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
         _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-        Assert.True(engine.Register(KeyA).Ok);
+        _f.Time.Advance(TimeSpan.FromMinutes(7));
+        await _f.Handler.WaitForRequestsAsync(6);
+        Assert.Equal($"Bearer {oldToken}", _f.Handler.Requests[3].Authorization);
+        var register = Body(_f.Handler.Requests[4]);
+        Assert.True(IsRegister(_f.Handler.Requests[4]));
+        Assert.Equal(installId.ToString(), register["installId"]!.GetValue<string>());
+        Assert.Equal(pendingToken, register["token"]!.GetValue<string>());
+        Assert.Equal($"Bearer {pendingToken}", _f.Handler.Requests[5].Authorization);
+
         await WaitForState(AgentStates.Connected);
+        var state = engine.State;
+        Assert.Equal(IdentityStates.Active, state.IdentityState);
+        Assert.Equal(pendingToken, state.Identity!.Token);
+        Assert.Equal(installId, state.InstallId);
+        Assert.Null(state.Pending);
+    }
+
+    [Fact]
+    public async Task A_401_then_409_then_a_200_keeps_the_old_token_and_drops_the_pending_one_also_after_a_restart()
+    {
+        var engine = await RegisteredAgentAsync();
+        var oldToken = engine.State.Identity!.Token;
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        await Advance(_f, TimeSpan.FromSeconds(60));
+        await WaitForState(AgentStates.Refused);
+        var pendingToken = engine.State.Pending!.Token;
+
+        // The server still knows the install ID with the old token.
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        _f.Handler.Enqueue(HttpStatusCode.Conflict, Error("install_id_conflict"));
+        await Advance(_f, TimeSpan.FromMinutes(66));
+        await _f.Handler.WaitForRequestsAsync(5);
+        await Eventually.SettleAsync();
+        Assert.Equal(IdentityStates.TokenRejected, engine.State.IdentityState);
+        Assert.Equal(oldToken, engine.State.Identity!.Token);
+        Assert.Equal(pendingToken, engine.State.Pending!.Token);
+
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        await Advance(_f, TimeSpan.FromMinutes(66));
+        await _f.Handler.WaitForRequestsAsync(6);
+        Assert.Equal($"Bearer {oldToken}", _f.Handler.Requests[5].Authorization);
+        var status = await WaitForState(AgentStates.Connected);
+        Assert.Null(status.Reason);
+        Assert.Null(engine.State.Pending);
+        Assert.Equal(oldToken, engine.State.Identity!.Token);
+
+        await _f.StopAllAsync();
+        var restarted = _f.Create();
+        restarted.Initialize();
+        Assert.Equal(IdentityStates.Active, restarted.State.IdentityState);
+        Assert.Null(restarted.State.Pending);
+    }
+
+    [Fact]
+    public async Task A_lost_register_response_in_the_cycle_is_retried_at_the_next_hour_with_the_same_body()
+    {
+        await RegisteredAgentAsync();
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        await Advance(_f, TimeSpan.FromSeconds(60));
+        await WaitForState(AgentStates.Refused);
+
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        _f.Handler.EnqueueLost();
+        await Advance(_f, TimeSpan.FromMinutes(66));
+        await _f.Handler.WaitForRequestsAsync(5);
+
+        // No backoff retry inside the hour.
+        await Advance(_f, TimeSpan.FromMinutes(59));
+        await Eventually.SettleAsync();
+        Assert.Equal(5, _f.Handler.Requests.Count);
+
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        _f.Handler.Enqueue(HttpStatusCode.OK, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        _f.Time.Advance(TimeSpan.FromMinutes(7));
+        await _f.Handler.WaitForRequestsAsync(8);
+        Assert.Equal(_f.Handler.Requests[4].Body, _f.Handler.Requests[6].Body);
+        await WaitForState(AgentStates.Connected);
+    }
+
+    [Fact]
+    public async Task A_failed_save_of_the_attempt_time_sends_no_register_request()
+    {
+        await RegisteredAgentAsync();
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        await Advance(_f, TimeSpan.FromSeconds(60));
+        await WaitForState(AgentStates.Refused);
+        var before = _f.State.CreateStore().Load().State!;
+
+        // The heartbeat of the cycle arms a failure of the next save, which is the attempt time.
+        var arm = false;
+        _f.Handler.OnRequest = request => arm = !IsRegister(request);
+        _f.Store.BeforeReplace = () =>
+        {
+            if (arm)
+            {
+                arm = false;
+                throw new IOException("disk full");
+            }
+        };
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        await Advance(_f, TimeSpan.FromMinutes(66));
+        await _f.Handler.WaitForRequestsAsync(4);
+        await Eventually.SettleAsync();
+
+        Assert.Equal(4, _f.Handler.Requests.Count);
+        Assert.DoesNotContain(_f.Handler.Requests.Skip(1), IsRegister);
+        Assert.Equal(before.LastRegisterAttemptUtc, _f.State.CreateStore().Load().State!.LastRegisterAttemptUtc);
     }
 
     [Theory]
-    [InlineData("enrollment_key_invalid")]
-    [InlineData("enrollment_key_expired")]
-    [InlineData("enrollment_key_revoked")]
-    [InlineData("enrollment_key_used")]
-    public async Task A_refused_key_drops_the_registration_and_says_why(string code)
+    [InlineData(59, false)]
+    [InlineData(61, true)]
+    public async Task The_hourly_register_limit_of_the_cycle_holds_across_a_restart(int minutesAgo, bool registersAtOnce)
     {
-        var engine = _f.Start();
-        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error(code));
-        Assert.True(engine.Register(KeyA).Ok);
-
-        await Eventually.TrueAsync(() => engine.State.Pending is null, "pending dropped");
-        var status = engine.Status();
-        Assert.Equal(AgentStates.Unregistered, status.State);
-        Assert.Equal(code, status.EnrollmentError);
-        Assert.True(status.CanEnroll);
-        Assert.Null(_f.State.CreateStore().Load().State!.Pending);
-    }
-
-    [Fact]
-    public async Task An_install_id_conflict_retries_at_once_with_a_new_install_id_and_token_and_the_same_key()
-    {
-        var engine = _f.Start();
-        _f.Handler.Enqueue(HttpStatusCode.Conflict, Error("install_id_conflict"));
+        _f.Seed(InTokenCycle(_f.Time.GetUtcNow() - TimeSpan.FromMinutes(minutesAgo)));
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        _f.Handler.Enqueue(registersAtOnce ? HttpStatusCode.Created : HttpStatusCode.Unauthorized, registersAtOnce ? Registered() : Error("token_invalid"));
         _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
         _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-        Assert.True(engine.Register(KeyA).Ok);
+        _f.Start();
 
-        await _f.Handler.WaitForRequestsAsync(2);
-        var first = Body(_f.Handler.Requests[0]);
-        var second = Body(_f.Handler.Requests[1]);
-        Assert.Equal(KeyA, second["enrollmentKey"]!.GetValue<string>());
-        Assert.NotEqual(first["installId"]!.GetValue<string>(), second["installId"]!.GetValue<string>());
-        Assert.NotEqual(first["token"]!.GetValue<string>(), second["token"]!.GetValue<string>());
-        await WaitForState(AgentStates.Connected);
-        Assert.Equal(_f.IssuedCredentials[1].Token, engine.State.Identity!.Token);
-    }
-
-    [Fact]
-    public async Task A_lost_register_response_is_retried_with_the_identical_body()
-    {
-        var engine = _f.Start();
-        _f.Handler.EnqueueLost();
-        _f.Handler.Enqueue(HttpStatusCode.OK, Registered());
-        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-        Assert.True(engine.Register(KeyA).Ok);
-
+        // A restart sends the old token's heartbeat at once.
         await _f.Handler.WaitForRequestsAsync(1);
-        await Advance(_f, TimeSpan.FromSeconds(60));
-        await _f.Handler.WaitForRequestsAsync(2);
-        Assert.Equal(_f.Handler.Requests[0].Body, _f.Handler.Requests[1].Body);
+        await Eventually.SettleAsync();
+        if (registersAtOnce)
+        {
+            await _f.Handler.WaitForRequestsAsync(2);
+            Assert.True(IsRegister(_f.Handler.Requests[1]));
+            return;
+        }
+
+        Assert.Single(_f.Handler.Requests);
+
+        // The register request waits for the end of the hour: one more minute.
+        await Advance(_f, TimeSpan.FromMinutes(1));
+        await _f.Handler.WaitForRequestsAsync(3);
+        Assert.False(IsRegister(_f.Handler.Requests[1]));
+        Assert.True(IsRegister(_f.Handler.Requests[2]));
         await WaitForState(AgentStates.Connected);
     }
 
     [Fact]
-    public async Task A_crash_after_saving_the_registration_resends_the_same_registration_after_a_restart()
+    public async Task A_clock_set_back_allows_a_register_attempt_and_the_next_one_waits_an_hour()
     {
+        // The saved attempt time is later than the clock: the clock was set back.
+        _f.Seed(InTokenCycle(_f.Time.GetUtcNow() + TimeSpan.FromHours(3)));
+        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
+        _f.Handler.EnqueueLost();
         var engine = _f.Start();
+
+        await _f.Handler.WaitForRequestsAsync(2);
+        Assert.True(IsRegister(_f.Handler.Requests[1]));
+        await Eventually.TrueAsync(() => engine.State.LastRegisterAttemptUtc == _f.Time.GetUtcNow(), "attempt time saved");
+    }
+
+    [Theory]
+    [InlineData(null, 0, true)]
+    [InlineData(0, 59, false)]
+    [InlineData(0, 60, true)]
+    [InlineData(0, 61, true)]
+    [InlineData(180, 0, true)]
+    public void The_cycle_register_limit_allows_one_attempt_an_hour_and_one_after_a_clock_change(int? lastMinutes, int nowMinutes, bool allowed)
+    {
+        var start = new DateTimeOffset(2026, 11, 2, 9, 0, 0, TimeSpan.Zero);
+        DateTimeOffset? last = lastMinutes is { } m ? start + TimeSpan.FromMinutes(m) : null;
+        Assert.Equal(allowed, AgentEngine.CycleRegisterAllowed(last, start + TimeSpan.FromMinutes(nowMinutes)));
+    }
+
+    [Fact]
+    public void A_clock_set_forward_allows_at_most_one_early_attempt()
+    {
+        var saved = new DateTimeOffset(2026, 11, 2, 9, 0, 0, TimeSpan.Zero);
+        var jumped = saved + TimeSpan.FromHours(5);
+        Assert.True(AgentEngine.CycleRegisterAllowed(saved, jumped));
+
+        // The attempt saves the new time; the next one waits a full hour from it.
+        Assert.False(AgentEngine.CycleRegisterAllowed(jumped, jumped + TimeSpan.FromMinutes(59)));
+    }
+
+    [Fact]
+    public void Rejoin_does_not_apply_to_the_401_cycle_and_keeps_the_install_ID()
+    {
+        _f.Seed(InTokenCycle(lastAttempt: null));
+        var engine = _f.Create();
+        engine.Initialize();
+        var reply = engine.Rejoin();
+        Assert.Equal(PipeErrors.NotRejoinable, reply.Error);
+        Assert.False(reply.Status!.CanRejoin);
+        Assert.Equal(EngineFixture.InstallId, engine.State.InstallId);
+    }
+
+    // A changed server and joining again.
+
+    public static TheoryData<string> RejoinCases => ["revoked", "identity_on_old_server", "pending_on_old_server", "both_on_old_server"];
+
+    private static AgentState RejoinSeed(string name) => name switch
+    {
+        "revoked" => AgentState.Empty with { InstallId = EngineFixture.InstallId, IdentityState = IdentityStates.Revoked },
+        "identity_on_old_server" => EngineFixture.Registered(OldOrigin),
+        "pending_on_old_server" => AgentState.Empty with
+        {
+            InstallId = EngineFixture.InstallId,
+            Pending = new PendingRegistration { ServerOrigin = OldOrigin, Token = PendingToken },
+        },
+        _ => EngineFixture.Registered(OldOrigin) with
+        {
+            IdentityState = IdentityStates.TokenRejected,
+            Pending = new PendingRegistration { ServerOrigin = OldOrigin, Token = PendingToken },
+        },
+    };
+
+    [Theory]
+    [MemberData(nameof(RejoinCases))]
+    public async Task Nothing_is_sent_until_the_user_joins_again_which_registers_a_new_install_ID_and_token(string seed)
+    {
+        var old = RejoinSeed(seed);
+        _f.Seed(old);
+        var engine = _f.Start();
+        await Advance(_f, TimeSpan.FromHours(2));
+        await Eventually.SettleAsync();
+
+        // A lost registration from before the change is not retried either.
+        Assert.Empty(_f.Handler.Requests);
+        var status = engine.Status();
+        Assert.True(status.CanRejoin);
+        Assert.Equal(seed == "revoked" ? AgentStates.Revoked : AgentStates.Refused, status.State);
+        Assert.Equal(seed == "revoked" ? null : StatusReasons.ServerChanged, status.Reason);
+
+        // The file is read while the register request is out, when the service is not writing it.
+        AgentState? saved = null;
+        _f.Handler.OnRequest = request => saved ??= IsRegister(request) ? _f.State.CreateStore().Load().State : null;
+        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        var reply = engine.Rejoin();
+        Assert.True(reply.Ok);
+        Assert.False(reply.Status!.CanRejoin);
+        await _f.Handler.WaitForRequestsAsync(1);
+
+        // One atomic write: a new install ID and a pending token for this server, nothing old left.
+        var issued = _f.IssuedCredentials.Single();
+        Assert.NotNull(saved);
+        Assert.Equal(issued.InstallId, saved.InstallId);
+        Assert.Null(saved.Identity);
+        Assert.Equal(IdentityStates.None, saved.IdentityState);
+        Assert.Equal(new PendingRegistration { ServerOrigin = EngineFixture.Origin, Token = issued.Token }, saved.Pending);
+
+        await WaitForState(AgentStates.Connected);
+        var register = Body(_f.Handler.Requests[0]);
+        Assert.Equal(issued.InstallId.ToString(), register["installId"]!.GetValue<string>());
+        Assert.Equal(issued.Token, register["token"]!.GetValue<string>());
+        Assert.All(_f.Handler.Requests, r =>
+        {
+            Assert.Equal("mashkif.test", r.Uri.Host);
+            Assert.DoesNotContain(EngineFixture.Identity().Token, r.Body + r.Authorization, StringComparison.Ordinal);
+            Assert.DoesNotContain(PendingToken, r.Body + r.Authorization, StringComparison.Ordinal);
+        });
+    }
+
+    [Theory]
+    [MemberData(nameof(RejoinCases))]
+    public async Task A_rejoin_survives_a_restart_and_registers_the_same_new_identity(string seed)
+    {
+        _f.Seed(RejoinSeed(seed));
         _f.Handler.Enqueue(async (_, token) =>
         {
             await Task.Delay(Timeout.Infinite, token);
             throw new InvalidOperationException("unreachable");
         });
-        Assert.True(engine.Register(KeyA).Ok);
+        var engine = _f.Start();
+        Assert.True(engine.Rejoin().Ok);
         await _f.Handler.WaitForRequestsAsync(1);
         await _f.StopAllAsync();
 
@@ -414,335 +787,89 @@ public sealed class EngineTests : IDisposable
         await _f.Handler.WaitForRequestsAsync(3);
         Assert.Equal(_f.Handler.Requests[0].Body, _f.Handler.Requests[1].Body);
         await Eventually.TrueAsync(() => restarted.Status().State == AgentStates.Connected, "connected after restart");
+        Assert.Equal(_f.IssuedCredentials.Single().InstallId, restarted.State.InstallId);
+    }
+
+    [Theory]
+    [MemberData(nameof(RejoinCases))]
+    public void A_failed_rejoin_write_leaves_the_old_state_whole(string seed)
+    {
+        var old = RejoinSeed(seed);
+        _f.Seed(old);
+        var engine = _f.Create();
+        engine.Initialize();
+        _f.Store.BeforeReplace = () => throw new IOException("disk full");
+
+        var reply = engine.Rejoin();
+        Assert.Equal(PipeErrors.NotAvailable, reply.Error);
+        Assert.True(reply.Status!.CanRejoin);
+        Assert.Equal(old, engine.State);
+        _f.Store.BeforeReplace = null;
+        Assert.Equal(old, _f.State.CreateStore().Load().State);
+    }
+
+    [Fact]
+    public async Task Rejoin_is_refused_while_registering_and_while_connected()
+    {
+        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("registration_closed"));
+        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
+        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
+        var engine = _f.Start();
+        await WaitForState(AgentStates.Refused);
+        Assert.Equal(PipeErrors.NotRejoinable, engine.Rejoin().Error);
+
+        await Advance(_f, TimeSpan.FromMinutes(66));
+        await WaitForState(AgentStates.Connected);
+        Assert.Equal(PipeErrors.NotRejoinable, engine.Rejoin().Error);
         Assert.Single(_f.IssuedCredentials);
     }
 
-    [Fact]
-    public async Task A_failed_state_write_after_a_successful_register_retries_and_is_answered_again()
-    {
-        var engine = _f.Start();
-        var failNext = false;
-        _f.Handler.OnRequest = request => failNext = request.Uri.AbsolutePath.EndsWith("/register", StringComparison.Ordinal) && _f.Handler.Requests.Count == 0;
-        _f.Store.BeforeReplace = () =>
-        {
-            if (failNext)
-            {
-                failNext = false;
-                throw new IOException("disk full");
-            }
-        };
-        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
-        _f.Handler.Enqueue(HttpStatusCode.OK, Registered());
-        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-        Assert.True(engine.Register(KeyA).Ok);
-
-        await _f.Handler.WaitForRequestsAsync(1);
-        await Eventually.TrueAsync(() => engine.Status().State == AgentStates.Registering, "still registering");
-        await Advance(_f, TimeSpan.FromSeconds(60));
-        await _f.Handler.WaitForRequestsAsync(2);
-        Assert.Equal(_f.Handler.Requests[0].Body, _f.Handler.Requests[1].Body);
-        await WaitForState(AgentStates.Connected);
-        Assert.NotNull(_f.State.CreateStore().Load().State!.Identity);
-    }
+    // Configuration, state, and secrets.
 
     [Fact]
-    public async Task Register_while_a_heartbeat_is_in_flight_cancels_it_and_keeps_the_old_identity_until_success()
+    public async Task An_invalid_SERVER_URL_sends_nothing_and_creates_nothing()
     {
-        var old = EngineFixture.Identity();
-        _f.Seed(AgentState.Empty with { Identity = old, IdentityState = IdentityStates.TokenRejected });
-        var inFlight = new TaskCompletionSource();
-        _f.Handler.Enqueue(async (_, token) =>
-        {
-            inFlight.SetResult();
-            await Task.Delay(Timeout.Infinite, token);
-            throw new InvalidOperationException("unreachable");
-        });
-        var engine = _f.Start();
-        await inFlight.Task;
-
-        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("enrollment_key_used"));
-        // After the refusal the kept identity sends its heartbeat again and is still rejected.
-        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
-        Assert.True(engine.Register(KeyB).Ok);
-        await _f.Handler.WaitForRequestsAsync(2);
-        Assert.EndsWith("/register", _f.Handler.Requests[1].Uri.AbsolutePath, StringComparison.Ordinal);
-
-        // A wrong key keeps the old identity.
-        await Eventually.TrueAsync(() => engine.State.Pending is null, "pending dropped");
-        Assert.Equal(old, engine.State.Identity);
-        Assert.Equal(IdentityStates.TokenRejected, engine.State.IdentityState);
-        Assert.Equal(StatusReasons.EnrollmentKeyUsed, engine.Status().EnrollmentError);
-        Assert.Equal(StatusReasons.TokenInvalid, engine.Status().Reason);
-        await _f.Handler.WaitForRequestsAsync(3);
-
-        // A right key replaces it.
-        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
-        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-        Assert.True(engine.Register(KeyA).Ok);
-        await WaitForState(AgentStates.Connected);
-        Assert.NotEqual(old.Token, engine.State.Identity!.Token);
-        Assert.Equal(IdentityStates.Active, engine.State.IdentityState);
-    }
-
-    [Fact]
-    public async Task A_new_registration_that_is_revoked_after_a_lost_response_keeps_the_old_identity()
-    {
-        var old = EngineFixture.Identity();
-        _f.Seed(AgentState.Empty with { Identity = old, IdentityState = IdentityStates.TokenRejected });
-        _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
-        var engine = _f.Start();
-        await _f.Handler.WaitForRequestsAsync(1);
-
-        // B is created on the server, its answer is lost, the admin revokes B,
-        // and the retry gets agent_revoked.
-        _f.Handler.EnqueueLost();
-        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("agent_revoked"));
-        Assert.True(engine.Register(KeyB).Ok);
-        await _f.Handler.WaitForRequestsAsync(2);
-        await Advance(_f, TimeSpan.FromSeconds(60));
-        await _f.Handler.WaitForRequestsAsync(3);
-        Assert.Equal(_f.Handler.Requests[1].Body, _f.Handler.Requests[2].Body);
-
-        await Eventually.TrueAsync(() => engine.State.Pending is null, "pending dropped");
-        Assert.Equal(old, engine.State.Identity);
-        Assert.Equal(IdentityStates.TokenRejected, engine.State.IdentityState);
-        var status = engine.Status();
-        Assert.Equal(AgentStates.Refused, status.State);
-        Assert.Equal(StatusReasons.TokenInvalid, status.Reason);
-        Assert.Equal(StatusReasons.AgentRevoked, status.EnrollmentError);
-        Assert.Equal(old, _f.State.CreateStore().Load().State!.Identity);
-    }
-
-    [Fact]
-    public async Task A_revoked_new_registration_without_an_identity_leaves_the_agent_revoked()
-    {
-        var engine = _f.Start();
-        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("agent_revoked"));
-        Assert.True(engine.Register(KeyA).Ok);
-        var status = await WaitForState(AgentStates.Revoked);
-        Assert.True(status.CanEnroll);
-        Assert.Equal(StatusReasons.AgentRevoked, status.EnrollmentError);
-    }
-
-    [Fact]
-    public async Task A_changed_server_never_gets_the_old_token_and_the_old_identity_stays_until_a_new_enrollment_succeeds()
-    {
-        var old = EngineFixture.Identity(origin: "https://old.test");
-        _f.Seed(AgentState.Empty with { Identity = old, IdentityState = IdentityStates.Active });
-        var engine = _f.Start();
-        await Eventually.SettleAsync();
-
-        var status = engine.Status();
-        Assert.Equal(AgentStates.Refused, status.State);
-        Assert.Equal(StatusReasons.ServerChanged, status.Reason);
-        Assert.True(status.CanEnroll);
-        Assert.Empty(_f.Handler.Requests);
-
-        _f.Handler.Enqueue(HttpStatusCode.Forbidden, Error("enrollment_key_expired"));
-        Assert.True(engine.Register(KeyA).Ok);
-        await Eventually.TrueAsync(() => engine.State.Pending is null, "pending dropped");
-        Assert.Equal(old, engine.State.Identity);
-
-        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
-        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-        Assert.True(engine.Register(KeyB).Ok);
-        await WaitForState(AgentStates.Connected);
-        Assert.Equal("https://mashkif.test", engine.State.Identity!.ServerOrigin);
-        Assert.All(_f.Handler.Requests, r =>
-        {
-            Assert.Equal("mashkif.test", r.Uri.Host);
-            Assert.DoesNotContain(old.Token, r.Body + r.Authorization, StringComparison.Ordinal);
-        });
-    }
-
-    [Fact]
-    public void The_register_command_is_refused_with_a_reason()
-    {
-        var engine = _f.Create();
-        engine.Initialize();
-        Assert.Equal(PipeErrors.EnrollmentKeyFormat, engine.Register("short").Error);
-        Assert.True(engine.Register(KeyA).Ok);
-        Assert.Equal(PipeErrors.RegistrationInProgress, engine.Register(KeyB).Error);
-    }
-
-    [Fact]
-    public void The_register_command_is_refused_while_registered()
-    {
-        _f.Seed(AgentState.Empty with { Identity = EngineFixture.Identity(), IdentityState = IdentityStates.Active });
-        var engine = _f.Create();
-        engine.Initialize();
-        var reply = engine.Register(KeyA);
-        Assert.False(reply.Ok);
-        Assert.Equal(PipeErrors.AlreadyRegistered, reply.Error);
-        Assert.False(reply.Status!.CanEnroll);
-    }
-
-    [Fact]
-    public async Task An_invalid_SERVER_URL_sends_nothing_and_leaves_the_MSI_key_alone()
-    {
-        _f.MsiKey.Value = KeyA;
         var engine = _f.Start(origin: "http://192.168.1.10:8080");
         await Eventually.SettleAsync();
         var status = engine.Status();
         Assert.Equal(AgentStates.Refused, status.State);
         Assert.Equal(StatusReasons.ConfigInvalid, status.Reason);
-        Assert.Equal(KeyA, _f.MsiKey.Value);
-        Assert.Equal(0, _f.MsiKey.Reads);
-        Assert.Equal(PipeErrors.NotAvailable, engine.Register(KeyB).Error);
+        Assert.False(status.CanRejoin);
+        Assert.Equal(PipeErrors.NotAvailable, engine.Rejoin().Error);
         Assert.Empty(_f.Handler.Requests);
+        Assert.False(File.Exists(_f.State.StateFile));
     }
 
     [Fact]
-    public void An_invalid_state_is_left_untouched_and_the_MSI_key_is_not_read()
+    public async Task An_invalid_state_is_left_untouched_and_nothing_is_sent()
     {
         File.WriteAllText(_f.State.StateFile, "{ not json");
-        _f.MsiKey.Value = KeyA;
-        var engine = _f.Create();
-        engine.Initialize();
+        var engine = _f.Start();
+        await Eventually.SettleAsync();
         Assert.Equal(StatusReasons.StateInvalid, engine.Status().Reason);
-        Assert.Equal(0, _f.MsiKey.Reads);
+        Assert.Equal(PipeErrors.NotAvailable, engine.Rejoin().Error);
+        Assert.Empty(_f.Handler.Requests);
         Assert.Equal("{ not json", File.ReadAllText(_f.State.StateFile));
     }
 
     [Fact]
-    public async Task An_MSI_key_is_saved_to_pending_then_deleted_and_registered()
-    {
-        _f.MsiKey.Value = KeyA;
-        _f.Handler.Enqueue(HttpStatusCode.Created, Registered());
-        _f.Handler.Enqueue(HttpStatusCode.OK, Recorded(60));
-        var deletedAfterSave = false;
-        var engine = _f.Create();
-        _f.Store.BeforeReplace = () => deletedAfterSave = _f.MsiKey.Value is null;
-        engine.Initialize();
-
-        Assert.False(deletedAfterSave);
-        Assert.Null(_f.MsiKey.Value);
-        Assert.Equal(KeyA, engine.State.Pending!.Key);
-        Assert.Equal(AgentState.SourceMsi, engine.State.Pending.Source);
-        Assert.Equal("https://mashkif.test", engine.State.Pending.ServerOrigin);
-        _f.Run(engine);
-        await WaitForState(AgentStates.Connected);
-        Assert.Equal(KeyA, Body(_f.Handler.Requests[0])["enrollmentKey"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public void A_crash_before_saving_pending_leaves_the_MSI_key_for_the_next_start()
-    {
-        _f.MsiKey.Value = KeyA;
-        var engine = _f.Create();
-        _f.Store.BeforeReplace = () => throw new IOException("crash");
-        engine.Initialize();
-        Assert.Equal(KeyA, _f.MsiKey.Value);
-        Assert.Null(_f.State.CreateStore().Load().State!.Pending);
-
-        var restarted = _f.Create();
-        restarted.Initialize();
-        Assert.Null(_f.MsiKey.Value);
-        Assert.Equal(KeyA, restarted.State.Pending!.Key);
-    }
-
-    [Fact]
-    public void A_crash_between_saving_pending_and_deleting_the_value_deletes_the_value_at_the_next_start()
-    {
-        _f.MsiKey.Value = KeyA;
-        _f.MsiKey.FailDelete = true;
-        var engine = _f.Create();
-        engine.Initialize();
-        Assert.Equal(KeyA, _f.MsiKey.Value);
-        var pending = engine.State.Pending!;
-
-        _f.MsiKey.FailDelete = false;
-        var restarted = _f.Create();
-        restarted.Initialize();
-        Assert.Null(_f.MsiKey.Value);
-        Assert.Equal(pending, restarted.State.Pending);
-        Assert.Single(_f.IssuedCredentials);
-    }
-
-    [Fact]
-    public void A_crash_between_saving_pending_and_deleting_combined_with_a_server_change_never_adopts_the_old_key()
-    {
-        _f.MsiKey.Value = KeyA;
-        _f.MsiKey.FailDelete = true;
-        _f.Create().Initialize();
-        Assert.Equal(KeyA, _f.MsiKey.Value);
-
-        _f.MsiKey.FailDelete = false;
-        var restarted = _f.Create(origin: "https://new.test");
-        restarted.Initialize();
-        Assert.Null(_f.MsiKey.Value);
-        Assert.Null(restarted.State.Pending);
-        Assert.Single(_f.IssuedCredentials);
-        Assert.Null(_f.State.CreateStore().Load().State!.Pending);
-    }
-
-    [Fact]
-    public void A_discarded_pending_is_never_read_again()
-    {
-        _f.Seed(AgentState.Empty with
-        {
-            Pending = new PendingRegistration { ServerOrigin = "https://old.test", Key = KeyA, Source = AgentState.SourceMsi, InstallId = Guid.NewGuid(), Token = new string('A', 43) },
-        });
-        var engine = _f.Create();
-        engine.Initialize();
-        Assert.Null(engine.State.Pending);
-        Assert.Equal(1, _f.MsiKey.Reads);
-
-        var again = _f.Create();
-        again.Initialize();
-        Assert.Null(again.State.Pending);
-    }
-
-    [Fact]
-    public void An_MSI_key_for_a_registered_agent_is_ignored_and_deleted()
-    {
-        _f.Seed(AgentState.Empty with { Identity = EngineFixture.Identity(), IdentityState = IdentityStates.Active });
-        _f.MsiKey.Value = KeyA;
-        var engine = _f.Create();
-        engine.Initialize();
-        Assert.Null(_f.MsiKey.Value);
-        Assert.Null(engine.State.Pending);
-    }
-
-    [Fact]
-    public void An_MSI_key_under_a_server_change_is_used_for_the_new_server()
-    {
-        _f.Seed(AgentState.Empty with { Identity = EngineFixture.Identity(origin: "https://old.test"), IdentityState = IdentityStates.Active });
-        _f.MsiKey.Value = KeyA;
-        var engine = _f.Create();
-        engine.Initialize();
-        Assert.Null(_f.MsiKey.Value);
-        Assert.Equal("https://mashkif.test", engine.State.Pending!.ServerOrigin);
-        Assert.Equal("https://old.test", engine.State.Identity!.ServerOrigin);
-    }
-
-    [Fact]
-    public void An_MSI_key_with_a_bad_format_is_deleted_and_reported()
-    {
-        _f.MsiKey.Value = "not-a-key";
-        var engine = _f.Create();
-        engine.Initialize();
-        Assert.Null(_f.MsiKey.Value);
-        Assert.Null(engine.State.Pending);
-        Assert.Equal(StatusReasons.EnrollmentKeyInvalid, engine.Status().EnrollmentError);
-    }
-
-    [Fact]
-    public async Task Neither_the_token_nor_the_key_reaches_the_log_or_the_status()
+    public async Task No_token_reaches_the_log_or_the_status()
     {
         var engine = await RegisteredAgentAsync();
         _f.Handler.Enqueue(HttpStatusCode.Unauthorized, Error("token_invalid"));
         await Advance(_f, TimeSpan.FromSeconds(60));
         await WaitForState(AgentStates.Refused);
 
-        var token = engine.State.Identity!.Token;
+        var state = engine.State;
         var status = JsonSerializer.Serialize(engine.Status(), PipeJsonContext.Default.AgentStatus);
         Assert.NotEmpty(_f.Logs.Lines);
         foreach (var line in _f.Logs.Lines.Append(status))
         {
-            Assert.DoesNotContain(token, line, StringComparison.Ordinal);
-            Assert.DoesNotContain(KeyA, line, StringComparison.Ordinal);
+            Assert.DoesNotContain(state.Identity!.Token, line, StringComparison.Ordinal);
+            Assert.DoesNotContain(state.Pending!.Token, line, StringComparison.Ordinal);
         }
+
+        Assert.DoesNotContain(state.InstallId!.Value.ToString(), status, StringComparison.Ordinal);
     }
 
     private async Task<AgentStatus> WaitForState(string state)

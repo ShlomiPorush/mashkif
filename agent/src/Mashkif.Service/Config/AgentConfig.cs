@@ -11,17 +11,11 @@ internal sealed class AgentRegistry(RegistryKey root, string agentKeyPath)
 
     public const string ServerUrlValue = "ServerUrl";
 
-    public const string EnrollmentSubkey = "Enrollment";
-
-    public const string EnrollmentKeyValue = "Key";
-
     public const string ServiceSubkey = "Service";
 
     public RegistryKey Root => root;
 
     public string AgentKeyPath => agentKeyPath;
-
-    public string EnrollmentKeyPath => $@"{agentKeyPath}\{EnrollmentSubkey}";
 
     public string ServiceKeyPath => $@"{agentKeyPath}\{ServiceSubkey}";
 

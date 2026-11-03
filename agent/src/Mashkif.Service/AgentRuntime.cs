@@ -35,7 +35,6 @@ internal sealed partial class AgentRuntime(ILoggerFactory loggers) : IAgentRunne
             {
                 Store = StateStore.Production(),
                 Origin = origin,
-                MsiKey = new RegistryEnrollmentKeySource(registry),
                 Http = http,
                 BootId = bootId,
                 AgentVersion = AgentService.Version,
