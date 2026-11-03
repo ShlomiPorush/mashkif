@@ -15,7 +15,7 @@ import {
   peerAddress,
 } from "../http/request-guards.js";
 import { hashToken } from "../http/token-hash.js";
-import { cachedSettings, readSettings } from "../settings.js";
+import { cachedSettings, knownSettings, readSettings } from "../settings.js";
 import { recordEvents } from "./events.js";
 import { recordHeartbeat } from "./heartbeat.js";
 import { parseEventsRequest, parseHeartbeat, parseRegister, TOKEN_PATTERN } from "./parse.js";
@@ -197,14 +197,16 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
     // First, in memory and before any database work: every register request,
     // also a repeat, counts against its site (an IPv4 address or an IPv6 /64).
     // This bounds the unauthenticated database work per site.
-    // From the in-process cache, so a limited request does no query.
-    const settings = await cachedSettings(deps.db);
+    // The pre-limit decides on what is already in memory: the settings last
+    // loaded, also when stale, and before the first load the minimum. No
+    // query happens before it, and a failed refresh never skips it.
+    const known = knownSettings(deps.db);
     const site = siteKeyOf(address) as string;
     const throttled = await limited(
       registerLimits,
       c,
       `register:pre:${site}`,
-      registerPreLimit(settings.registerPerSitePer10Min),
+      registerPreLimit(known?.registerPerSitePer10Min ?? REGISTER_PRE_LIMIT_MIN),
     );
     if (throttled !== undefined) {
       return throttled;
@@ -213,6 +215,8 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
     if (!parsed.ok) {
       return refuse(c, 400, "request_invalid", parsed.field);
     }
+    // Only an admitted request refreshes the cache, single-flight.
+    const settings = await cachedSettings(deps.db);
     // What admit counted, so release can give it back when nothing was created.
     const counted: { key: string; windowStart: number }[] = [];
     const release = () => {

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import postgres, { type Sql } from "postgres";
 import { createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { invalidateSettingsCache } from "../../src/settings.js";
+import { resetSettingsCache } from "../../src/settings.js";
 
 /**
  * PostgreSQL for integration tests. scripts/verify.sh (server area) starts a
@@ -59,6 +59,6 @@ export async function truncateAll(sql: Sql): Promise<void> {
     auth_passkey, audit_log, agent, heartbeat,
     agent_event, blocked_range, provider, provider_asn, setting, sync_anchor, agent_boot
     restart identity cascade`;
-  // The settings are gone too; cached readers must not keep the previous test's values.
-  invalidateSettingsCache();
+  // The settings are gone too; the cache starts cold, like a new process.
+  resetSettingsCache();
 }

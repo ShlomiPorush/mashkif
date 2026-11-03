@@ -387,13 +387,32 @@ export async function readSettings(db: Database, env?: NodeJS.ProcessEnv): Promi
 export const SETTINGS_CACHE_TTL_MS = 5_000;
 
 let cacheGeneration = 0;
-const cached = new WeakMap<object, { at: number; generation: number; values: Settings }>();
+let cached = new WeakMap<object, { at: number; generation: number; values: Settings }>();
+let refreshing = new WeakMap<object, Promise<Settings>>();
+
+/** For tests: forgets every loaded value, as in a process that just started. */
+export function resetSettingsCache(): void {
+  cached = new WeakMap();
+  refreshing = new WeakMap();
+  cacheGeneration += 1;
+}
+
+/**
+ * The settings last loaded into the cache, also when stale, or undefined
+ * before the first load. Synchronous and without a query, for decisions that
+ * must come before any database work (the register pre-limit).
+ */
+export function knownSettings(db: Database): Settings | undefined {
+  return cached.get(db)?.values;
+}
 
 /**
  * The current settings (with the process environment), from an in-process
  * cache: at most SETTINGS_CACHE_TTL_MS old, and read again after every save
- * from the admin panel in this process (invalidateSettingsCache). For paths
- * that unauthenticated requests reach, so a limited request does no query.
+ * from the admin panel in this process (invalidateSettingsCache). A refresh
+ * is single-flight: every caller shares the one query in flight. When a
+ * refresh fails, the last good value is kept and returned; only before the
+ * first successful load does the failure reach the caller.
  */
 export async function cachedSettings(db: Database, now = Date.now()): Promise<Settings> {
   const hit = cached.get(db);
@@ -404,10 +423,26 @@ export async function cachedSettings(db: Database, now = Date.now()): Promise<Se
   ) {
     return hit.values;
   }
+  const inFlight = refreshing.get(db);
+  if (inFlight !== undefined) {
+    return inFlight;
+  }
   const generation = cacheGeneration;
-  const values = await readSettings(db);
-  cached.set(db, { at: now, generation, values });
-  return values;
+  const refresh = readSettings(db)
+    .then((values) => {
+      cached.set(db, { at: now, generation, values });
+      return values;
+    })
+    .catch((error: unknown) => {
+      if (hit === undefined) {
+        throw error;
+      }
+      console.error("settings refresh failed; using the last loaded settings");
+      return hit.values;
+    })
+    .finally(() => refreshing.delete(db));
+  refreshing.set(db, refresh);
+  return refresh;
 }
 
 /** Makes cachedSettings read the database again; called after a settings save commits. */

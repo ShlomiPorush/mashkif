@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { REGISTER_PRE_LIMIT_MIN } from "../src/agent/routes.js";
 import { hashToken } from "../src/http/token-hash.js";
+import { cachedSettings, invalidateSettingsCache, resetSettingsCache } from "../src/settings.js";
 import { setSetting, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import { createHarness, type Harness, pauseOnce } from "./support/harness.js";
@@ -240,6 +241,8 @@ describe("register (open registration)", () => {
 
     it("lets a raised per-site limit through the pre-limit, which is max(60, that limit) a minute", async () => {
       await setSetting(database, "register_per_site_per_10min", 1000);
+      // An admitted registration loads the settings; the pre-limit then uses them.
+      expect((await new TestAgent(harness, "203.0.113.50").register()).status).toBe(201);
       const office = new TestAgent(harness, "203.0.113.50");
       const statuses = new Set<number>();
       for (let i = 0; i < REGISTER_PRE_LIMIT_MIN + 40; i++) {
@@ -249,10 +252,79 @@ describe("register (open registration)", () => {
       // With the default per-site limit the pre-limit stays at 60 a minute.
       await setSetting(database, "register_per_site_per_10min", 10);
       const other = new TestAgent(harness, "203.0.113.51");
-      for (let i = 0; i < REGISTER_PRE_LIMIT_MIN; i++) {
+      expect((await other.register()).status).toBe(201);
+      for (let i = 1; i < REGISTER_PRE_LIMIT_MIN; i++) {
         expect((await other.post("/register", {})).status).toBe(400);
       }
       expect((await other.post("/register", {})).status).toBe(429);
+    });
+
+    it("uses the minimum before the first load of the settings, as after a start", async () => {
+      // A cold cache: a raised per-site limit in the database is not known yet.
+      await setSetting(database, "register_per_site_per_10min", 1000);
+      resetSettingsCache();
+      const cold = new TestAgent(harness, "203.0.113.52");
+      for (let i = 0; i < REGISTER_PRE_LIMIT_MIN; i++) {
+        expect((await cold.post("/register", {})).status).toBe(400);
+      }
+      expect((await cold.post("/register", {})).status).toBe(429);
+    });
+
+    it("never queries for a limited site, also while the cache is expired and many requests arrive", async () => {
+      expect((await new TestAgent(harness, "198.51.100.70").register()).status).toBe(201);
+      const site = "2001:db8:a::";
+      for (let i = 0; i < REGISTER_PRE_LIMIT_MIN; i++) {
+        expect((await new TestAgent(harness, `${site}1`).post("/register", {})).status).toBe(400);
+      }
+      // The cache expires (a save or the TTL); the blocked site keeps sending.
+      invalidateSettingsCache();
+      const transaction = vi.spyOn(database.db, "transaction");
+      const select = vi.spyOn(database.db, "select");
+      try {
+        const replies = await Promise.all(
+          Array.from({ length: 20 }, (_, i) =>
+            new TestAgent(harness, `${site}${i + 2}`).register(),
+          ),
+        );
+        expect(replies.map((reply) => reply.status)).toEqual(new Array(20).fill(429));
+        expect(select).not.toHaveBeenCalled();
+        expect(transaction).not.toHaveBeenCalled();
+      } finally {
+        transaction.mockRestore();
+        select.mockRestore();
+      }
+    });
+
+    it("keeps limiting with the last loaded settings when a refresh fails", async () => {
+      const office = new TestAgent(harness, "203.0.113.53");
+      expect((await office.register()).status).toBe(201);
+      invalidateSettingsCache();
+      const select = vi.spyOn(database.db, "select").mockImplementation(() => {
+        throw new Error("database unavailable");
+      });
+      try {
+        // The refresh fails; the request is answered from the last loaded settings.
+        expect((await office.register()).status).toBe(200);
+        expect(select).toHaveBeenCalled();
+      } finally {
+        select.mockRestore();
+      }
+      for (let i = 2; i < REGISTER_PRE_LIMIT_MIN; i++) {
+        expect((await office.post("/register", {})).status).toBe(400);
+      }
+      expect((await office.post("/register", {})).status).toBe(429);
+    });
+
+    it("shares one refresh query among concurrent callers", async () => {
+      await cachedSettings(database.db);
+      invalidateSettingsCache();
+      const select = vi.spyOn(database.db, "select");
+      try {
+        await Promise.all(Array.from({ length: 10 }, () => cachedSettings(database.db)));
+        expect(select).toHaveBeenCalledTimes(1);
+      } finally {
+        select.mockRestore();
+      }
     });
 
     it("gives the creation quota back when a racing copy of the registration created the agent", async () => {
