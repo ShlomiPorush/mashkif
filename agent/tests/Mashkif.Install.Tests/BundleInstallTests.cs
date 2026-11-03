@@ -5,11 +5,11 @@ namespace Mashkif.Install.Tests;
 
 /// <summary>
 /// The EXE installer on a disposable runner: its lifecycle (T2) and every mix
-/// with the MSI (T3a to T3f). Every run points the agent at the loopback API,
+/// with the MSI (T3a to T3h). Every run points the agent at the loopback API,
 /// passed as SERVER_URL or remembered by the MSI, never at the real server.
 /// The mixed scenarios pin what Windows Installer and Burn do, so a change is
-/// noticed; the README supports only T2 and T3c and says "do not mix" for the
-/// rest.
+/// noticed; the README supports T2, T3c, T3e, and T3f and says "do not mix" for
+/// the rest.
 /// </summary>
 public sealed partial class InstallTests
 {
@@ -213,7 +213,7 @@ public sealed partial class InstallTests
         });
     }
 
-    /// <summary>T3e: a direct MSI repair under an installed EXE keeps the MSI entry hidden (observed on the runner).</summary>
+    /// <summary>T3e (supported): a direct MSI repair under an installed EXE keeps the MSI entry hidden, so one entry stays.</summary>
     [Fact]
     public async Task Mix_exe_then_msiexec_repair_keeps_one_entry()
     {
@@ -237,13 +237,13 @@ public sealed partial class InstallTests
     }
 
     /// <summary>
-    /// T3f: the EXE carries the English MSI, whose upgrade rows match only
-    /// English, so it does not upgrade the Hebrew MSI: it installs the English
-    /// product next to it, and both stay installed (observed on the runner).
-    /// Hebrew MSI users uninstall it before they install the EXE.
+    /// T3f (supported): a newer EXE replaces the Hebrew MSI. The upgrade rows
+    /// match every language (IgnoreLanguage), so its English MSI major-upgrades
+    /// the Hebrew product: one product, one Apps and Features entry, and the
+    /// remembered server URL and the identity stay.
     /// </summary>
     [Fact]
-    public async Task Mix_hebrew_msi_then_newer_exe_installs_the_english_product_beside_it()
+    public async Task Mix_hebrew_msi_then_newer_exe_upgrades_to_one_entry_and_keeps_the_server_url()
     {
         Assert.True(gate.Passed);
         var heMsi = RequiredFile("MASHKIF_INSTALL_TEST_HE_MSI");
@@ -255,13 +255,74 @@ public sealed partial class InstallTests
             Msiexec("/i", heMsi, $"SERVER_URL={api.Origin}", "/qn", "/norestart", "/l*v", Path.Combine(logs, "msi.log"));
             await WaitForStatusAsync(AgentStates.Connected);
             var hebrew = Assert.Single(Products());
+            var identity = Identity();
 
-            Exe(upgradeExe, "/quiet", "/norestart", "/log", Path.Combine(logs, "exe.log"), $"SERVER_URL={api.Origin}");
+            Exe(upgradeExe, "/quiet", "/norestart", "/log", Path.Combine(logs, "exe.log"));
+            await WaitForStatusAsync(AgentStates.Connected);
+            var product = Assert.Single(Products());
+            Assert.NotEqual(hebrew.ProductCode, product.ProductCode);
+            Assert.Equal("0.1.1", VersionOf(product));
+            Assert.True(InstallSafetyGate.ProductHidden(product.ProductCode), State());
+            var bundle = Assert.Single(InstallSafetyGate.BundleEntries());
+            Assert.Equal(bundle.Code, Assert.Single(VisibleEntries()), ignoreCase: true);
+            Assert.Equal(api.Origin, ServerUrlValue());
+            Assert.Equal(identity, Identity());
+            Assert.Single(api.Registrations);
+        });
+    }
+
+    /// <summary>
+    /// T3g: the EXE of the same version over the Hebrew MSI. MajorUpgrade
+    /// upgrades only older versions, so the English product is installed
+    /// beside the Hebrew one of the same version, and both stay. Do not mix:
+    /// uninstall first to switch languages within one version.
+    /// </summary>
+    [Fact]
+    public async Task Mix_hebrew_msi_then_exe_of_the_same_version_installs_beside_it()
+    {
+        Assert.True(gate.Passed);
+        var heMsi = RequiredFile("MASHKIF_INSTALL_TEST_HE_MSI");
+        var exe = RequiredFile("MASHKIF_INSTALL_TEST_EXE");
+        var logs = LogFolder("mix-g");
+        await RunWithCleanupAsync(async () =>
+        {
+            using var api = new FakeAgentApi();
+            Msiexec("/i", heMsi, $"SERVER_URL={api.Origin}", "/qn", "/norestart", "/l*v", Path.Combine(logs, "msi.log"));
+            await WaitForStatusAsync(AgentStates.Connected);
+            var hebrew = Assert.Single(Products());
+
+            Exe(exe, "/quiet", "/norestart", "/log", Path.Combine(logs, "exe.log"));
             var products = Products();
             Assert.True(products.Count == 2, State());
-            Assert.Contains(products, p => p.ProductCode == hebrew.ProductCode && VersionOf(p) == "0.1.0" && !InstallSafetyGate.ProductHidden(p.ProductCode));
-            Assert.Contains(products, p => p.ProductCode != hebrew.ProductCode && VersionOf(p) == "0.1.1" && InstallSafetyGate.ProductHidden(p.ProductCode));
-            Assert.Equal("0.1.1", Assert.Single(InstallSafetyGate.BundleEntries()).DisplayVersion);
+            Assert.Contains(products, p => p.ProductCode == hebrew.ProductCode && !InstallSafetyGate.ProductHidden(p.ProductCode));
+            Assert.Contains(products, p => p.ProductCode != hebrew.ProductCode && VersionOf(p) == "0.1.0" && InstallSafetyGate.ProductHidden(p.ProductCode));
+            Assert.Single(InstallSafetyGate.BundleEntries());
+            Assert.True(VisibleEntries().Count == 2, State());
+        });
+    }
+
+    /// <summary>
+    /// T3h: the English MSI of the same version over the Hebrew MSI. As in
+    /// T3g, both products of the same version stay installed. Do not mix.
+    /// </summary>
+    [Fact]
+    public async Task Mix_hebrew_msi_then_english_msi_of_the_same_version_installs_beside_it()
+    {
+        Assert.True(gate.Passed);
+        var heMsi = RequiredFile("MASHKIF_INSTALL_TEST_HE_MSI");
+        var msi = RequiredFile("MASHKIF_INSTALL_TEST_MSI");
+        var logs = LogFolder("mix-h");
+        await RunWithCleanupAsync(async () =>
+        {
+            using var api = new FakeAgentApi();
+            Msiexec("/i", heMsi, $"SERVER_URL={api.Origin}", "/qn", "/norestart", "/l*v", Path.Combine(logs, "he.log"));
+            await WaitForStatusAsync(AgentStates.Connected);
+            var hebrew = Assert.Single(Products());
+
+            Msiexec("/i", msi, "/qn", "/norestart", "/l*v", Path.Combine(logs, "en.log"));
+            var products = Products();
+            Assert.True(products.Count == 2, State());
+            Assert.Contains(products, p => p.ProductCode == hebrew.ProductCode);
             Assert.True(VisibleEntries().Count == 2, State());
         });
     }

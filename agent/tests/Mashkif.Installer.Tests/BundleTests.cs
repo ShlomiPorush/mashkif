@@ -60,6 +60,16 @@ public sealed class BundleTests
         Assert.Equal($"{productCode}v{version}", (string?)package.Attribute("CacheId"));
 
         Assert.Equal("1", MsiProperty(package, "ARPSYSTEMCOMPONENT")?.Attribute("Value")?.Value);
+
+        // The MSI's upgrade rows match every language, so Burn detects a
+        // Hebrew MSI as related too and the EXE replaces it.
+        var related = package.Elements(Burn + "RelatedPackage").ToList();
+        Assert.NotEmpty(related);
+        Assert.All(related, r =>
+        {
+            Assert.Equal(MsiUpgradeCode, (string?)r.Attribute("Id"));
+            Assert.Empty(r.Elements(Burn + "Language"));
+        });
     }
 
     [Fact]
