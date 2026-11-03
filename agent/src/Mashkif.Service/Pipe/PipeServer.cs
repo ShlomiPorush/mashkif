@@ -52,23 +52,23 @@ internal static class PipeAcl
 /// </summary>
 /// <remarks>
 /// The pipe name must never be free while the service runs, or a local user
-/// could create a pipe with that name and receive the tray's requests. So an
-/// instance is released only when another instance of this process exists,
-/// and a broken listening instance is put back to listening instead of being
-/// replaced when no replacement can be created. An instance created while
-/// the process has none uses <see cref="PipeOptions.FirstPipeInstance"/>, so
-/// a pipe that another process created is never joined.
+/// could create a pipe with that name and receive the tray's requests. So the
+/// service creates a fixed pool of instances once, the first with
+/// <see cref="PipeOptions.FirstPipeInstance"/> (a pipe that someone else
+/// created is never joined), and never closes one while it runs. Each
+/// instance serves one client at a time and is disconnected and reused after
+/// it; only a service stop disposes the pool.
 /// </remarks>
 internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity security, string pipeName, ILogger<PipeServer> logger, TimeProvider time)
 {
-    /// <summary>Most instances: one listening, the rest handling connections.</summary>
+    /// <summary>Instances in the pool, so up to this many clients at once.</summary>
     public const int MaxInstances = 4;
 
     private static readonly TimeSpan SquatRetry = TimeSpan.FromSeconds(30);
 
-    private static readonly TimeSpan CreateRetry = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan ResetRetry = TimeSpan.FromSeconds(1);
 
-    // Instances of this process that exist now, listening or connected.
+    // Instances of this process that exist now.
     private int _instances;
 
     /// <summary>Instances of this process that exist now. For tests.</summary>
@@ -76,157 +76,153 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
 
     public async Task RunAsync(CancellationToken stoppingToken)
     {
-        using var handlers = new SemaphoreSlim(MaxInstances - 1, MaxInstances - 1);
-        NamedPipeServerStream? listening = await CreateFirstAsync(stoppingToken).ConfigureAwait(false);
+        var pool = await CreatePoolAsync(stoppingToken).ConfigureAwait(false);
         try
         {
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                while (listening is null)
-                {
-                    await Task.Delay(CreateRetry, time, stoppingToken).ConfigureAwait(false);
-                    listening = CreateListening();
-                }
-
-                try
-                {
-                    await listening.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
-                }
-                catch (IOException)
-                {
-                    // A client connected and closed before the wait completed
-                    // ("the pipe is being closed").
-                    listening = await RecoverAsync(listening, stoppingToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                await handlers.WaitAsync(stoppingToken).ConfigureAwait(false);
-
-                // The next instance is created before this one is handed off.
-                // If that fails, the connected instance still holds the name
-                // until the loop creates one.
-                var next = CreateListening();
-                var connected = listening;
-                listening = next;
-                _ = HandleAsync(connected, handlers, stoppingToken);
-            }
+            await Task.WhenAll(pool.Select(pipe => ServeAsync(pipe, stoppingToken))).ConfigureAwait(false);
         }
         finally
         {
-            if (listening is not null)
-            {
-                await ReleaseAsync(listening).ConfigureAwait(false);
-            }
+            await DisposeAsync(pool).ConfigureAwait(false);
         }
     }
 
     /// <summary>
-    /// Creates a listening instance. Without an instance of this process the
-    /// name may belong to someone else, so the instance must be the first one.
+    /// Creates every instance of the pool, the first as the first instance of
+    /// the name. When any creation fails, nothing is served: the created
+    /// instances are closed, the failure is logged, and the whole pool is
+    /// tried again later, again starting with a first instance.
     /// </summary>
-    internal NamedPipeServerStream? CreateListening() => TryCreate(first: Instances == 0);
-
-    /// <summary>
-    /// After a client left before the wait completed: puts the instance back to
-    /// listening, or replaces it when that fails. It is released only after a
-    /// replacement exists; with neither, it is kept and tried again shortly.
-    /// </summary>
-    internal async Task<NamedPipeServerStream> RecoverAsync(NamedPipeServerStream broken, CancellationToken cancellationToken)
-    {
-        // Documented reuse: DisconnectNamedPipe, then ConnectNamedPipe again.
-        if (DisconnectNamedPipe(broken.SafePipeHandle))
-        {
-            return broken;
-        }
-
-        var replacement = CreateListening();
-        if (replacement is not null)
-        {
-            await ReleaseAsync(broken).ConfigureAwait(false);
-            return replacement;
-        }
-
-        LogRecoverFailed(logger);
-        await Task.Delay(CreateRetry, time, cancellationToken).ConfigureAwait(false);
-        return broken;
-    }
-
-    /// <summary>Disposes an instance of this process.</summary>
-    internal async ValueTask ReleaseAsync(NamedPipeServerStream pipe)
-    {
-        await pipe.DisposeAsync().ConfigureAwait(false);
-        Interlocked.Decrement(ref _instances);
-    }
-
-    private async Task<NamedPipeServerStream> CreateFirstAsync(CancellationToken stoppingToken)
+    private async Task<List<NamedPipeServerStream>> CreatePoolAsync(CancellationToken stoppingToken)
     {
         while (true)
         {
-            var pipe = TryCreate(first: true);
-            if (pipe is not null)
+            var pool = new List<NamedPipeServerStream>(MaxInstances);
+            try
             {
-                return pipe;
+                for (var i = 0; i < MaxInstances; i++)
+                {
+                    pool.Add(Create(first: i == 0));
+                }
+
+                return pool;
+            }
+            catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+            {
+                await DisposeAsync(pool).ConfigureAwait(false);
+                LogPoolFailed(logger, pipeName, exception.GetType().Name);
             }
 
             await Task.Delay(SquatRetry, time, stoppingToken).ConfigureAwait(false);
         }
     }
 
-    private NamedPipeServerStream? TryCreate(bool first)
+    private NamedPipeServerStream Create(bool first)
     {
-        try
-        {
-            var pipe = NamedPipeServerStreamAcl.Create(
-                pipeName,
-                PipeDirection.InOut,
-                MaxInstances,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : PipeOptions.None),
-                PipeProtocol.MaxRequestBytes,
-                PipeProtocol.MaxResponseBytes,
-                security);
-            Interlocked.Increment(ref _instances);
-            return pipe;
-        }
-        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
-        {
-            if (first)
-            {
-                LogSquatted(logger, pipeName, exception.GetType().Name);
-            }
-            else
-            {
-                LogCreateFailed(logger, exception.GetType().Name);
-            }
+        var pipe = NamedPipeServerStreamAcl.Create(
+            pipeName,
+            PipeDirection.InOut,
+            MaxInstances,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : PipeOptions.None),
+            PipeProtocol.MaxRequestBytes,
+            PipeProtocol.MaxResponseBytes,
+            security);
+        Interlocked.Increment(ref _instances);
+        return pipe;
+    }
 
-            return null;
+    private async Task DisposeAsync(List<NamedPipeServerStream> pool)
+    {
+        foreach (var pipe in pool)
+        {
+            await pipe.DisposeAsync().ConfigureAwait(false);
+            Interlocked.Decrement(ref _instances);
         }
     }
 
-    private async Task HandleAsync(NamedPipeServerStream pipe, SemaphoreSlim handlers, CancellationToken stoppingToken)
+    /// <summary>One instance: wait for a client, answer it, disconnect, and wait again.</summary>
+    private async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                await HandleAsync(pipe, stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
+            {
+                // The client left before the wait completed, or went away or was
+                // too slow while it was answered. Nothing ends this loop but a stop.
+                LogClientFailed(logger, exception);
+            }
+
+            if (!Reset(pipe))
+            {
+                await Task.Delay(ResetRetry, time, stoppingToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ends the connection and keeps the instance for the next client.
+    /// <see cref="NamedPipeServerStream.Disconnect"/> also resets a broken
+    /// connection. An instance whose client left before the wait completed was
+    /// never connected for .NET, which then refuses Disconnect, so it gets
+    /// <c>DisconnectNamedPipe</c> directly, the documented step before the
+    /// instance can wait again.
+    /// </summary>
+    private bool Reset(NamedPipeServerStream pipe)
     {
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            timeout.CancelAfter(PipeProtocol.RequestTimeout);
-            var line = await PipeLines.ReadLineAsync(pipe, PipeProtocol.MaxRequestBytes, timeout.Token).ConfigureAwait(false);
-            var response = Dispatch(line);
-            await PipeLines.WriteLineAsync(pipe, response, PipeJsonContext.Default.PipeResponse, timeout.Token).ConfigureAwait(false);
+            pipe.Disconnect();
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            // Not connected for .NET: the client left before the wait completed.
+        }
+        catch (IOException exception)
+        {
+            LogResetFailed(logger, exception.GetType().Name);
+            return false;
+        }
 
-            // Wait until the client has read the answer and closed its end.
-            var rest = new byte[1];
-            while (await pipe.ReadAsync(rest, timeout.Token).ConfigureAwait(false) > 0)
+        try
+        {
+            if (DisconnectNamedPipe(pipe.SafePipeHandle))
             {
+                return true;
             }
+
+            LogResetFailedCode(logger, Marshal.GetLastPInvokeError());
+            return false;
         }
-        catch (Exception exception) when (exception is IOException or OperationCanceledException or ObjectDisposedException)
+        catch (ObjectDisposedException exception)
         {
-            // The client went away or was too slow; nothing to answer.
+            LogResetFailed(logger, exception.GetType().Name);
+            return false;
         }
-        finally
+    }
+
+    private async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken stoppingToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        timeout.CancelAfter(PipeProtocol.RequestTimeout);
+        var line = await PipeLines.ReadLineAsync(pipe, PipeProtocol.MaxRequestBytes, timeout.Token).ConfigureAwait(false);
+        var response = Dispatch(line);
+        await PipeLines.WriteLineAsync(pipe, response, PipeJsonContext.Default.PipeResponse, timeout.Token).ConfigureAwait(false);
+
+        // Wait until the client has read the answer and closed its end.
+        var rest = new byte[1];
+        while (await pipe.ReadAsync(rest, timeout.Token).ConfigureAwait(false) > 0)
         {
-            await ReleaseAsync(pipe).ConfigureAwait(false);
-            handlers.Release();
         }
     }
 
@@ -255,14 +251,17 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
         }
     }
 
-    [LoggerMessage(EventId = 30, Level = LogLevel.Error, Message = "The pipe {PipeName} already exists in another process ({Error}); retrying in 30 seconds")]
-    private static partial void LogSquatted(ILogger logger, string pipeName, string error);
+    [LoggerMessage(EventId = 30, Level = LogLevel.Error, Message = "The pipe {PipeName} could not be created in full; it may already exist in another process ({Error}). The pipe is not served; retrying in 30 seconds")]
+    private static partial void LogPoolFailed(ILogger logger, string pipeName, string error);
 
-    [LoggerMessage(EventId = 31, Level = LogLevel.Warning, Message = "A new pipe instance could not be created: {Error}")]
-    private static partial void LogCreateFailed(ILogger logger, string error);
+    [LoggerMessage(EventId = 31, Level = LogLevel.Warning, Message = "A pipe instance could not be disconnected for its next client ({Error}); trying again in a second")]
+    private static partial void LogResetFailed(ILogger logger, string error);
 
-    [LoggerMessage(EventId = 32, Level = LogLevel.Warning, Message = "A pipe instance whose client left could not be reset or replaced; trying again in a second")]
-    private static partial void LogRecoverFailed(ILogger logger);
+    [LoggerMessage(EventId = 33, Level = LogLevel.Warning, Message = "A pipe instance could not be disconnected for its next client (Win32 error {Code}); trying again in a second")]
+    private static partial void LogResetFailedCode(ILogger logger, int code);
+
+    [LoggerMessage(EventId = 32, Level = LogLevel.Debug, Message = "A pipe client went away before it was answered")]
+    private static partial void LogClientFailed(ILogger logger, Exception exception);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

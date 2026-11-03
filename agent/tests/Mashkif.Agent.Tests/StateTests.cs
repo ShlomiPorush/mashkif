@@ -187,6 +187,16 @@ public sealed class StateTests : IDisposable
     }
 
     [Fact]
+    public void A_path_check_that_throws_is_a_problem_and_not_an_exception()
+    {
+        // A missing policy makes the path checks throw on any machine.
+        var store = new StateStore(_f.ProductDirectory, _f.StateDirectory, null!);
+        var load = store.Load();
+        Assert.Contains("path checks", load.Problem, StringComparison.Ordinal);
+        Assert.Null(load.State);
+    }
+
+    [Fact]
     public void A_path_whose_ACL_cannot_be_read_is_a_problem_and_nothing_is_changed()
     {
         // A deny rule comes first, so even the owner loses READ_CONTROL and
@@ -210,10 +220,17 @@ public sealed class StateTests : IDisposable
 
         var written = new FileInfo(_f.StateFile);
         var (length, time) = (written.Length, written.LastWriteTimeUtc);
-        Assert.ThrowsAny<UnauthorizedAccessException>(written.GetAccessControl);
+        // A process with the backup privilege (an elevated CI runner) still reads
+        // the DACL; the service, as LocalService, cannot.
+        var unreadable = Record.Exception(written.GetAccessControl) is UnauthorizedAccessException;
         var load = _f.CreateStore().Load();
         Assert.NotNull(load.Problem);
         Assert.Null(load.State);
+        if (unreadable)
+        {
+            Assert.Contains("path checks", load.Problem, StringComparison.Ordinal);
+        }
+
         written.Refresh();
         Assert.Equal((length, time), (written.Length, written.LastWriteTimeUtc));
     }

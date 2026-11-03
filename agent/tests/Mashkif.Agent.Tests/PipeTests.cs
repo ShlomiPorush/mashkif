@@ -128,63 +128,70 @@ public sealed class PipeTests : IDisposable
     }
 
     [Fact]
-    public async Task At_full_occupancy_an_instance_whose_client_left_keeps_the_name_and_listens_again()
+    public async Task The_pool_keeps_every_instance_and_the_name_while_all_are_busy_and_clients_leave_at_once()
     {
         _f.Create().Initialize();
         var server = Server();
+        using var stop = new CancellationTokenSource();
+        var running = server.RunAsync(stop.Token);
         var ct = TestContext.Current.CancellationToken;
+        await Eventually.TrueAsync(() => server.Instances == PipeServer.MaxInstances, "the pool is created");
+        AssertNameHeld();
 
-        // Every other instance the pipe allows is connected to a client.
-        var held = new List<(NamedPipeServerStream Server, NamedPipeClientStream Client)>();
-        for (var i = 0; i < PipeServer.MaxInstances - 1; i++)
+        // Every instance busy with a client that sends nothing.
+        var holders = new List<NamedPipeClientStream>();
+        for (var i = 0; i < PipeServer.MaxInstances; i++)
         {
-            var instance = server.CreateListening()!;
-            var wait = instance.WaitForConnectionAsync(ct);
-            var client = Client();
-            await client.ConnectAsync(5000, ct);
-            await wait;
-            held.Add((instance, client));
+            var holder = Client();
+            await holder.ConnectAsync(5000, ct);
+            holders.Add(holder);
         }
 
-        // The last instance: a client connects and closes before the wait.
-        var broken = server.CreateListening()!;
-        Assert.Null(server.CreateListening());
-        using (var leaving = Client())
+        using (var extra = Client())
         {
-            await leaving.ConnectAsync(5000, ct);
+            await Assert.ThrowsAsync<TimeoutException>(() => extra.ConnectAsync(300, ct));
         }
 
-        await Assert.ThrowsAsync<IOException>(() => broken.WaitForConnectionAsync(ct));
-        var recovered = await server.RecoverAsync(broken, ct);
+        Assert.Equal(PipeServer.MaxInstances, server.Instances);
+        AssertNameHeld();
 
-        // The other clients close: the name must still be the service's.
-        foreach (var (instance, client) in held)
+        // One instance frees up; clients connect to it and leave at once
+        // while the others stay busy.
+        await holders[0].DisposeAsync();
+        for (var i = 0; i < 20; i++)
         {
-            await client.DisposeAsync();
-            await server.ReleaseAsync(instance);
+            using (var leaving = Client())
+            {
+                await leaving.ConnectAsync(5000, ct);
+            }
+
+            Assert.Equal(PipeServer.MaxInstances, server.Instances);
+            AssertNameHeld();
         }
 
-        Assert.Equal(1, server.Instances);
-        Assert.Throws<UnauthorizedAccessException>(() =>
-            new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.FirstPipeInstance).Dispose());
+        foreach (var holder in holders.Skip(1))
+        {
+            await holder.DisposeAsync();
+        }
 
-        // And the kept instance takes the next client.
-        var next = recovered.WaitForConnectionAsync(ct);
-        using var tray = Client();
-        await tray.ConnectAsync(5000, ct);
-        await next;
-        await server.ReleaseAsync(recovered);
+        var reply = await new PipeClient(_pipeName, static () => Environment.ProcessId).SendAsync(new PipeRequest { Command = PipeProtocol.StatusCommand }, ct);
+        Assert.Equal(PipeFailure.None, reply.Failure);
+        Assert.Equal(PipeServer.MaxInstances, server.Instances);
+        AssertNameHeld();
+
+        // A stop disposes the whole pool, and only then is the name free.
+        await StopAsync(stop, running);
+        Assert.Equal(0, server.Instances);
+        new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.FirstPipeInstance).Dispose();
     }
 
-    [Fact]
-    public void Without_an_instance_of_its_own_the_service_never_joins_a_pipe_someone_else_created()
+    /// <summary>A squat attempt: creating the first instance of the name is refused while the service holds it.</summary>
+    private void AssertNameHeld()
     {
-        _f.Create().Initialize();
-        using var squatter = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, PipeServer.MaxInstances, PipeTransmissionMode.Byte, PipeOptions.FirstPipeInstance);
-        var server = Server();
-        Assert.Null(server.CreateListening());
-        Assert.Equal(0, server.Instances);
-        Assert.Contains(_f.Logs.Lines, l => l.Contains("already exists in another process", StringComparison.Ordinal));
+        // Access denied, or "all pipe instances are busy" while every instance is connected.
+        var refused = Record.Exception(() =>
+            new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.FirstPipeInstance).Dispose());
+        Assert.True(refused is UnauthorizedAccessException or IOException, $"the squat was not refused: {refused}");
     }
 
     private NamedPipeClientStream Client() =>
@@ -233,9 +240,11 @@ public sealed class PipeTests : IDisposable
         using var squatter = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 4, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         var time = new FakeTimeProvider();
         using var stop = new CancellationTokenSource();
-        var running = Server(time: time).RunAsync(stop.Token);
+        var server = Server(time: time);
+        var running = server.RunAsync(stop.Token);
 
-        await Eventually.TrueAsync(() => _f.Logs.Lines.Any(l => l.Contains("already exists", StringComparison.Ordinal)), "squatting logged");
+        await Eventually.TrueAsync(() => _f.Logs.Lines.Any(l => l.Contains("could not be created in full", StringComparison.Ordinal)), "squatting logged");
+        Assert.Equal(0, server.Instances);
         await StopAsync(stop, running);
     }
 
