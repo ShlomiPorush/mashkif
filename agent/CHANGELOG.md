@@ -9,7 +9,7 @@ All notable changes to this component are recorded here. The format follows
 ### Added
 
 - Windows service and tray app skeleton that start and write log lines only.
-- Unsigned MSI installer (WiX 5) with English and Hebrew text, silent install and uninstall for GPO and Intune, and a self-contained runtime.
+- Unsigned MSI installer (WiX 7.0.1) with English and Hebrew text, silent install and uninstall for GPO and Intune, and a self-contained runtime.
 - The service registers the PC by itself at its first start, with its own install ID and token, and sends heartbeats with the round trip and DNS time. No key or property is needed; `SERVER_URL` points a development install at another server.
 - When the server no longer recognizes the token, the agent keeps it and, if the server still refuses it an hour later, registers a new token for the same install ID, at most once an hour.
 - After a revoke or a change of server the agent sends nothing until the user chooses Join again in the tray, which registers the PC as a new agent.

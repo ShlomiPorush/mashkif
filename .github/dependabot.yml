@@ -48,11 +48,12 @@ updates:
       nuget-minor-patch:
         update-types: [minor, patch]
     ignore:
-      # WiX 6 and later require accepting the Open Source Maintenance Fee
-      # EULA. That is a maintainer decision, never an automatic update, so
-      # WiX stays on 5.x until it is made.
+      # WiX 7 is used with its Open Source Maintenance Fee EULA accepted
+      # (AcceptEula=wix7 in agent/Directory.Build.props). Each WiX major has
+      # its own EULA ID (wix8 for WiX 8), and accepting it is a maintainer
+      # decision, never an automatic update, so WiX stays on 7.x until then.
       - dependency-name: "WixToolset.*"
-        versions: [">= 6"]
+        versions: [">= 8"]
 
   # Application image: config/docker/app.Dockerfile (Dependabot matches any
   # file name containing "Dockerfile").

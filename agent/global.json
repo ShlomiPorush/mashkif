@@ -5,7 +5,7 @@
     "allowPrerelease": false
   },
   "msbuild-sdks": {
-    "WixToolset.Sdk": "5.0.2"
+    "WixToolset.Sdk": "7.0.1"
   },
   "test": {
     "runner": "Microsoft.Testing.Platform"

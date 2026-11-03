@@ -169,7 +169,7 @@ Decisions made while building the foundation and later steps, within the approve
 
 | Decision | Choice | Reason |
 |---|---|---|
-| WiX version | WiX 5.0.2 as an MSBuild SDK, pinned in `agent/global.json`; Dependabot ignores WiX 6 and later | WiX 6 and 7 require accepting the Open Source Maintenance Fee EULA |
+| WiX version | WiX 7.0.1: `WixToolset.Sdk` pinned in `agent/global.json`, the packages in `agent/Directory.Packages.props`. The Open Source Maintenance Fee (OSMF) EULA is accepted for the project through `AcceptEula=wix7` in `agent/Directory.Build.props`. Dependabot ignores WiX 8 and later. | Owner decision of 2026-11-03: WiX 7.0.1 is the latest stable release (2026-10-26). The owner accepted the OSMF EULA (v1.1), which asks a fee only from an organization that makes at least US$10,000 a year from projects that use WiX; Mashkif makes no revenue. Revisit this row if that changes. A new WiX major has its own EULA ID (`wix8`), so moving to it is an owner decision. |
 | Agent packaging | Service and tray published self-contained for `win-x64`; English MSI at the contract path plus a Hebrew MSI | No .NET runtime needed on endpoints; Hebrew installer text for Hebrew users |
 | Tray start | The tray starts at every user sign-in through the machine `Run` key; uninstall closes it in every session | Needed for the user-facing status later; uninstall as SYSTEM must not leave it running |
 | Protocol versioning | One unversioned path with the `Mashkif-Protocol-Version` request and response header | One route can serve the current and the previous protocol version |
