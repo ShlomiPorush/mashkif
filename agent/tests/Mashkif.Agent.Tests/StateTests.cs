@@ -89,6 +89,7 @@ public sealed class StateTests : IDisposable
     [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"revoked","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","pending":{"serverOrigin":"https://other.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"suspended","intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"installId":"00000000-0000-0000-0000-000000000000","identityState":"none","intervalSeconds":60,"nextSequence":0}""")]
     public void An_unreadable_or_inconsistent_state_is_a_problem_and_stays_untouched(string content)
@@ -183,6 +184,38 @@ public sealed class StateTests : IDisposable
         var owner = new DirectoryInfo(_f.ProductDirectory).GetAccessControl().GetOwner(typeof(SecurityIdentifier))!;
         Assert.NotEqual(PathPolicy.LocalSystem, owner);
         Assert.Contains("owner", PathSecurity.Check(_f.ProductDirectory, _f.StateDirectory, _f.StateFile, policy), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_path_whose_ACL_cannot_be_read_is_a_problem_and_nothing_is_changed()
+    {
+        // A deny rule comes first, so even the owner loses READ_CONTROL and
+        // reading the DACL of state.json throws inside the path checks.
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(StateFixture.CurrentUser, FileSystemRights.ReadPermissions, AccessControlType.Deny));
+        foreach (var sid in new[] { PathPolicy.LocalSystem, PathPolicy.Administrators, StateFixture.CurrentUser })
+        {
+            security.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
+        }
+
+        // Like production: an OWNER RIGHTS entry takes the owner's implicit READ_CONTROL away.
+        security.AddAccessRule(new FileSystemAccessRule(PathPolicy.OwnerRights, FileSystemRights.Synchronize, AccessControlType.Allow));
+
+        const string content = """{"schemaVersion":1,"identityState":"none","intervalSeconds":60,"nextSequence":0}""";
+        using (var file = new FileInfo(_f.StateFile).Create(FileMode.CreateNew, FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, security))
+        {
+            file.Write(System.Text.Encoding.UTF8.GetBytes(content));
+        }
+
+        var written = new FileInfo(_f.StateFile);
+        var (length, time) = (written.Length, written.LastWriteTimeUtc);
+        Assert.ThrowsAny<UnauthorizedAccessException>(written.GetAccessControl);
+        var load = _f.CreateStore().Load();
+        Assert.NotNull(load.Problem);
+        Assert.Null(load.State);
+        written.Refresh();
+        Assert.Equal((length, time), (written.Length, written.LastWriteTimeUtc));
     }
 
     [Fact]

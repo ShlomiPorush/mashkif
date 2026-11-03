@@ -36,7 +36,18 @@ internal sealed class StateStore(string productDirectory, string stateDirectory,
     /// </summary>
     public StateLoad Load()
     {
-        var problem = PathSecurity.Check(productDirectory, stateDirectory, FilePath, policy);
+        string? problem;
+        try
+        {
+            problem = PathSecurity.Check(productDirectory, stateDirectory, FilePath, policy);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // For example a DACL that denies the service READ_CONTROL. Nothing
+            // is changed; the service reports state_invalid like any other problem.
+            problem = $"the path checks of {stateDirectory} failed: {exception.GetType().Name}";
+        }
+
         if (problem is not null)
         {
             return new StateLoad(null, problem);

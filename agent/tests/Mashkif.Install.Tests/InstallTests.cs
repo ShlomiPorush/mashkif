@@ -65,7 +65,8 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
 
             // 4. A standard user: status yes, a server instance and the state no.
             //    A network logon of the same user is refused by the NETWORK rule.
-            var password = "Mk1!" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
+            // At most 14 characters: net user asks for confirmation of a longer one.
+            var password = "Mk1!" + Convert.ToHexString(RandomNumberGenerator.GetBytes(5));
             Run("net.exe", "user", InstallSafetyGate.TestUser, password, "/add");
             userCreated = true;
             AsUser(LogonInteractive, password, () =>

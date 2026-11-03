@@ -128,6 +128,69 @@ public sealed class PipeTests : IDisposable
     }
 
     [Fact]
+    public async Task At_full_occupancy_an_instance_whose_client_left_keeps_the_name_and_listens_again()
+    {
+        _f.Create().Initialize();
+        var server = Server();
+        var ct = TestContext.Current.CancellationToken;
+
+        // Every other instance the pipe allows is connected to a client.
+        var held = new List<(NamedPipeServerStream Server, NamedPipeClientStream Client)>();
+        for (var i = 0; i < PipeServer.MaxInstances - 1; i++)
+        {
+            var instance = server.CreateListening()!;
+            var wait = instance.WaitForConnectionAsync(ct);
+            var client = Client();
+            await client.ConnectAsync(5000, ct);
+            await wait;
+            held.Add((instance, client));
+        }
+
+        // The last instance: a client connects and closes before the wait.
+        var broken = server.CreateListening()!;
+        Assert.Null(server.CreateListening());
+        using (var leaving = Client())
+        {
+            await leaving.ConnectAsync(5000, ct);
+        }
+
+        await Assert.ThrowsAsync<IOException>(() => broken.WaitForConnectionAsync(ct));
+        var recovered = await server.RecoverAsync(broken, ct);
+
+        // The other clients close: the name must still be the service's.
+        foreach (var (instance, client) in held)
+        {
+            await client.DisposeAsync();
+            await server.ReleaseAsync(instance);
+        }
+
+        Assert.Equal(1, server.Instances);
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.FirstPipeInstance).Dispose());
+
+        // And the kept instance takes the next client.
+        var next = recovered.WaitForConnectionAsync(ct);
+        using var tray = Client();
+        await tray.ConnectAsync(5000, ct);
+        await next;
+        await server.ReleaseAsync(recovered);
+    }
+
+    [Fact]
+    public void Without_an_instance_of_its_own_the_service_never_joins_a_pipe_someone_else_created()
+    {
+        _f.Create().Initialize();
+        using var squatter = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, PipeServer.MaxInstances, PipeTransmissionMode.Byte, PipeOptions.FirstPipeInstance);
+        var server = Server();
+        Assert.Null(server.CreateListening());
+        Assert.Equal(0, server.Instances);
+        Assert.Contains(_f.Logs.Lines, l => l.Contains("already exists in another process", StringComparison.Ordinal));
+    }
+
+    private NamedPipeClientStream Client() =>
+        new(".", _pipeName, PipeClient.Rights, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification, HandleInheritability.None);
+
+    [Fact]
     public async Task Clients_that_connect_and_close_at_once_do_not_stop_the_server()
     {
         _f.Create().Initialize();

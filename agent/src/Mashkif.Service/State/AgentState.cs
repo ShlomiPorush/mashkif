@@ -98,7 +98,8 @@ internal sealed partial record AgentState
         {
             IdentityStates.None => Identity is null,
             IdentityStates.Active => Identity is not null && Pending is null,
-            IdentityStates.TokenRejected => Identity is not null,
+            // The 401 cycle always has the pending token it registers next.
+            IdentityStates.TokenRejected => Identity is not null && Pending is not null,
             IdentityStates.Revoked => Identity is null && Pending is null,
             _ => false,
         };

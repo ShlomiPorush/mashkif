@@ -1,9 +1,11 @@
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Mashkif.Common.Pipe;
 using Mashkif.Service.Agent;
 using Mashkif.Service.State;
+using Microsoft.Win32.SafeHandles;
 
 namespace Mashkif.Service.Pipe;
 
@@ -46,16 +48,31 @@ internal static class PipeAcl
 
 /// <summary>
 /// The local pipe the tray app talks to. One request line and one response
-/// line per connection. The first instance is created with
-/// <see cref="PipeOptions.FirstPipeInstance"/>, so a pipe that another process
-/// created first is never joined.
+/// line per connection.
 /// </summary>
+/// <remarks>
+/// The pipe name must never be free while the service runs, or a local user
+/// could create a pipe with that name and receive the tray's requests. So an
+/// instance is released only when another instance of this process exists,
+/// and a broken listening instance is put back to listening instead of being
+/// replaced when no replacement can be created. An instance created while
+/// the process has none uses <see cref="PipeOptions.FirstPipeInstance"/>, so
+/// a pipe that another process created is never joined.
+/// </remarks>
 internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity security, string pipeName, ILogger<PipeServer> logger, TimeProvider time)
 {
     /// <summary>Most instances: one listening, the rest handling connections.</summary>
     public const int MaxInstances = 4;
 
     private static readonly TimeSpan SquatRetry = TimeSpan.FromSeconds(30);
+
+    private static readonly TimeSpan CreateRetry = TimeSpan.FromSeconds(1);
+
+    // Instances of this process that exist now, listening or connected.
+    private int _instances;
+
+    /// <summary>Instances of this process that exist now. For tests.</summary>
+    internal int Instances => Volatile.Read(ref _instances);
 
     public async Task RunAsync(CancellationToken stoppingToken)
     {
@@ -67,8 +84,8 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
             {
                 while (listening is null)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(1), time, stoppingToken).ConfigureAwait(false);
-                    listening = TryCreate(first: false);
+                    await Task.Delay(CreateRetry, time, stoppingToken).ConfigureAwait(false);
+                    listening = CreateListening();
                 }
 
                 try
@@ -78,19 +95,17 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
                 catch (IOException)
                 {
                     // A client connected and closed before the wait completed
-                    // ("the pipe is being closed"). Replace the instance and go on;
-                    // the replacement is created first, so the name stays ours.
-                    var replacement = TryCreate(first: false);
-                    await listening.DisposeAsync().ConfigureAwait(false);
-                    listening = replacement;
+                    // ("the pipe is being closed").
+                    listening = await RecoverAsync(listening, stoppingToken).ConfigureAwait(false);
                     continue;
                 }
 
                 await handlers.WaitAsync(stoppingToken).ConfigureAwait(false);
 
-                // Create the next instance before this one is handed off, so the
-                // pipe name always has an instance of this process.
-                var next = TryCreate(first: false);
+                // The next instance is created before this one is handed off.
+                // If that fails, the connected instance still holds the name
+                // until the loop creates one.
+                var next = CreateListening();
                 var connected = listening;
                 listening = next;
                 _ = HandleAsync(connected, handlers, stoppingToken);
@@ -100,9 +115,47 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
         {
             if (listening is not null)
             {
-                await listening.DisposeAsync().ConfigureAwait(false);
+                await ReleaseAsync(listening).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// Creates a listening instance. Without an instance of this process the
+    /// name may belong to someone else, so the instance must be the first one.
+    /// </summary>
+    internal NamedPipeServerStream? CreateListening() => TryCreate(first: Instances == 0);
+
+    /// <summary>
+    /// After a client left before the wait completed: puts the instance back to
+    /// listening, or replaces it when that fails. It is released only after a
+    /// replacement exists; with neither, it is kept and tried again shortly.
+    /// </summary>
+    internal async Task<NamedPipeServerStream> RecoverAsync(NamedPipeServerStream broken, CancellationToken cancellationToken)
+    {
+        // Documented reuse: DisconnectNamedPipe, then ConnectNamedPipe again.
+        if (DisconnectNamedPipe(broken.SafePipeHandle))
+        {
+            return broken;
+        }
+
+        var replacement = CreateListening();
+        if (replacement is not null)
+        {
+            await ReleaseAsync(broken).ConfigureAwait(false);
+            return replacement;
+        }
+
+        LogRecoverFailed(logger);
+        await Task.Delay(CreateRetry, time, cancellationToken).ConfigureAwait(false);
+        return broken;
+    }
+
+    /// <summary>Disposes an instance of this process.</summary>
+    internal async ValueTask ReleaseAsync(NamedPipeServerStream pipe)
+    {
+        await pipe.DisposeAsync().ConfigureAwait(false);
+        Interlocked.Decrement(ref _instances);
     }
 
     private async Task<NamedPipeServerStream> CreateFirstAsync(CancellationToken stoppingToken)
@@ -123,7 +176,7 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
     {
         try
         {
-            return NamedPipeServerStreamAcl.Create(
+            var pipe = NamedPipeServerStreamAcl.Create(
                 pipeName,
                 PipeDirection.InOut,
                 MaxInstances,
@@ -132,6 +185,8 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
                 PipeProtocol.MaxRequestBytes,
                 PipeProtocol.MaxResponseBytes,
                 security);
+            Interlocked.Increment(ref _instances);
+            return pipe;
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
         {
@@ -152,19 +207,16 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
     {
         try
         {
-            await using (pipe.ConfigureAwait(false))
-            {
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                timeout.CancelAfter(PipeProtocol.RequestTimeout);
-                var line = await PipeLines.ReadLineAsync(pipe, PipeProtocol.MaxRequestBytes, timeout.Token).ConfigureAwait(false);
-                var response = Dispatch(line);
-                await PipeLines.WriteLineAsync(pipe, response, PipeJsonContext.Default.PipeResponse, timeout.Token).ConfigureAwait(false);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            timeout.CancelAfter(PipeProtocol.RequestTimeout);
+            var line = await PipeLines.ReadLineAsync(pipe, PipeProtocol.MaxRequestBytes, timeout.Token).ConfigureAwait(false);
+            var response = Dispatch(line);
+            await PipeLines.WriteLineAsync(pipe, response, PipeJsonContext.Default.PipeResponse, timeout.Token).ConfigureAwait(false);
 
-                // Wait until the client has read the answer and closed its end.
-                var rest = new byte[1];
-                while (await pipe.ReadAsync(rest, timeout.Token).ConfigureAwait(false) > 0)
-                {
-                }
+            // Wait until the client has read the answer and closed its end.
+            var rest = new byte[1];
+            while (await pipe.ReadAsync(rest, timeout.Token).ConfigureAwait(false) > 0)
+            {
             }
         }
         catch (Exception exception) when (exception is IOException or OperationCanceledException or ObjectDisposedException)
@@ -173,6 +225,7 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
         }
         finally
         {
+            await ReleaseAsync(pipe).ConfigureAwait(false);
             handlers.Release();
         }
     }
@@ -207,4 +260,11 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
 
     [LoggerMessage(EventId = 31, Level = LogLevel.Warning, Message = "A new pipe instance could not be created: {Error}")]
     private static partial void LogCreateFailed(ILogger logger, string error);
+
+    [LoggerMessage(EventId = 32, Level = LogLevel.Warning, Message = "A pipe instance whose client left could not be reset or replaced; trying again in a second")]
+    private static partial void LogRecoverFailed(ILogger logger);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DisconnectNamedPipe(SafePipeHandle pipe);
 }
