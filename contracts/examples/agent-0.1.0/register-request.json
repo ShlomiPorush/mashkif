@@ -1,0 +1,9 @@
+{
+  "summary": "registerAgent request sent by agent 0.1.0",
+  "value": {
+    "installId": "3f8a1c2e-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
+    "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "agentVersion": "0.1.0",
+    "osVersion": "10.0.26100"
+  }
+}

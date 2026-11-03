@@ -8,7 +8,6 @@ export const ADMIN_PATHS = {
   forgotPassword: "/admin/forgot-password",
   resetPassword: "/admin/reset-password",
   agents: "/admin/agents",
-  keys: "/admin/keys",
   blocked: "/admin/blocked",
   providers: "/admin/providers",
   settings: "/admin/settings",
@@ -19,7 +18,6 @@ export type AdminPath = (typeof ADMIN_PATHS)[keyof typeof ADMIN_PATHS];
 /** Pages of a full admin session, in navigation order; the account page is home. */
 export const MANAGEMENT_PATHS = [
   ADMIN_PATHS.agents,
-  ADMIN_PATHS.keys,
   ADMIN_PATHS.blocked,
   ADMIN_PATHS.providers,
   ADMIN_PATHS.settings,

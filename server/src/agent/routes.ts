@@ -2,7 +2,7 @@ import type { components } from "@mashkif/contracts";
 import { eq } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { Db } from "../db/client.js";
-import { agent } from "../db/schema.js";
+import { agent, type TrustTier } from "../db/schema.js";
 import { describeSafely } from "../errors.js";
 import { classifyAreaCell } from "../geo/area.js";
 import { siteKeyOf } from "../geo/site.js";
@@ -15,12 +15,12 @@ import {
   peerAddress,
 } from "../http/request-guards.js";
 import { hashToken } from "../http/token-hash.js";
-import { readSettings } from "../settings.js";
+import { cachedSettings, knownSettings, readSettings } from "../settings.js";
 import { recordEvents } from "./events.js";
 import { recordHeartbeat } from "./heartbeat.js";
 import { parseEventsRequest, parseHeartbeat, parseRegister, TOKEN_PATTERN } from "./parse.js";
 import { type RegisterHooks, registerAgent } from "./register.js";
-import { addressBlocked } from "./write-guard.js";
+import type { WriteRefusal } from "./write-guard.js";
 
 type Schemas = components["schemas"];
 export type AgentErrorCode = Schemas["AgentErrorCode"];
@@ -32,8 +32,23 @@ export const AGENT_BODY_TIMEOUT_MS = 10_000;
 /** Most events in one request. */
 export const MAX_EVENTS_PER_REQUEST = 500;
 
-/** Registrations per client address. A retry after a lost answer fits easily. */
-export const REGISTER_RATE_LIMIT: RateLimitRule = { window: 600, max: 10 };
+/** The least register requests per site and minute that the pre-limit lets through. */
+export const REGISTER_PRE_LIMIT_MIN = 60;
+
+/**
+ * Register requests per site (an IPv4 address or an IPv6 /64) and minute,
+ * counted in memory before any database work, repeats included: per minute
+ * per site = max(REGISTER_PRE_LIMIT_MIN, registerPerSitePer10Min). It bounds
+ * the unauthenticated database work per site and never caps a per-site
+ * registration limit that the admin raised.
+ */
+export function registerPreLimit(perSitePer10Min: number): RateLimitRule {
+  return { window: 60, max: Math.max(REGISTER_PRE_LIMIT_MIN, perSitePer10Min) };
+}
+/** Window of the per-site register limit (its count is the setting registerPerSitePer10Min). */
+export const REGISTER_SITE_WINDOW_SECONDS = 600;
+/** Window of the global register limit (its count is the setting registerGlobalPerHour). */
+export const REGISTER_GLOBAL_WINDOW_SECONDS = 3600;
 /** Heartbeats per agent: the shortest interval is 30 seconds, plus retries. */
 export const HEARTBEAT_RATE_LIMIT: RateLimitRule = { window: 60, max: 10 };
 /** Events requests per agent: a backlog of batches after a long time offline. */
@@ -79,6 +94,14 @@ function refuse(
 ) {
   const body: Schemas["AgentError"] = field === undefined ? { error } : { error, field };
   return c.json(body, status);
+}
+
+/**
+ * A refused agent write. A missing agent row is 401 token_invalid, so the
+ * agent registers again; only an explicit revoke is agent_revoked (O14).
+ */
+function refuseWrite(c: Context, error: WriteRefusal) {
+  return error === "agent_missing" ? refuse(c, 401, "token_invalid") : refuse(c, 403, error);
 }
 
 async function readJson(c: Context): Promise<unknown> {
@@ -171,23 +194,79 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       console.error("agent registration without a usable client address");
       return refuse(c, 500, "internal_error");
     }
-    const refusal = await limited(registerLimits, c, `register:${address}`, REGISTER_RATE_LIMIT);
-    if (refusal !== undefined) {
-      return refusal;
-    }
-    if (await addressBlocked(deps.db, address)) {
-      return refuse(c, 403, "address_blocked");
+    // First, in memory and before any database work: every register request,
+    // also a repeat, counts against its site (an IPv4 address or an IPv6 /64).
+    // This bounds the unauthenticated database work per site.
+    // The pre-limit decides on what is already in memory: the settings last
+    // loaded, also when stale, and before the first load the minimum. No
+    // query happens before it, and a failed refresh never skips it.
+    const known = knownSettings(deps.db);
+    const site = siteKeyOf(address) as string;
+    const throttled = await limited(
+      registerLimits,
+      c,
+      `register:pre:${site}`,
+      registerPreLimit(known?.registerPerSitePer10Min ?? REGISTER_PRE_LIMIT_MIN),
+    );
+    if (throttled !== undefined) {
+      return throttled;
     }
     const parsed = parseRegister(await readJson(c));
     if (!parsed.ok) {
       return refuse(c, 400, "request_invalid", parsed.field);
     }
+    // Only an admitted request refreshes the cache, single-flight.
+    const settings = await cachedSettings(deps.db);
+    // What admit counted, so release can give it back when nothing was created.
+    const counted: { key: string; windowStart: number }[] = [];
+    const release = () => {
+      for (const { key, windowStart } of counted.splice(0)) {
+        registerLimits.refund(key, windowStart);
+      }
+    };
     const at = now();
-    const outcome = await registerAgent(deps.db, parsed.value, address, at, deps.testHooks);
+    const outcome = await registerAgent(
+      deps.db,
+      parsed.value,
+      address,
+      at,
+      {
+        open: settings.registrationOpen,
+        tier: settings.newAgentTier as TrustTier,
+        // Only a registration that would create an agent counts against the
+        // per-site and the global limit; a repeat of an existing one never does.
+        admit: async () => {
+          for (const [key, rule] of [
+            [
+              `register:site:${site}`,
+              { window: REGISTER_SITE_WINDOW_SECONDS, max: settings.registerPerSitePer10Min },
+            ],
+            [
+              "register:global",
+              { window: REGISTER_GLOBAL_WINDOW_SECONDS, max: settings.registerGlobalPerHour },
+            ],
+          ] as const) {
+            const decision = await registerLimits.consume(key, rule);
+            if (!decision.allowed) {
+              // A site unit already counted goes back when the global limit refuses.
+              release();
+              return decision.retryAfter ?? rule.window;
+            }
+            counted.push({ key, windowStart: decision.windowStart as number });
+          }
+          return undefined;
+        },
+        release,
+      },
+      deps.testHooks,
+    );
     if (!outcome.ok) {
+      if (outcome.error === "rate_limited") {
+        c.header("Retry-After", String(outcome.retryAfter ?? REGISTER_GLOBAL_WINDOW_SECONDS));
+        return refuse(c, 429, "rate_limited");
+      }
       return refuse(c, outcome.error === "install_id_conflict" ? 409 : 403, outcome.error);
     }
-    const settings = await readSettings(deps.db);
     const body: Schemas["RegisterResponse"] = {
       agentId: outcome.agentId,
       heartbeatIntervalSeconds: settings.heartbeatIntervalSeconds,
@@ -226,7 +305,7 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       now: now(),
     });
     if (!reply.ok) {
-      return refuse(c, 403, reply.error);
+      return refuseWrite(c, reply.error);
     }
     const body: Schemas["HeartbeatResponse"] = {
       syncId: reply.syncId,
@@ -248,6 +327,7 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
     if (parsed.value.events.length > MAX_EVENTS_PER_REQUEST) {
       return refuse(c, 413, "too_many_events");
     }
+    const settings = await readSettings(deps.db);
     await deps.testHooks?.beforeWrite?.();
     const recorded = await recordEvents(
       deps.db,
@@ -256,11 +336,18 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       parsed.value.events,
       parsed.value.droppedEvents,
       now(),
+      {
+        perAgentHour: settings.eventsPerAgentHour,
+        perLowAgentHour: settings.eventsPerLowAgentHour,
+      },
     );
     if (!recorded.ok) {
-      return refuse(c, 403, recorded.error);
+      return refuseWrite(c, recorded.error);
     }
-    const body: Schemas["EventsResponse"] = { results: recorded.results };
+    const body: Schemas["EventsResponse"] =
+      recorded.retryAfterSeconds === undefined
+        ? { results: recorded.results }
+        : { results: recorded.results, retryAfterSeconds: recorded.retryAfterSeconds };
     return c.json(body, 200);
   });
 

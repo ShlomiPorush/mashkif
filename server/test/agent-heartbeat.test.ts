@@ -42,7 +42,7 @@ async function setInterval(seconds: number) {
 describe("heartbeat", () => {
   it("records the heartbeat and answers with a sync ID, the server time, and the interval", async () => {
     harness.asn.table.set("203.0.113.", { asn: 64500, organization: "Example Net" });
-    const agent = await new TestAgent(harness).enroll(database);
+    const agent = await new TestAgent(harness).enroll();
     harness.now = new Date("2026-11-01T10:00:00.000Z");
     const reply = await agent.heartbeat({
       areaCell: TEL_AVIV,
@@ -82,7 +82,7 @@ describe("heartbeat", () => {
   });
 
   it("anchors a retry after a lost response at its own receive time, storing one sample", async () => {
-    const agent = await new TestAgent(harness).enroll(database);
+    const agent = await new TestAgent(harness).enroll();
     const t0 = new Date("2026-11-01T08:00:00.000Z");
     harness.now = t0;
     const first = await agent.heartbeat({}, { lose: true });
@@ -117,7 +117,7 @@ describe("heartbeat", () => {
   ])(
     "judges silence by the larger interval after an %s whose response was lost",
     async (_, from, to) => {
-      const agent = await new TestAgent(harness).enroll(database);
+      const agent = await new TestAgent(harness).enroll();
       await agent.heartbeat();
       expect(agent.interval).toBe(from);
 
@@ -146,7 +146,7 @@ describe("heartbeat", () => {
   );
 
   it("puts IPv6 addresses of one /64 on one site, and moves the agent when its address changes", async () => {
-    const agent = await new TestAgent(harness, "2001:db8:1:2::10").enroll(database);
+    const agent = await new TestAgent(harness, "2001:db8:1:2::10").enroll();
     await agent.heartbeat();
     expect(await agentRow(agent.agentId)).toMatchObject({
       address: "2001:db8:1:2::10",
@@ -177,13 +177,13 @@ describe("heartbeat", () => {
   });
 
   it("treats an IPv4-mapped peer address as IPv4", async () => {
-    const agent = await new TestAgent(harness, "::ffff:198.51.100.30").enroll(database);
+    const agent = await new TestAgent(harness, "::ffff:198.51.100.30").enroll();
     await agent.heartbeat();
     expect((await agentRow(agent.agentId))?.site_key).toBe("198.51.100.30");
   });
 
   it("stores a cell outside the service area as unknown and refuses a cell that is not resolution 7", async () => {
-    const agent = await new TestAgent(harness).enroll(database);
+    const agent = await new TestAgent(harness).enroll();
     expect((await agent.heartbeat({ areaCell: PARIS })).status).toBe(200);
     expect((await agentRow(agent.agentId))?.reported_cell).toBeNull();
 
@@ -197,7 +197,7 @@ describe("heartbeat", () => {
   });
 
   it("stores an infrastructure it does not know yet as unknown", async () => {
-    const agent = await new TestAgent(harness).enroll(database);
+    const agent = await new TestAgent(harness).enroll();
     expect((await agent.heartbeat({ infrastructure: "future_fiber" })).status).toBe(200);
     expect((await agentRow(agent.agentId))?.infrastructure).toBe("unknown");
   });
@@ -209,13 +209,13 @@ describe("heartbeat", () => {
     ["roundTripMs", { roundTripMs: 1.5 }],
     ["dnsMs", { dnsMs: "5" as unknown as number }],
   ])("refuses an invalid %s", async (field, overrides) => {
-    const agent = await new TestAgent(harness).enroll(database);
+    const agent = await new TestAgent(harness).enroll();
     const reply = await agent.post("/heartbeat", agent.heartbeatBody(overrides));
     expect(reply).toMatchObject({ status: 400, body: { error: "request_invalid", field } });
   });
 
   it("refuses a missing, malformed, unknown, or revoked token", async () => {
-    const agent = await new TestAgent(harness).enroll(database);
+    const agent = await new TestAgent(harness).enroll();
     expect(
       (await agent.post("/heartbeat", agent.heartbeatBody(), { authorization: "" })).body.error,
     ).toBe("token_invalid");
@@ -238,7 +238,7 @@ describe("heartbeat", () => {
   });
 
   it("refuses a blocked agent and a blocked address without storing anything", async () => {
-    const agent = await new TestAgent(harness).enroll(database);
+    const agent = await new TestAgent(harness).enroll();
     await database.sql`update agent set trust_tier = 'blocked'`;
     expect(await agent.heartbeat()).toMatchObject({
       status: 403,
@@ -262,8 +262,8 @@ describe("heartbeat", () => {
   });
 
   it("limits heartbeats per token with 429 and Retry-After", async () => {
-    const agent = await new TestAgent(harness).enroll(database);
-    const other = await new TestAgent(harness).enroll(database);
+    const agent = await new TestAgent(harness).enroll();
+    const other = await new TestAgent(harness).enroll();
     let last: Awaited<ReturnType<TestAgent["heartbeat"]>> | undefined;
     for (let i = 0; i < HEARTBEAT_RATE_LIMIT.max + 1; i++) {
       last = await agent.heartbeat();
@@ -279,7 +279,7 @@ describe("heartbeat", () => {
 describe("client address", () => {
   it("ignores X-Forwarded-For from a peer that is not a trusted proxy", async () => {
     harness = createHarness(database, { trustedProxies: ["10.0.0.0/8"] });
-    const agent = await new TestAgent(harness, "203.0.113.5").enroll(database);
+    const agent = await new TestAgent(harness, "203.0.113.5").enroll();
     await agent.post("/heartbeat", agent.heartbeatBody({ sequence: 1 }), {
       "x-forwarded-for": "198.51.100.99",
     });
@@ -288,7 +288,7 @@ describe("client address", () => {
 
   it("takes the right-most untrusted address behind a trusted proxy, ignoring what the client wrote", async () => {
     harness = createHarness(database, { trustedProxies: ["10.0.0.0/8"] });
-    const agent = await new TestAgent(harness, "10.0.0.2").enroll(database);
+    const agent = await new TestAgent(harness, "10.0.0.2").enroll();
     // The client wrote 192.0.2.1 itself; the proxy appended the real address.
     await agent.post("/heartbeat", agent.heartbeatBody({ sequence: 1 }), {
       "x-forwarded-for": "192.0.2.1, 198.51.100.40",

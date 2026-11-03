@@ -4,7 +4,7 @@ import { type AgentSummary, adminApi, type Infrastructure, type TrustTier } from
 import { Button, Field, Notice } from "../components";
 import { ManagePage, useAdminResource, useDateFormat, Value } from "../manage";
 
-const TIERS: TrustTier[] = ["trusted", "normal", "suspicious", "blocked"];
+const TIERS: TrustTier[] = ["trusted", "normal", "low", "suspicious", "blocked"];
 
 const INFRA_KEYS = {
   unknown: "infra.unknown",
@@ -41,6 +41,10 @@ function AgentEditor({
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
+  // Whether the admin changed the tier in this edit. A refreshed agent (for
+  // example promoted in the background) must never make an untouched select
+  // send its stale value, which would demote the agent and restart its trial.
+  const [tierChanged, setTierChanged] = useState(false);
   return (
     <form
       className="form agent-editor"
@@ -50,7 +54,7 @@ function AgentEditor({
         const cell = String(form.get("assignedCell")).trim().toLowerCase();
         void onSave({
           label: String(form.get("label")).trim(),
-          trustTier: String(form.get("trustTier")),
+          ...(tierChanged ? { trustTier: String(form.get("trustTier")) } : {}),
           assignedCell: cell === "" ? null : cell,
         });
       }}
@@ -71,6 +75,8 @@ function AgentEditor({
           className="field-input"
           name="trustTier"
           defaultValue={agent.trustTier}
+          onChange={() => setTierChanged(true)}
+          aria-describedby={`tier-help-${agent.id}`}
         >
           {TIERS.map((tier) => (
             <option key={tier} value={tier}>
@@ -78,6 +84,9 @@ function AgentEditor({
             </option>
           ))}
         </select>
+        <p id={`tier-help-${agent.id}`} className="field-help">
+          {t("agents.tierHelp")}
+        </p>
       </div>
       <Field
         label={t("agents.areaField")}
@@ -101,10 +110,12 @@ function AgentEditor({
 
 function AgentCard({
   agent,
+  promotionDays,
   busy,
   act,
 }: {
   agent: AgentSummary;
+  promotionDays: number;
   busy: boolean;
   act: (change: () => Promise<unknown>) => Promise<boolean>;
 }) {
@@ -126,6 +137,15 @@ function AgentCard({
         </span>
       </div>
       <dl className="facts">
+        {!revoked && agent.trustTier === "low" && (
+          <div>
+            <dt>{t("agents.trial")}</dt>
+            <dd>
+              {t("agents.trialDays", { days: agent.activeDays, needed: promotionDays })}{" "}
+              <span className="fact-note">{t("agents.trialRule")}</span>
+            </dd>
+          </div>
+        )}
         <div>
           <dt>{t("agents.lastSeen")}</dt>
           <dd>
@@ -277,10 +297,10 @@ function AgentCard({
 /** Registered agents with their latest heartbeat, and editing of label, tier, and area. */
 export function AgentsPage({ onSessionLost }: { onSessionLost: () => Promise<void> }) {
   const { t } = useTranslation();
-  const { data, error, busy, act } = useAdminResource<{ agents: AgentSummary[] }>(
-    "/agents",
-    onSessionLost,
-  );
+  const { data, error, busy, act } = useAdminResource<{
+    agents: AgentSummary[];
+    promotionDays: number;
+  }>("/agents", onSessionLost);
   return (
     <ManagePage heading={t("agents.heading")} intro={t("agents.intro")}>
       <Notice error={error} />
@@ -290,7 +310,13 @@ export function AgentsPage({ onSessionLost }: { onSessionLost: () => Promise<voi
       {data !== undefined && data.agents.length > 0 && (
         <ul className="agent-list">
           {data.agents.map((agent) => (
-            <AgentCard key={agent.id} agent={agent} busy={busy} act={act} />
+            <AgentCard
+              key={agent.id}
+              agent={agent}
+              promotionDays={data.promotionDays}
+              busy={busy}
+              act={act}
+            />
           ))}
         </ul>
       )}

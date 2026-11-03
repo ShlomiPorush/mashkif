@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { MAX_EVENTS_PER_REQUEST } from "../src/agent/routes.js";
-import { TestAgent } from "./support/agent.js";
+import { setSetting, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import { createHarness, type Harness } from "./support/harness.js";
 
@@ -43,7 +43,7 @@ async function agentState(id: string | undefined) {
 
 /** An enrolled agent whose first heartbeat was received at T0. */
 async function syncedAgent(): Promise<TestAgent> {
-  const agent = await new TestAgent(harness).enroll(database);
+  const agent = await new TestAgent(harness).enroll();
   expect((await agent.heartbeat()).status).toBe(200);
   return agent;
 }
@@ -196,6 +196,8 @@ describe("events", () => {
   });
 
   it("accepts a batch that fills the 64 KB limit", async () => {
+    // A new agent is low, with a budget of 200 events an hour by default.
+    await setSetting(database, "events_per_low_agent_hour", 1000);
     const agent = await syncedAgent();
     harness.now = at(10 * MINUTE);
     // 64 KB binds before 500 events: 350 events with sync IDs fit.

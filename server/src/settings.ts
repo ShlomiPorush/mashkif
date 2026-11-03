@@ -4,6 +4,9 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { setting } from "./db/schema.js";
 import { parseTrustedProxies } from "./http/client-address.js";
 
+/** Tiers the admin may choose for new agents: trusted is too generous for an unknown PC, and blocked would register and then refuse. */
+export const NEW_AGENT_TIERS = ["low", "normal", "suspicious"] as const;
+
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
@@ -129,6 +132,65 @@ export const SETTING_RULES = {
     apply: "now",
     parse: integer(8, 3650),
   } satisfies Rule<number>,
+  /** Whether new agents may register (decision of 2026-11-03); existing agents are not affected. */
+  registrationOpen: {
+    key: "registration_open",
+    default: true,
+    apply: "now",
+    parse: (value: unknown) => (typeof value === "boolean" ? value : undefined),
+  } satisfies Rule<boolean>,
+  /** The trust tier of a new agent; low agents are promoted after their trial. */
+  newAgentTier: {
+    key: "new_agent_tier",
+    default: "low" as string,
+    apply: "now",
+    parse: (value: unknown) =>
+      typeof value === "string" && (NEW_AGENT_TIERS as readonly string[]).includes(value)
+        ? value
+        : undefined,
+  } satisfies Rule<string>,
+  /** Distinct days a low agent must report on before it becomes normal. */
+  promotionDays: {
+    key: "promotion_days",
+    default: 7,
+    apply: "now",
+    parse: integer(1, 90),
+  } satisfies Rule<number>,
+  /** New registrations per site (an IPv4 address or an IPv6 /64) in 10 minutes. */
+  registerPerSitePer10Min: {
+    key: "register_per_site_per_10min",
+    default: 10,
+    apply: "now",
+    parse: integer(1, 1000),
+  } satisfies Rule<number>,
+  /** New registrations per hour across all sites. */
+  registerGlobalPerHour: {
+    key: "register_global_per_hour",
+    default: 200,
+    apply: "now",
+    parse: integer(1, 100_000),
+  } satisfies Rule<number>,
+  /** Events stored per agent per hour; events past it are deferred. */
+  eventsPerAgentHour: {
+    key: "events_per_agent_hour",
+    default: 2000,
+    apply: "now",
+    parse: integer(100, 100_000),
+  } satisfies Rule<number>,
+  /** The same budget for low agents. */
+  eventsPerLowAgentHour: {
+    key: "events_per_low_agent_hour",
+    default: 200,
+    apply: "now",
+    parse: integer(10, 100_000),
+  } satisfies Rule<number>,
+  /** Agents that registered but never sent a heartbeat are deleted after this many days. */
+  agentCleanupDays: {
+    key: "agent_cleanup_days",
+    default: 30,
+    apply: "now",
+    parse: integer(7, 3650),
+  } satisfies Rule<number>,
   /** Origin of the web app; empty lets Better Auth infer it from each request. */
   publicUrl: {
     key: "public_url",
@@ -212,11 +274,13 @@ export const SETTING_RULES = {
 
 export type SettingName = keyof typeof SETTING_RULES;
 export type Settings = {
-  [K in SettingName]: (typeof SETTING_RULES)[K]["default"] extends number
-    ? number
-    : (typeof SETTING_RULES)[K]["default"] extends string
-      ? string
-      : string[];
+  [K in SettingName]: (typeof SETTING_RULES)[K]["default"] extends boolean
+    ? boolean
+    : (typeof SETTING_RULES)[K]["default"] extends number
+      ? number
+      : (typeof SETTING_RULES)[K]["default"] extends string
+        ? string
+        : string[];
 };
 
 const NAMES = Object.keys(SETTING_RULES) as SettingName[];
@@ -317,6 +381,82 @@ export async function resolveSettings(
 /** The current settings without secrets; see resolveSettings. */
 export async function readSettings(db: Database, env?: NodeJS.ProcessEnv): Promise<Settings> {
   return (await resolveSettings(db, env === undefined ? {} : { env })).values;
+}
+
+/** How long the in-process settings cache serves a value before it reads the database again. */
+export const SETTINGS_CACHE_TTL_MS = 5_000;
+
+let cacheGeneration = 0;
+let cached = new WeakMap<object, { at: number; generation: number; values: Settings }>();
+let refreshing = new WeakMap<object, { generation: number; promise: Promise<Settings> }>();
+
+/** For tests: forgets every loaded value, as in a process that just started. */
+export function resetSettingsCache(): void {
+  cached = new WeakMap();
+  refreshing = new WeakMap();
+  cacheGeneration += 1;
+}
+
+/**
+ * The settings last loaded into the cache, also when stale, or undefined
+ * before the first load. Synchronous and without a query, for decisions that
+ * must come before any database work (the register pre-limit).
+ */
+export function knownSettings(db: Database): Settings | undefined {
+  return cached.get(db)?.values;
+}
+
+/**
+ * The current settings (with the process environment), from an in-process
+ * cache: at most SETTINGS_CACHE_TTL_MS old, and read again after every save
+ * from the admin panel in this process (invalidateSettingsCache). A refresh
+ * is single-flight: every caller shares the one query in flight. When a
+ * refresh fails, the last good value is kept and returned; only before the
+ * first successful load does the failure reach the caller.
+ */
+export async function cachedSettings(db: Database, now = Date.now()): Promise<Settings> {
+  const hit = cached.get(db);
+  if (
+    hit !== undefined &&
+    hit.generation === cacheGeneration &&
+    now - hit.at < SETTINGS_CACHE_TTL_MS
+  ) {
+    return hit.values;
+  }
+  // Join a refresh only if it started in the current generation: one that
+  // started before a save would answer with the settings from before it.
+  const inFlight = refreshing.get(db);
+  if (inFlight !== undefined && inFlight.generation === cacheGeneration) {
+    return inFlight.promise;
+  }
+  const generation = cacheGeneration;
+  const refresh: Promise<Settings> = readSettings(db)
+    .then((values) => {
+      // Stored only while still current; a save since then made it stale.
+      if (generation === cacheGeneration) {
+        cached.set(db, { at: now, generation, values });
+      }
+      return values;
+    })
+    .catch((error: unknown) => {
+      if (hit === undefined) {
+        throw error;
+      }
+      console.error("settings refresh failed; using the last loaded settings");
+      return hit.values;
+    })
+    .finally(() => {
+      if (refreshing.get(db)?.promise === refresh) {
+        refreshing.delete(db);
+      }
+    });
+  refreshing.set(db, { generation, promise: refresh });
+  return refresh;
+}
+
+/** Makes cachedSettings read the database again; called after a settings save commits. */
+export function invalidateSettingsCache(): void {
+  cacheGeneration += 1;
 }
 
 /**

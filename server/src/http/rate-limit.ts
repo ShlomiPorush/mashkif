@@ -7,6 +7,8 @@ export interface RateLimitRule {
 export interface RateLimitDecision {
   allowed: boolean;
   retryAfter: number | null;
+  /** Start of the window the request was counted in (for refund), or null when refused. */
+  windowStart: number | null;
 }
 
 const MAX_ENTRIES = 100_000;
@@ -31,13 +33,28 @@ export class MemoryRateLimitStore {
       this.#entries.delete(key);
       this.#prune(now);
       this.#entries.set(key, { start: now, count: cost, window: windowMs });
-      return { allowed: true, retryAfter: null };
+      return { allowed: true, retryAfter: null, windowStart: now };
     }
     if (entry.count >= rule.max) {
-      return { allowed: false, retryAfter: Math.ceil((entry.start + windowMs - now) / 1000) };
+      return {
+        allowed: false,
+        retryAfter: Math.ceil((entry.start + windowMs - now) / 1000),
+        windowStart: null,
+      };
     }
     entry.count += cost;
-    return { allowed: true, retryAfter: null };
+    return { allowed: true, retryAfter: null, windowStart: entry.start };
+  }
+
+  /**
+   * Gives back what an allowed request counted, if its window is still the
+   * current one; a window that started since keeps its own count.
+   */
+  refund(key: string, windowStart: number, cost = 1): void {
+    const entry = this.#entries.get(key);
+    if (entry !== undefined && entry.start === windowStart) {
+      entry.count = Math.max(0, entry.count - cost);
+    }
   }
 
   /** Entries kept, for tests. */

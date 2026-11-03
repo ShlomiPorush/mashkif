@@ -1,0 +1,21 @@
+{
+  "summary": "Results of an events request past the hourly budget",
+  "value": {
+    "results": [
+      {
+        "id": "9b2f6c1e-3a4d-4b5e-8f60-718293a4b5c6",
+        "status": "accepted",
+        "timeUncertain": false
+      },
+      {
+        "id": "0c3a7d2f-4b5e-4c6f-9a71-8293a4b5c6d7",
+        "status": "duplicate"
+      },
+      {
+        "id": "1d4b8e3a-5c6f-4d7a-8b82-93a4b5c6d7e8",
+        "status": "deferred"
+      }
+    ],
+    "retryAfterSeconds": 1520
+  }
+}

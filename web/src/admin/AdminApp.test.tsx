@@ -613,6 +613,7 @@ const AGENT = {
   id: "11111111-2222-4333-8444-555555555555",
   label: "Office PC",
   trustTier: "normal",
+  activeDays: 12,
   agentVersion: "0.1.0",
   osVersion: "10.0.26100",
   registeredAt: "2026-11-01T08:00:00.000Z",
@@ -632,9 +633,36 @@ const AGENT = {
   droppedEvents: "2",
 };
 
+/** A new agent in its trial. */
+const LOW_AGENT = {
+  ...AGENT,
+  id: "66666666-7777-4888-8999-000000000000",
+  label: "Kitchen PC",
+  trustTier: "low",
+  activeDays: 2,
+  address: "198.51.100.7",
+  siteKey: "198.51.100.7",
+  asn: null,
+  asOrganization: null,
+  providerName: null,
+  reportedCell: null,
+  infrastructure: "unknown",
+  lastEventKind: null,
+  lastEventAt: null,
+  droppedEvents: "0",
+};
+
 const SETTINGS = {
   heartbeatIntervalSeconds: 60,
   retentionDays: 30,
+  registrationOpen: true,
+  newAgentTier: "low",
+  promotionDays: 7,
+  registerPerSitePer10Min: 10,
+  registerGlobalPerHour: 200,
+  eventsPerAgentHour: 2000,
+  eventsPerLowAgentHour: 200,
+  agentCleanupDays: 30,
   publicUrl: "",
   trustedOrigins: [],
   trustedProxies: [],
@@ -648,6 +676,14 @@ const SETTINGS = {
   apply: {
     heartbeatIntervalSeconds: "now",
     retentionDays: "now",
+    registrationOpen: "now",
+    newAgentTier: "now",
+    promotionDays: "now",
+    registerPerSitePer10Min: "now",
+    registerGlobalPerHour: "now",
+    eventsPerAgentHour: "now",
+    eventsPerLowAgentHour: "now",
+    agentCleanupDays: "now",
     publicUrl: "restart",
     trustedOrigins: "now",
     trustedProxies: "restart",
@@ -672,24 +708,10 @@ const SETTINGS = {
   geoip: { state: "ok", buildDate: "2026-10-28T00:00:00.000Z", stale: false },
 };
 
-const KEY = {
-  id: 7,
-  label: "Kitchen PC",
-  createdAt: "2026-11-01T08:00:00.000Z",
-  expiresAt: "2026-11-02T08:00:00.000Z",
-  usedAt: null,
-  revokedAt: null,
-  agentId: null,
-  status: "active",
-};
-
 /** Every management resource, with data. */
 function managed(extra: Routes = {}): Routes {
   return boot(false, FULL, {
-    "/api/admin/agents": { agents: [AGENT] },
-    "/api/admin/enrollment-keys": {
-      keys: [KEY, { ...KEY, id: 8, status: "used", usedAt: "2026-11-01T09:00:00.000Z" }],
-    },
+    "/api/admin/agents": { agents: [AGENT, LOW_AGENT], promotionDays: 7 },
     "/api/admin/blocked-ranges": {
       ranges: [
         {
@@ -709,7 +731,6 @@ function managed(extra: Routes = {}): Routes {
 
 const managementPages = [
   ["agents", "/admin/agents", en.agents.heading],
-  ["enrollment keys", "/admin/keys", en.keys.heading],
   ["blocked addresses", "/admin/blocked", en.blocked.heading],
   ["providers", "/admin/providers", en.providers.heading],
   ["settings", "/admin/settings", en.settings.heading],
@@ -738,8 +759,7 @@ describe("management pages", () => {
     window.history.replaceState(null, "", path);
     serve(
       managed({
-        "/api/admin/agents": { agents: [] },
-        "/api/admin/enrollment-keys": { keys: [] },
+        "/api/admin/agents": { agents: [], promotionDays: 7 },
         "/api/admin/blocked-ranges": { ranges: [] },
         "/api/admin/providers": { providers: [] },
       }),
@@ -773,7 +793,9 @@ describe("management pages", () => {
     window.history.replaceState(null, "", "/admin/agents");
     const calls = serve(managed({ [`POST /api/admin/agents/${AGENT.id}`]: { ok: true } }));
     renderAdmin(createI18n("en"));
-    fireEvent.click(await screen.findByRole("button", { name: en.common.edit }));
+    fireEvent.click(
+      (await screen.findAllByRole("button", { name: en.common.edit }))[0] as HTMLElement,
+    );
     fireEvent.change(screen.getByLabelText(en.agents.labelField), { target: { value: "Den" } });
     fireEvent.change(screen.getByLabelText(en.agents.tierField), { target: { value: "trusted" } });
     fireEvent.change(screen.getByLabelText(en.agents.areaField), {
@@ -789,42 +811,81 @@ describe("management pages", () => {
     );
   });
 
+  it("send the tier only when the admin changed it, so a label edit never demotes or restarts a trial", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    const calls = serve(managed({ [`POST /api/admin/agents/${LOW_AGENT.id}`]: { ok: true } }));
+    renderAdmin(createI18n("en"));
+    fireEvent.click(
+      (await screen.findAllByRole("button", { name: en.common.edit }))[1] as HTMLElement,
+    );
+    fireEvent.change(screen.getByLabelText(en.agents.labelField), { target: { value: "Den" } });
+    fireEvent.click(screen.getByRole("button", { name: en.common.save }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.path === `/api/admin/agents/${LOW_AGENT.id}`)?.body).toEqual(
+        {
+          label: "Den",
+          assignedCell: null,
+        },
+      ),
+    );
+  });
+
+  it("never send a stale tier when the agent was promoted while its form was open", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    const routes = managed({
+      [`POST /api/admin/agents/${AGENT.id}/revoke`]: { ok: true },
+      [`POST /api/admin/agents/${LOW_AGENT.id}`]: { ok: true },
+    });
+    const calls = serve(routes);
+    renderAdmin(createI18n("en"));
+    // The admin opens the low agent's form.
+    fireEvent.click(
+      (await screen.findAllByRole("button", { name: en.common.edit }))[1] as HTMLElement,
+    );
+    expect((screen.getByLabelText(en.agents.tierField) as HTMLSelectElement).value).toBe("low");
+    // Meanwhile the agent is promoted; another change reloads the list.
+    routes["/api/admin/agents"] = {
+      agents: [AGENT, { ...LOW_AGENT, trustTier: "normal" }],
+      promotionDays: 7,
+    };
+    fireEvent.click(screen.getByRole("button", { name: en.agents.revoke }));
+    fireEvent.click(screen.getByRole("button", { name: en.agents.revokeConfirm }));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.path === "/api/admin/agents").length).toBe(2),
+    );
+    // The label is saved; the untouched tier select is not sent.
+    fireEvent.change(screen.getByLabelText(en.agents.labelField), { target: { value: "Den" } });
+    fireEvent.click(screen.getByRole("button", { name: en.common.save }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.path === `/api/admin/agents/${LOW_AGENT.id}`)?.body).toEqual(
+        { label: "Den", assignedCell: null },
+      ),
+    );
+  });
+
+  it("show a low agent's trial as active days of the trial length", async () => {
+    window.history.replaceState(null, "", "/admin/agents");
+    serve(managed());
+    renderAdmin(createI18n("en"));
+    expect(await screen.findByText(en.tier.low)).toBeTruthy();
+    expect(
+      screen.getByText(en.agents.trialDays.replace("{{days}}", "2").replace("{{needed}}", "7")),
+    ).toBeTruthy();
+    // A normal agent has no trial line.
+    expect(screen.getAllByText(en.agents.trial)).toHaveLength(1);
+  });
+
   it("revoke an agent only after a second click", async () => {
     window.history.replaceState(null, "", "/admin/agents");
     const calls = serve(managed({ [`POST /api/admin/agents/${AGENT.id}/revoke`]: { ok: true } }));
     renderAdmin(createI18n("en"));
-    fireEvent.click(await screen.findByRole("button", { name: en.agents.revoke }));
+    fireEvent.click(
+      (await screen.findAllByRole("button", { name: en.agents.revoke }))[0] as HTMLElement,
+    );
     expect(calls.some((call) => call.path.endsWith("/revoke"))).toBe(false);
     expect(screen.getByText(en.agents.revokeHelp)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: en.agents.revokeConfirm }));
     await waitFor(() => expect(calls.some((call) => call.path.endsWith("/revoke"))).toBe(true));
-  });
-
-  it("show a new enrollment key once", async () => {
-    window.history.replaceState(null, "", "/admin/keys");
-    const secret = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
-    const calls = serve(
-      managed({ "POST /api/admin/enrollment-keys": { secret, key: { ...KEY, label: "Den PC" } } }),
-    );
-    renderAdmin(createI18n("en"));
-    fireEvent.change(await screen.findByLabelText(en.keys.label), { target: { value: "Den PC" } });
-    fireEvent.change(screen.getByLabelText(en.keys.validity), { target: { value: "72" } });
-    fireEvent.click(screen.getByRole("button", { name: en.keys.create }));
-    expect(await screen.findByText(secret)).toBeTruthy();
-    expect(calls.find((call) => call.method === "POST")?.body).toEqual({
-      label: "Den PC",
-      validHours: 72,
-    });
-    fireEvent.click(screen.getByRole("button", { name: en.keys.done }));
-    expect(screen.queryByText(secret)).toBeNull();
-  });
-
-  it("offer revoke only for active keys", async () => {
-    window.history.replaceState(null, "", "/admin/keys");
-    serve(managed());
-    renderAdmin(createI18n("en"));
-    await screen.findAllByText("Kitchen PC");
-    expect(screen.getAllByRole("button", { name: en.keys.revoke })).toHaveLength(1);
   });
 
   it("refuse ASNs that are not numbers before sending", async () => {
@@ -858,6 +919,28 @@ describe("management pages", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(he.errors.rangeInvalid);
   });
 
+  it("close registration and choose the tier of new PCs", async () => {
+    window.history.replaceState(null, "", "/admin/settings");
+    const calls = serve(managed({ "POST /api/admin/settings": SETTINGS }));
+    renderAdmin(createI18n("en"));
+    fireEvent.change(await screen.findByLabelText(en.settings.registrationOpen), {
+      target: { value: "false" },
+    });
+    fireEvent.change(screen.getByLabelText(en.settings.newAgentTier), {
+      target: { value: "normal" },
+    });
+    fireEvent.change(screen.getByLabelText(en.settings.registerGlobalPerHour), {
+      target: { value: "1000" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.settings.save }));
+    expect(await screen.findByText(en.settings.saved)).toBeTruthy();
+    expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({
+      registrationOpen: false,
+      newAgentTier: "normal",
+      registerGlobalPerHour: 1000,
+    });
+  });
+
   it("save the settings and confirm", async () => {
     window.history.replaceState(null, "", "/admin/settings");
     const calls = serve(managed({ "POST /api/admin/settings": SETTINGS }));
@@ -877,6 +960,14 @@ describe("management pages", () => {
     expect(calls.find((call) => call.method === "POST")?.body).toEqual({
       heartbeatIntervalSeconds: 120,
       retentionDays: 30,
+      registrationOpen: true,
+      newAgentTier: "low",
+      promotionDays: 7,
+      registerPerSitePer10Min: 10,
+      registerGlobalPerHour: 200,
+      eventsPerAgentHour: 2000,
+      eventsPerLowAgentHour: 200,
+      agentCleanupDays: 30,
       publicUrl: "",
       trustedOrigins: [],
       trustedProxies: ["172.18.0.0/16", "10.0.0.1"],

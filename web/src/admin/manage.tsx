@@ -88,7 +88,6 @@ export function Value({ children, ltr = false }: { children: ReactNode; ltr?: bo
 
 const NAV_KEYS = {
   [ADMIN_PATHS.agents]: "nav.agents",
-  [ADMIN_PATHS.keys]: "nav.keys",
   [ADMIN_PATHS.blocked]: "nav.blocked",
   [ADMIN_PATHS.providers]: "nav.providers",
   [ADMIN_PATHS.settings]: "nav.settings",

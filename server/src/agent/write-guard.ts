@@ -31,7 +31,13 @@ export async function addressBlocked(db: Database, address: string): Promise<boo
   return rows.length > 0;
 }
 
-export type WriteRefusal = "agent_revoked" | "agent_blocked" | "address_blocked";
+/**
+ * Why an agent write is refused. `agent_missing`: the agent row is gone (the
+ * cleanup of agents that never reported deleted it between the token lookup
+ * and this lock); the agent gets 401 `token_invalid` and registers again.
+ * Only an explicit revoke gives `agent_revoked`.
+ */
+export type WriteRefusal = "agent_missing" | "agent_revoked" | "agent_blocked" | "address_blocked";
 
 /**
  * Checks, inside a write transaction, that the agent may still write: it
@@ -50,7 +56,10 @@ export async function guardAgentWrite(
     .from(agent)
     .where(eq(agent.id, agentId))
     .for("update");
-  if (row === undefined || row.revokedAt !== null) {
+  if (row === undefined) {
+    return "agent_missing";
+  }
+  if (row.revokedAt !== null) {
     return "agent_revoked";
   }
   if (row.trustTier === "blocked") {

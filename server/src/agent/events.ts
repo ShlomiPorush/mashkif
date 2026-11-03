@@ -1,5 +1,5 @@
 import type { components } from "@mashkif/contracts";
-import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agent, agentEvent, syncAnchor, type TimeUncertainReason } from "../db/schema.js";
 import { recordDroppedEvents } from "./boots.js";
@@ -10,6 +10,9 @@ export type EventResult = components["schemas"]["EventResult"];
 
 /** Events older than this do not refine history (the backfill window). */
 export const BACKFILL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Length of an event budget window. */
+export const EVENT_WINDOW_MS = 60 * 60 * 1000;
 
 interface Sync {
   serverTime: Date;
@@ -52,6 +55,16 @@ export function eventTime(event: EventInput, sync: Sync | undefined, receivedAt:
   return { occurredAt, uncertain: null };
 }
 
+/** The hourly event budgets of the settings. */
+export interface EventBudgets {
+  perAgentHour: number;
+  perLowAgentHour: number;
+}
+
+export type RecordedEvents =
+  | { ok: true; results: EventResult[]; retryAfterSeconds?: number }
+  | { ok: false; error: WriteRefusal };
+
 /**
  * Stores a batch of events, each judged on its own, and answers one result
  * per event in request order. The latest event with a certain time becomes
@@ -59,6 +72,16 @@ export function eventTime(event: EventInput, sync: Sync | undefined, receivedAt:
  * latest heartbeat and its current event, so a late event never changes the
  * state of an agent that has reported since. The transaction first checks,
  * under the agent row lock, that the agent may still write.
+ *
+ * Event budget: an agent stores at most its budget of events per hour of
+ * database time. The window and its count live on the agent row and change
+ * only under its lock, so concurrent requests of one agent never store more
+ * than the budget. The window moves only forward: a request with an earlier
+ * clock reading, or a clock set back, counts against the stored window. An
+ * event that is already stored is `duplicate`, an invalid one `rejected`;
+ * neither costs budget. New events past the budget are `deferred`, are not
+ * stored, and the response says when the budget renews. An ID repeated
+ * within one request gets the result of its first occurrence.
  */
 export async function recordEvents(
   db: Db,
@@ -67,19 +90,47 @@ export async function recordEvents(
   rawEvents: unknown[],
   droppedEvents: DroppedEvents | undefined,
   receivedAt: Date,
-): Promise<{ ok: true; results: EventResult[] } | { ok: false; error: WriteRefusal }> {
+  budgets: EventBudgets,
+): Promise<RecordedEvents> {
   const parsed = rawEvents.map(parseEvent);
   const syncIds = [
     ...new Set(
       parsed.flatMap((item) => (item.ok && item.event.syncId !== null ? [item.event.syncId] : [])),
     ),
   ];
+  const eventIds = [...new Set(parsed.flatMap((item) => (item.ok ? [item.event.id] : [])))];
 
-  return db.transaction(async (tx) => {
+  return db.transaction(async (tx): Promise<RecordedEvents> => {
     const refusal = await guardAgentWrite(tx, agentId, address);
     if (refusal !== undefined) {
-      return { ok: false as const, error: refusal };
+      return { ok: false, error: refusal };
     }
+
+    // The window time is read after the lock, from the database clock.
+    const [budgetRow] = await tx
+      .select({
+        nowMs: sql<number>`(extract(epoch from now()) * 1000)::float8`.mapWith(Number),
+        hourMs: sql<number>`(extract(epoch from date_trunc('hour', now())) * 1000)::float8`.mapWith(
+          Number,
+        ),
+        windowStart: agent.eventWindowStart,
+        windowCount: agent.eventWindowCount,
+        trustTier: agent.trustTier,
+      })
+      .from(agent)
+      .where(eq(agent.id, agentId));
+    if (budgetRow === undefined) {
+      return { ok: false, error: "agent_missing" };
+    }
+    let windowStart = budgetRow.windowStart;
+    let windowCount = budgetRow.windowCount;
+    if (windowStart === null || budgetRow.hourMs > windowStart.getTime()) {
+      windowStart = new Date(budgetRow.hourMs);
+      windowCount = 0;
+    }
+    const budget = budgetRow.trustTier === "low" ? budgets.perLowAgentHour : budgets.perAgentHour;
+    let remaining = Math.max(0, budget - windowCount);
+
     const syncs = new Map<string, Sync>();
     if (syncIds.length > 0) {
       const rows = await tx
@@ -95,68 +146,101 @@ export async function recordEvents(
       }
     }
 
-    const results: (EventResult | undefined)[] = [];
-    const rows: (typeof agentEvent.$inferInsert)[] = [];
-    const pending: { index: number; event: EventInput; time: ValidTime }[] = [];
-    const seen = new Set<string>();
-    parsed.forEach((item, index) => {
-      if (!item.ok) {
-        results[index] = { id: item.id, status: "rejected", error: item.error };
-        return;
-      }
-      const { event } = item;
-      if (seen.has(event.id)) {
-        results[index] = { id: event.id, status: "duplicate" };
-        return;
-      }
-      const sync = event.syncId === null ? undefined : syncs.get(event.syncId);
-      const time = eventTime(event, sync, receivedAt);
-      if ("invalid" in time) {
-        results[index] = { id: event.id, status: "rejected", error: "event_invalid" };
-        return;
-      }
-      seen.add(event.id);
-      pending.push({ index, event, time });
-      rows.push({
-        agentId,
-        eventId: event.id,
-        kind: event.kind,
-        bootId: event.bootId,
-        syncId: event.syncId,
-        elapsedMs: event.elapsedMs,
-        occurredAt: time.occurredAt,
-        timeUncertain: time.uncertain !== null,
-        uncertainReason: time.uncertain,
-        receivedAt,
-      });
-    });
-
-    const inserted = new Set<string>();
-    if (rows.length > 0) {
-      const stored = await tx
-        .insert(agentEvent)
-        .values(rows)
-        .onConflictDoNothing({ target: [agentEvent.agentId, agentEvent.eventId] })
-        .returning({ eventId: agentEvent.eventId });
-      for (const row of stored) {
-        inserted.add(row.eventId);
+    // Already stored: the agent row lock keeps another request of this agent
+    // from storing them between this read and the insert below.
+    const stored = new Set<string>();
+    if (eventIds.length > 0) {
+      const rows = await tx
+        .select({ eventId: agentEvent.eventId })
+        .from(agentEvent)
+        .where(and(eq(agentEvent.agentId, agentId), inArray(agentEvent.eventId, eventIds)));
+      for (const row of rows) {
+        stored.add(row.eventId);
       }
     }
 
-    let latest: { kind: EventInput["kind"]; at: Date } | undefined;
-    for (const { index, event, time } of pending) {
-      if (!inserted.has(event.id)) {
-        results[index] = { id: event.id, status: "duplicate" };
+    const results: EventResult[] = [];
+    const first = new Map<string, EventResult>();
+    const rows: (typeof agentEvent.$inferInsert)[] = [];
+    const accepted: { event: EventInput; time: ValidTime }[] = [];
+    let deferred = false;
+    for (const item of parsed) {
+      // The first occurrence of an ID in this request decides for every later
+      // one: stored (accepted or already there) makes a later one a duplicate,
+      // also a malformed later one; otherwise a later one gets the same result
+      // (deferred, or rejected, also when the first failed parsing). A later
+      // occurrence is never stored and costs no budget.
+      const id = item.ok ? item.event.id : item.id;
+      const earlier = id === null ? undefined : first.get(id);
+      if (earlier !== undefined) {
+        results.push(
+          earlier.status === "accepted" || earlier.status === "duplicate"
+            ? { id, status: "duplicate" }
+            : { ...earlier },
+        );
         continue;
       }
-      results[index] = { id: event.id, status: "accepted", timeUncertain: time.uncertain !== null };
+      if (!item.ok) {
+        const rejected: EventResult = { id: item.id, status: "rejected", error: item.error };
+        if (item.id !== null) {
+          first.set(item.id, rejected);
+        }
+        results.push(rejected);
+        continue;
+      }
+      const { event } = item;
+      let result: EventResult;
+      if (stored.has(event.id)) {
+        result = { id: event.id, status: "duplicate" };
+      } else {
+        const sync = event.syncId === null ? undefined : syncs.get(event.syncId);
+        const time = eventTime(event, sync, receivedAt);
+        if ("invalid" in time) {
+          result = { id: event.id, status: "rejected", error: "event_invalid" };
+        } else if (remaining === 0) {
+          result = { id: event.id, status: "deferred" };
+          deferred = true;
+        } else {
+          remaining -= 1;
+          result = { id: event.id, status: "accepted", timeUncertain: time.uncertain !== null };
+          accepted.push({ event, time });
+          rows.push({
+            agentId,
+            eventId: event.id,
+            kind: event.kind,
+            bootId: event.bootId,
+            syncId: event.syncId,
+            elapsedMs: event.elapsedMs,
+            occurredAt: time.occurredAt,
+            timeUncertain: time.uncertain !== null,
+            uncertainReason: time.uncertain,
+            receivedAt,
+          });
+        }
+      }
+      first.set(event.id, result);
+      results.push(result);
+    }
+
+    if (rows.length > 0) {
+      await tx
+        .insert(agentEvent)
+        .values(rows)
+        .onConflictDoNothing({ target: [agentEvent.agentId, agentEvent.eventId] });
+    }
+    await tx
+      .update(agent)
+      .set({ eventWindowStart: windowStart, eventWindowCount: windowCount + rows.length })
+      .where(eq(agent.id, agentId));
+
+    let latest: { kind: EventInput["kind"]; at: Date } | undefined;
+    for (const { event, time } of accepted) {
       if (time.uncertain === null && time.occurredAt !== null) {
         if (latest === undefined || time.occurredAt > latest.at) {
           latest = { kind: event.kind, at: time.occurredAt };
         }
       }
     }
-
     if (latest !== undefined) {
       await tx
         .update(agent)
@@ -173,6 +257,13 @@ export async function recordEvents(
       // A cumulative count per boot: the largest one seen counts, so a retry counts once.
       await recordDroppedEvents(tx, agentId, droppedEvents, receivedAt);
     }
-    return { ok: true as const, results: results as EventResult[] };
+    if (!deferred) {
+      return { ok: true, results };
+    }
+    // The time until the stored window ends, at least 1 second. After the clock
+    // moved back it can be more than an hour; the budget renews only then.
+    const renewsInMs = windowStart.getTime() + EVENT_WINDOW_MS - budgetRow.nowMs;
+    const retryAfterSeconds = Math.max(1, Math.ceil(renewsInMs / 1000));
+    return { ok: true, results, retryAfterSeconds };
   });
 }

@@ -87,9 +87,14 @@ export async function recordHeartbeat(
     );
 
     // A heartbeat received earlier but committed later never moves the agent back.
+    // The first heartbeat of each UTC day (server time) counts one active day
+    // for the trial of a low agent; a retry or a second heartbeat that day does not.
+    const day = now.toISOString().slice(0, 10);
     await tx
       .update(agent)
       .set({
+        activeDays: sql`${agent.activeDays} + case when ${agent.lastActiveDay} is distinct from ${day}::date then 1 else 0 end`,
+        lastActiveDay: day,
         lastSeenAt: now,
         address: context.address,
         siteKey: context.siteKey,

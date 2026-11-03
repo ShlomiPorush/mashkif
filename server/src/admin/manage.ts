@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { lockBlocklistExclusive } from "../agent/write-guard.js";
@@ -8,7 +7,6 @@ import {
   agent,
   agentBoot,
   blockedRange,
-  enrollmentKey,
   provider,
   providerAsn,
   syncAnchor,
@@ -18,8 +16,8 @@ import {
 import { classifyAreaCell } from "../geo/area.js";
 import { NO_ASN } from "../geoip.js";
 import { canonicalRange } from "../http/ip.js";
-import { hashToken } from "../http/token-hash.js";
 import {
+  invalidateSettingsCache,
   isSecretSetting,
   parseSettingsUpdate,
   resolveSettings,
@@ -37,9 +35,6 @@ import {
 } from "./context.js";
 import { adminChange, idParam, jsonFields, uniqueViolation, uuidParam } from "./guard.js";
 
-/** Enrollment keys are valid for 24 hours unless the admin chooses otherwise (decision D2). */
-export const ENROLLMENT_KEY_DEFAULT_HOURS = 24;
-export const ENROLLMENT_KEY_MAX_HOURS = 7 * 24;
 export const LABEL_MAX = 100;
 export const PROVIDER_ASNS_MAX = 200;
 const ASN_MAX = 4_294_967_295;
@@ -107,19 +102,6 @@ function label(value: unknown, required: boolean): string | null | undefined {
   return text === "" ? null : text;
 }
 
-function keyStatus(
-  key: { expiresAt: Date; usedAt: Date | null; revokedAt: Date | null },
-  now: Date,
-): "active" | "used" | "expired" | "revoked" {
-  if (key.usedAt !== null) {
-    return "used";
-  }
-  if (key.revokedAt !== null) {
-    return "revoked";
-  }
-  return key.expiresAt <= now ? "expired" : "active";
-}
-
 function asnList(value: unknown): number[] | undefined {
   if (!Array.isArray(value) || value.length > PROVIDER_ASNS_MAX) {
     return undefined;
@@ -135,9 +117,9 @@ function asnList(value: unknown): number[] | undefined {
 }
 
 /**
- * Admin API for step 2a: enrollment keys, agents, blocked addresses and
- * ranges, providers, and settings. Every route needs an admin with TOTP
- * (requireAdmin) and the origin check of /api/admin/* applies. Every change
+ * Admin API: agents, blocked addresses and ranges, providers, and settings.
+ * Enrollment keys were removed with open enrollment (2026-11-03). Every
+ * route needs an admin with TOTP (requireAdmin) and the origin check of /api/admin/* applies. Every change
  * is audited in its own transaction.
  */
 export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): void {
@@ -145,128 +127,6 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
   const asAdmin =
     (handler: (c: Context, admin: AdminIdentity) => Promise<Response>) => (c: Context<AdminEnv>) =>
       handler(c, c.get("admin"));
-
-  // Enrollment keys -----------------------------------------------------------
-
-  app.get(
-    "/enrollment-keys",
-    asAdmin(async (c) => {
-      const now = new Date();
-      const rows = await deps.db
-        .select({
-          id: enrollmentKey.id,
-          label: enrollmentKey.label,
-          createdAt: enrollmentKey.createdAt,
-          expiresAt: enrollmentKey.expiresAt,
-          usedAt: enrollmentKey.usedAt,
-          revokedAt: enrollmentKey.revokedAt,
-          agentId: agent.id,
-        })
-        .from(enrollmentKey)
-        .leftJoin(agent, eq(agent.enrollmentKeyId, enrollmentKey.id))
-        .orderBy(desc(enrollmentKey.id))
-        .limit(200);
-      return c.json({ keys: rows.map((row) => ({ ...row, status: keyStatus(row, now) })) });
-    }),
-  );
-
-  app.post(
-    "/enrollment-keys",
-    asAdmin(async (c, admin) => {
-      const fields = await jsonFields(c);
-      const keyLabel = label(fields.label, true);
-      if (typeof keyLabel !== "string") {
-        return c.json({ error: "label_invalid", field: "label" }, 400);
-      }
-      const hours = fields.validHours ?? ENROLLMENT_KEY_DEFAULT_HOURS;
-      if (!Number.isInteger(hours) || (hours as number) < 1) {
-        return c.json({ error: "valid_hours_invalid", field: "validHours" }, 400);
-      }
-      if ((hours as number) > ENROLLMENT_KEY_MAX_HOURS) {
-        return c.json({ error: "valid_hours_invalid", field: "validHours" }, 400);
-      }
-      const secret = randomBytes(24).toString("base64url");
-      const now = new Date();
-      const expiresAt = new Date(now.getTime() + (hours as number) * 60 * 60 * 1000);
-      return change(deps, c, admin, async (tx) => {
-        const [row] = await tx
-          .insert(enrollmentKey)
-          .values({
-            label: keyLabel,
-            keyHash: hashToken(secret),
-            createdAt: now,
-            createdBy: admin.username,
-            expiresAt,
-          })
-          .returning({ id: enrollmentKey.id });
-        const id = row?.id;
-        return {
-          outcome: {
-            status: 201,
-            body: {
-              key: {
-                id,
-                label: keyLabel,
-                createdAt: now,
-                expiresAt,
-                usedAt: null,
-                revokedAt: null,
-                agentId: null,
-                status: "active",
-              },
-              // Shown once; only the hash is stored.
-              secret,
-            },
-          },
-          audits: [
-            {
-              action: "enrollment_key.created",
-              details: { id, label: keyLabel, expiresAt: expiresAt.toISOString() },
-            },
-          ],
-        };
-      });
-    }),
-  );
-
-  app.post(
-    "/enrollment-keys/:id/revoke",
-    asAdmin(async (c, admin) => {
-      const id = idParam(c);
-      if (id === undefined) {
-        return c.json({ error: "not_found" }, 404);
-      }
-      return change(deps, c, admin, async (tx) => {
-        const [row] = await tx
-          .update(enrollmentKey)
-          .set({ revokedAt: new Date() })
-          .where(
-            and(
-              eq(enrollmentKey.id, id),
-              isNull(enrollmentKey.usedAt),
-              isNull(enrollmentKey.revokedAt),
-            ),
-          )
-          .returning({ id: enrollmentKey.id, label: enrollmentKey.label });
-        if (row === undefined) {
-          const [exists] = await tx
-            .select({ id: enrollmentKey.id })
-            .from(enrollmentKey)
-            .where(eq(enrollmentKey.id, id));
-          return {
-            outcome:
-              exists === undefined
-                ? fail(404, "not_found")
-                : fail(409, "enrollment_key_not_revocable"),
-          };
-        }
-        return {
-          outcome: { status: 200, body: { ok: true } },
-          audits: [{ action: "enrollment_key.revoked", details: { id, label: row.label } }],
-        };
-      });
-    }),
-  );
 
   // Agents --------------------------------------------------------------------
 
@@ -278,6 +138,7 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
           id: agent.id,
           label: agent.label,
           trustTier: agent.trustTier,
+          activeDays: agent.activeDays,
           agentVersion: agent.agentVersion,
           osVersion: agent.osVersion,
           registeredAt: agent.registeredAt,
@@ -303,7 +164,9 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
         .leftJoin(providerAsn, eq(providerAsn.asn, agent.asn))
         .leftJoin(provider, eq(provider.id, providerAsn.providerId))
         .orderBy(sql`${agent.lastSeenAt} desc nulls last`, desc(agent.registeredAt));
-      return c.json({ agents: rows });
+      // The trial length, so the panel can show "active days X of N" for low agents.
+      const { promotionDays } = await resolveSettings(deps.db).then((resolved) => resolved.values);
+      return c.json({ agents: rows, promotionDays });
     }),
   );
 
@@ -316,6 +179,8 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
         label?: string | null;
         trustTier?: TrustTier;
         assignedCell?: string | null;
+        activeDays?: number;
+        lastActiveDay?: string | null;
       } = {};
       if ("label" in fields) {
         const value = label(fields.label, false);
@@ -363,6 +228,13 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
         }
         const audits: Audit[] = [];
         if (update.trustTier !== undefined && update.trustTier !== before.trustTier) {
+          // Setting low from another tier restarts the trial: the next heartbeat
+          // counts as day 1. The tier is compared under the row lock, so a form
+          // opened before a promotion never resets or demotes by accident.
+          if (update.trustTier === "low") {
+            update.activeDays = 0;
+            update.lastActiveDay = null;
+          }
           audits.push({
             action: "agent.trust_tier_changed",
             details: { agentId: id, from: before.trustTier, to: update.trustTier },
@@ -694,7 +566,8 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
     "/settings",
     asAdmin(async (c, admin) => {
       const fields = await jsonFields(c);
-      return change(deps, c, admin, async (tx) => {
+      // After the change commits (or not), cached readers of the settings read them again.
+      const response = await change(deps, c, admin, async (tx) => {
         // One update at a time, also before a setting's row exists, so the
         // value read here is the one this update replaces and every change
         // is audited.
@@ -727,6 +600,8 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
               : [{ action: "settings.updated", details: { changes } }],
         };
       });
+      invalidateSettingsCache();
+      return response;
     }),
   );
 }

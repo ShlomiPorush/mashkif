@@ -10,7 +10,6 @@ import { AgentsPage } from "./pages/AgentsPage";
 import { BlockedPage } from "./pages/BlockedPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { HomePage } from "./pages/HomePage";
-import { KeysPage } from "./pages/KeysPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -142,9 +141,6 @@ export function AdminApp() {
     switch (target) {
       case ADMIN_PATHS.agents:
         content = <AgentsPage onSessionLost={refresh} />;
-        break;
-      case ADMIN_PATHS.keys:
-        content = <KeysPage onSessionLost={refresh} />;
         break;
       case ADMIN_PATHS.blocked:
         content = <BlockedPage onSessionLost={refresh} />;

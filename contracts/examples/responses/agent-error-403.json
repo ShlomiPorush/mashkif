@@ -1,0 +1,6 @@
+{
+  "summary": "The admin revoked the agent",
+  "value": {
+    "error": "agent_revoked"
+  }
+}

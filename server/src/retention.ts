@@ -1,4 +1,4 @@
-import { inArray, lt } from "drizzle-orm";
+import { inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "./db/client.js";
 import { agentEvent, heartbeat } from "./db/schema.js";
 import { describeSafely } from "./errors.js";
@@ -16,6 +16,8 @@ export interface RetentionResult {
   cutoff: Date;
   heartbeats: number;
   events: number;
+  /** Agents deleted because they registered long ago and never sent a heartbeat. */
+  agents: number;
   /** False when the batch limit stopped the run before everything old was gone. */
   complete: boolean;
 }
@@ -34,8 +36,9 @@ export async function runRetention(
   batchSize = RETENTION_BATCH_SIZE,
   maxBatches = RETENTION_MAX_BATCHES,
 ): Promise<RetentionResult> {
-  const { retentionDays } = await readSettings(db);
+  const { retentionDays, agentCleanupDays } = await readSettings(db);
   const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
+  const agentCutoff = new Date(now.getTime() - agentCleanupDays * 24 * 60 * 60 * 1000);
   let complete = true;
 
   const purge = async (table: typeof heartbeat | typeof agentEvent): Promise<number> => {
@@ -62,7 +65,38 @@ export async function runRetention(
 
   const heartbeats = await purge(heartbeat);
   const events = await purge(agentEvent);
-  return { cutoff, heartbeats, events, complete };
+
+  // Agents that registered more than agentCleanupDays ago and never sent a
+  // heartbeat, never revoked ones: a revoked row is what makes the server
+  // answer agent_revoked to its token. The rows are locked (SKIP LOCKED) and
+  // the conditions checked on the locked row, so a first heartbeat that
+  // arrives at the same moment either wins or waits and then finds the agent
+  // gone (401, and the agent registers again). The delete cascades to the
+  // agent's anchors and counters.
+  let agents = 0;
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const deleted = await db.transaction(async (tx) => {
+      const rows = await tx.execute<{ id: string }>(sql`
+        with picked as (
+          select id from agent
+          where revoked_at is null and last_seen_at is null and registered_at < ${agentCutoff.toISOString()}::timestamptz
+          order by id
+          limit ${batchSize}
+          for update skip locked
+        )
+        delete from agent using picked where agent.id = picked.id returning agent.id
+      `);
+      return rows.length;
+    });
+    agents += deleted;
+    if (deleted < batchSize) {
+      break;
+    }
+    if (batch === maxBatches - 1) {
+      complete = false;
+    }
+  }
+  return { cutoff, heartbeats, events, agents, complete };
 }
 
 /**
@@ -82,9 +116,9 @@ export function scheduleRetention(
     running = true;
     try {
       const result = await runRetention(db);
-      if (result.heartbeats > 0 || result.events > 0 || !result.complete) {
+      if (result.heartbeats > 0 || result.events > 0 || result.agents > 0 || !result.complete) {
         console.log(
-          `retention: deleted ${result.heartbeats} heartbeats and ${result.events} events received before ${result.cutoff.toISOString()}${result.complete ? "" : "; more remain for the next run"}`,
+          `retention: deleted ${result.heartbeats} heartbeats, ${result.events} events, and ${result.agents} agents that never reported; raw data received before ${result.cutoff.toISOString()}${result.complete ? "" : "; more remain for the next run"}`,
         );
       }
     } catch (error) {

@@ -16,7 +16,6 @@ export type HeartbeatInput = Omit<Schemas["HeartbeatRequest"], "infrastructure">
 export type Parsed<T> = { ok: true; value: T } | { ok: false; field: string };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ENROLLMENT_KEY = /^[A-Za-z0-9_-]{32}$/;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const VERSION = /^[0-9A-Za-z.+_-]{1,64}$/;
 const OS_VERSION = /^[0-9A-Za-z .+_()-]{0,64}$/;
@@ -56,10 +55,7 @@ export function parseRegister(body: unknown): Parsed<RegisterRequest> {
   if (fields === undefined) {
     return { ok: false, field: "body" };
   }
-  const { enrollmentKey, token, agentVersion, osVersion } = fields;
-  if (typeof enrollmentKey !== "string" || !ENROLLMENT_KEY.test(enrollmentKey)) {
-    return { ok: false, field: "enrollmentKey" };
-  }
+  const { token, agentVersion, osVersion } = fields;
   const installId = uuid(fields.installId);
   if (installId === undefined) {
     return { ok: false, field: "installId" };
@@ -76,7 +72,6 @@ export function parseRegister(body: unknown): Parsed<RegisterRequest> {
   return {
     ok: true,
     value: {
-      enrollmentKey,
       installId,
       token,
       agentVersion,
