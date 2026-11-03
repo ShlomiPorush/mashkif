@@ -1,5 +1,6 @@
 import { latLngToCell } from "h3-js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { cachedSettings, SETTINGS_CACHE_TTL_MS } from "../src/settings.js";
 import { fullAdmin, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import { Browser, createHarness, type Harness, setUpAdmin } from "./support/harness.js";
@@ -292,6 +293,21 @@ describe("settings", () => {
     expect((await agent.heartbeat()).body.nextIntervalSeconds).toBe(120);
   });
 
+  it("serves the register path from a cache that expires and that a panel save refreshes", async () => {
+    const browser = await fullAdmin(harness);
+    expect((await cachedSettings(database.db, 1_000)).registrationOpen).toBe(true);
+    // A change behind the panel's back is seen only after the TTL.
+    await database.sql`insert into setting (key, value, updated_by)
+      values ('registration_open', 'false'::jsonb, 'test')`;
+    expect((await cachedSettings(database.db, 2_000)).registrationOpen).toBe(true);
+    const expired = 1_000 + SETTINGS_CACHE_TTL_MS;
+    expect((await cachedSettings(database.db, expired)).registrationOpen).toBe(false);
+    // A save from the panel is seen at once.
+    expect((await browser.post("/api/admin/settings", { registrationOpen: true })).status).toBe(
+      200,
+    );
+    expect((await cachedSettings(database.db, expired + 1)).registrationOpen).toBe(true);
+  });
   it("manages the open enrollment settings with their defaults and ranges", async () => {
     const browser = await fullAdmin(harness);
     expect((await browser.get("/api/admin/settings")).body).toMatchObject({

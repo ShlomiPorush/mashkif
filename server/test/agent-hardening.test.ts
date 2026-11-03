@@ -325,9 +325,10 @@ describe("rate limits before the token lookup", () => {
     expect(harness.agentRateLimits.size).toBe(3);
     const elsewhere = await new TestAgent(harness, "203.0.113.31").enroll();
     expect((await elsewhere.heartbeat()).status).toBe(200);
-    // Registration has its own limiter: one entry per site and one for the global limit.
+    // Registration has its own limiter: per site a pre-limit entry and a creation
+    // entry (two sites here), and one entry for the global limit.
     expect((await new TestAgent(harness, "203.0.113.30").enroll()).agentId).toBeDefined();
-    expect(harness.registerRateLimits.size).toBe(3);
+    expect(harness.registerRateLimits.size).toBe(5);
   });
 
   it("prunes expired entries from the oldest end without scanning the whole map", async () => {

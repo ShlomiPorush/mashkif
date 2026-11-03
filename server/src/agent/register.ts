@@ -23,8 +23,8 @@ export interface RegisterPolicy {
   /** The tier a new agent starts at. */
   tier: TrustTier;
   /**
-   * Counts one new registration against the global limit; returns the
-   * seconds to wait when the limit is used up. Runs only for a registration
+   * Counts one new registration against the per-site and the global limit;
+   * returns the seconds to wait when one of them is used up. Runs only for a registration
    * that would create an agent, so a repeat of an existing agent never waits.
    */
   admit: () => Promise<number | undefined>;
@@ -94,9 +94,9 @@ function answer(found: Exclude<Classification, { kind: "none" }>): RegisterOutco
  * Open registration (decision of 2026-11-03). One transaction classifies the
  * request against the existing agents first, so the same registration
  * repeated (a lost answer, a crash) answers again with the same agent, also
- * while registration is closed or the global limit is used up. Only a request
- * that matches no agent passes the switch and the global limit and creates
- * one. When a concurrent request inserted a conflicting row first, the
+ * while registration is closed or a creation limit is used up. Only a
+ * request that matches no agent passes the switch and the per-site and global
+ * limits and creates one. When a concurrent request inserted a conflicting row first, the
  * request is classified again against the committed rows: because no row is
  * ever deleted while it could conflict (revoked agents are kept), the
  * conflicting row is always found. No audit entry is written for a public

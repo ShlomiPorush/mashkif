@@ -15,12 +15,12 @@ import {
   peerAddress,
 } from "../http/request-guards.js";
 import { hashToken } from "../http/token-hash.js";
-import { readSettings } from "../settings.js";
+import { cachedSettings, readSettings } from "../settings.js";
 import { recordEvents } from "./events.js";
 import { recordHeartbeat } from "./heartbeat.js";
 import { parseEventsRequest, parseHeartbeat, parseRegister, TOKEN_PATTERN } from "./parse.js";
 import { type RegisterHooks, registerAgent } from "./register.js";
-import { addressBlocked, type WriteRefusal } from "./write-guard.js";
+import type { WriteRefusal } from "./write-guard.js";
 
 type Schemas = components["schemas"];
 export type AgentErrorCode = Schemas["AgentErrorCode"];
@@ -32,6 +32,13 @@ export const AGENT_BODY_TIMEOUT_MS = 10_000;
 /** Most events in one request. */
 export const MAX_EVENTS_PER_REQUEST = 500;
 
+/**
+ * Register requests per site (an IPv4 address or an IPv6 /64) and minute,
+ * counted in memory before any database work, repeats included. A code
+ * constant like the ingest pre-limit: it bounds the unauthenticated database
+ * work per site to one registration transaction a second.
+ */
+export const REGISTER_PRE_LIMIT: RateLimitRule = { window: 60, max: 60 };
 /** Window of the per-site register limit (its count is the setting registerPerSitePer10Min). */
 export const REGISTER_SITE_WINDOW_SECONDS = 600;
 /** Window of the global register limit (its count is the setting registerGlobalPerHour). */
@@ -181,24 +188,20 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       console.error("agent registration without a usable client address");
       return refuse(c, 500, "internal_error");
     }
-    const settings = await readSettings(deps.db);
-    // Per site (an IPv4 address or an IPv6 /64), before any database work, so
-    // the addresses of one /64 share one budget.
+    // First, in memory and before any database work: every register request,
+    // also a repeat, counts against its site (an IPv4 address or an IPv6 /64).
+    // This bounds the unauthenticated database work per site.
     const site = siteKeyOf(address) as string;
-    const refusal = await limited(registerLimits, c, `register:site:${site}`, {
-      window: REGISTER_SITE_WINDOW_SECONDS,
-      max: settings.registerPerSitePer10Min,
-    });
-    if (refusal !== undefined) {
-      return refusal;
-    }
-    if (await addressBlocked(deps.db, address)) {
-      return refuse(c, 403, "address_blocked");
+    const throttled = await limited(registerLimits, c, `register:pre:${site}`, REGISTER_PRE_LIMIT);
+    if (throttled !== undefined) {
+      return throttled;
     }
     const parsed = parseRegister(await readJson(c));
     if (!parsed.ok) {
       return refuse(c, 400, "request_invalid", parsed.field);
     }
+    // From the in-process cache, so this path adds no settings query.
+    const settings = await cachedSettings(deps.db);
     const at = now();
     const outcome = await registerAgent(
       deps.db,
@@ -208,14 +211,25 @@ export function mountIngestRoutes(app: Hono<AgentEnv>, deps: AgentDeps): void {
       {
         open: settings.registrationOpen,
         tier: settings.newAgentTier as TrustTier,
+        // Only a registration that would create an agent counts against the
+        // per-site and the global limit; a repeat of an existing one never does.
         admit: async () => {
-          const decision = await registerLimits.consume("register:global", {
-            window: REGISTER_GLOBAL_WINDOW_SECONDS,
-            max: settings.registerGlobalPerHour,
-          });
-          return decision.allowed
-            ? undefined
-            : (decision.retryAfter ?? REGISTER_GLOBAL_WINDOW_SECONDS);
+          for (const [key, rule] of [
+            [
+              `register:site:${site}`,
+              { window: REGISTER_SITE_WINDOW_SECONDS, max: settings.registerPerSitePer10Min },
+            ],
+            [
+              "register:global",
+              { window: REGISTER_GLOBAL_WINDOW_SECONDS, max: settings.registerGlobalPerHour },
+            ],
+          ] as const) {
+            const decision = await registerLimits.consume(key, rule);
+            if (!decision.allowed) {
+              return decision.retryAfter ?? rule.window;
+            }
+          }
+          return undefined;
         },
       },
       deps.testHooks,

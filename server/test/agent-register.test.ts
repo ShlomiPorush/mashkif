@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { REGISTER_PRE_LIMIT } from "../src/agent/routes.js";
 import { hashToken } from "../src/http/token-hash.js";
 import { setSetting, TestAgent } from "./support/agent.js";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
@@ -212,6 +213,51 @@ describe("register (open registration)", () => {
       // The global limit is used up, but the same registration again passes.
       expect((await first.register()).status).toBe(200);
       expect(await agentRows()).toHaveLength(2);
+    });
+
+    it("never counts a repeat of an existing registration against the per-site limit", async () => {
+      await setSetting(database, "register_per_site_per_10min", 1);
+      const first = new TestAgent(harness, "203.0.113.40");
+      expect((await first.register()).status).toBe(201);
+      // The answer was lost: the same request again, several times.
+      for (let i = 0; i < 3; i++) {
+        expect((await first.register()).status).toBe(200);
+      }
+      // The site's only creation is used, by the first registration alone.
+      expect((await new TestAgent(harness, "203.0.113.40").register()).status).toBe(429);
+    });
+
+    it("lets retries in a shared office leave the other installs their quota", async () => {
+      await setSetting(database, "register_per_site_per_10min", 2);
+      const first = new TestAgent(harness, "203.0.113.41");
+      expect((await first.register()).status).toBe(201);
+      for (let i = 0; i < 5; i++) {
+        expect((await first.register()).status).toBe(200);
+      }
+      expect((await new TestAgent(harness, "203.0.113.41").register()).status).toBe(201);
+      expect((await new TestAgent(harness, "203.0.113.41").register()).status).toBe(429);
+    });
+
+    it("refuses a flood from one site before any database work", async () => {
+      const flood = new TestAgent(harness, "2001:db8:9::1");
+      for (let i = 0; i < REGISTER_PRE_LIMIT.max; i++) {
+        // Bodies that fail parsing: counted, but cheap.
+        expect((await flood.post("/register", {})).status).toBe(400);
+      }
+      const transaction = vi.spyOn(database.db, "transaction");
+      const select = vi.spyOn(database.db, "select");
+      try {
+        // Another address of the same IPv6 /64, with a valid registration.
+        const limited = await new TestAgent(harness, "2001:db8:9::2").register();
+        expect(limited).toMatchObject({ status: 429, body: { error: "rate_limited" } });
+        expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
+        expect(transaction).not.toHaveBeenCalled();
+        expect(select).not.toHaveBeenCalled();
+      } finally {
+        transaction.mockRestore();
+        select.mockRestore();
+      }
+      expect(await agentRows()).toHaveLength(0);
     });
 
     it("refuses registration from a blocked address or range", async () => {

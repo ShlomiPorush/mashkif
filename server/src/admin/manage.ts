@@ -17,6 +17,7 @@ import { classifyAreaCell } from "../geo/area.js";
 import { NO_ASN } from "../geoip.js";
 import { canonicalRange } from "../http/ip.js";
 import {
+  invalidateSettingsCache,
   isSecretSetting,
   parseSettingsUpdate,
   resolveSettings,
@@ -565,7 +566,8 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
     "/settings",
     asAdmin(async (c, admin) => {
       const fields = await jsonFields(c);
-      return change(deps, c, admin, async (tx) => {
+      // After the change commits (or not), cached readers of the settings read them again.
+      const response = await change(deps, c, admin, async (tx) => {
         // One update at a time, also before a setting's row exists, so the
         // value read here is the one this update replaces and every change
         // is audited.
@@ -598,6 +600,8 @@ export function mountManagementRoutes(app: Hono<AdminEnv>, deps: AdminDeps): voi
               : [{ action: "settings.updated", details: { changes } }],
         };
       });
+      invalidateSettingsCache();
+      return response;
     }),
   );
 }

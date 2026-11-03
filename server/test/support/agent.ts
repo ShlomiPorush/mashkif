@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { expect } from "vitest";
+import { invalidateSettingsCache } from "../../src/settings.js";
 import type { TestDatabase } from "./database.js";
 import { type Browser, enrollTotp, type Harness, ORIGIN, setUpAdmin } from "./harness.js";
 
@@ -154,7 +155,7 @@ export async function fullAdmin(harness: Harness): Promise<Browser> {
   return browser;
 }
 
-/** Stores a setting as the admin panel would. */
+/** Stores a setting as the admin panel would, which also refreshes the settings cache. */
 export async function setSetting(
   database: TestDatabase,
   key: string,
@@ -163,4 +164,5 @@ export async function setSetting(
   await database.sql`insert into setting (key, value, updated_by)
     values (${key}, ${JSON.stringify(value)}::jsonb, 'test')
     on conflict (key) do update set value = excluded.value`;
+  invalidateSettingsCache();
 }

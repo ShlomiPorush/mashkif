@@ -383,6 +383,38 @@ export async function readSettings(db: Database, env?: NodeJS.ProcessEnv): Promi
   return (await resolveSettings(db, env === undefined ? {} : { env })).values;
 }
 
+/** How long the in-process settings cache serves a value before it reads the database again. */
+export const SETTINGS_CACHE_TTL_MS = 5_000;
+
+let cacheGeneration = 0;
+const cached = new WeakMap<object, { at: number; generation: number; values: Settings }>();
+
+/**
+ * The current settings (with the process environment), from an in-process
+ * cache: at most SETTINGS_CACHE_TTL_MS old, and read again after every save
+ * from the admin panel in this process (invalidateSettingsCache). For paths
+ * that unauthenticated requests reach, so a limited request does no query.
+ */
+export async function cachedSettings(db: Database, now = Date.now()): Promise<Settings> {
+  const hit = cached.get(db);
+  if (
+    hit !== undefined &&
+    hit.generation === cacheGeneration &&
+    now - hit.at < SETTINGS_CACHE_TTL_MS
+  ) {
+    return hit.values;
+  }
+  const generation = cacheGeneration;
+  const values = await readSettings(db);
+  cached.set(db, { at: now, generation, values });
+  return values;
+}
+
+/** Makes cachedSettings read the database again; called after a settings save commits. */
+export function invalidateSettingsCache(): void {
+  cacheGeneration += 1;
+}
+
 /**
  * Checks a partial update from the admin panel. Returns the first invalid or
  * locked setting, or the update. Unknown fields are ignored.
