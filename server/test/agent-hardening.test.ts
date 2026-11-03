@@ -152,15 +152,37 @@ describe("sync anchors", () => {
     expect(row?.uncertain_reason).toBe("sync_unknown");
   });
 
+  // Retention runs a year ahead here, which would also make the agent
+  // cleanup pass delete the new agent before its first heartbeat (it never
+  // reported, and it registered more than agent_cleanup_days earlier). That
+  // pass is not what these tests are about, so it is kept out of reach.
+  async function keepUnreportedAgents() {
+    await database.sql`insert into setting (key, value, updated_by)
+      values ('agent_cleanup_days', '3650'::jsonb, 'shlomi')`;
+  }
+
   it("never loses a just-returned anchor to retention running at the same time", async () => {
     const agent = await new TestAgent(harness).enroll();
-    await database.sql`insert into setting (key, value, updated_by)
-      values ('retention_days', '8'::jsonb, 'shlomi')`;
+    await retainEightDays();
+    await keepUnreportedAgents();
     harness.now = now;
     const [, reply] = await Promise.all([
       runRetention(database.db, new Date(now.getTime() + 365 * DAY)),
       agent.heartbeat(),
     ]);
+    await runRetention(database.db, new Date(now.getTime() + 365 * DAY));
+    expect(await anchorIds()).toEqual([reply.body.syncId]);
+  });
+
+  it("keeps the anchor of a first heartbeat that arrives right after retention", async () => {
+    // The order of the race above in which retention wins.
+    const agent = await new TestAgent(harness).enroll();
+    await retainEightDays();
+    await keepUnreportedAgents();
+    harness.now = now;
+    await runRetention(database.db, new Date(now.getTime() + 365 * DAY));
+    const reply = await agent.heartbeat();
+    expect(reply.status).toBe(200);
     await runRetention(database.db, new Date(now.getTime() + 365 * DAY));
     expect(await anchorIds()).toEqual([reply.body.syncId]);
   });
