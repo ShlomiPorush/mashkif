@@ -2,8 +2,9 @@
 <!--
   Mashkif for Windows: per-machine MSI for manual, GPO, and Intune deployment.
   Silent install:   msiexec /i Mashkif-<version>-x64.msi /qn
-  Unattended enrollment and another server:
-                    msiexec /i Mashkif-<version>-x64.msi ENROLLMENT_KEY=<key> SERVER_URL=<url> /qn
+  The service registers the PC by itself at its first start; nothing else is needed.
+  Another server (development only):
+                    msiexec /i Mashkif-<version>-x64.msi SERVER_URL=<url> /qn
   Silent uninstall: msiexec /x Mashkif-<version>-x64.msi /qn
 
   <svc> below is the service SID of NT SERVICE\Mashkif,
@@ -26,13 +27,6 @@
 
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPURLINFOABOUT" Value="https://mashkif.co.il" />
-
-    <!--
-      ENROLLMENT_KEY: a single-use key for unattended enrollment. Hidden keeps it
-      out of the MSI log (a machine policy Debug=7 still logs it); Secure passes
-      it to the execute sequence.
-    -->
-    <Property Id="ENROLLMENT_KEY" Hidden="yes" Secure="yes" />
 
     <!--
       SERVER_URL: the server origin; absent means https://mashkif.co.il. A repair
@@ -146,35 +140,19 @@
       </Component>
 
       <!--
-        HKLM\SOFTWARE\Mashkif\Agent with Enrollment (the MSI key) and Service
-        (parent of the volatile Boot key), both for SYSTEM, Administrators, and
-        the service SID only. The whole tree is removed on uninstall.
+        HKLM\SOFTWARE\Mashkif\Agent with Service (the parent of the volatile
+        Boot key) for SYSTEM, Administrators, and the service SID only. The
+        whole tree is removed on uninstall.
       -->
       <Component Id="AgentRegistryKeys" Directory="INSTALLFOLDER" Guid="5F0E1BEA-5953-440C-9E3B-CF848B17F450" Bitness="always64">
         <RegistryKey Root="HKLM" Key="SOFTWARE\Mashkif" ForceDeleteOnUninstall="yes">
           <RegistryKey Key="Agent">
             <RegistryValue Name="Version" Type="string" Value="$(ProductVersion)" KeyPath="yes" />
-            <RegistryKey Key="Enrollment" ForceCreateOnInstall="yes">
-              <PermissionEx Sddl="D:PAI(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KA;;;S-1-5-80-955452773-2337780239-555098662-296726712-2311605372)(A;CI;RC;;;OW)" />
-            </RegistryKey>
             <RegistryKey Key="Service" ForceCreateOnInstall="yes">
               <PermissionEx Sddl="D:PAI(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KA;;;S-1-5-80-955452773-2337780239-555098662-296726712-2311605372)(A;CI;RC;;;OW)" />
             </RegistryKey>
           </RegistryKey>
         </RegistryKey>
-      </Component>
-
-      <!--
-        The MSI enrollment key. Transitive with the condition ENROLLMENT_KEY: a
-        repair or upgrade without the property re-evaluates the condition as
-        false and removes the component, so the key is never written again
-        without the property. The service moves the key into its state and
-        deletes the value as soon as it starts.
-      -->
-      <Component Id="EnrollmentKeyValue" Directory="INSTALLFOLDER" Guid="C1FE5E7E-D3DF-47C2-982B-6D2AAB5C2F03" Bitness="always64" Condition="ENROLLMENT_KEY" Transitive="yes">
-        <RegistryValue Root="HKLM" Key="SOFTWARE\Mashkif\Agent\Enrollment" Name="Key" Type="string" Value="[ENROLLMENT_KEY]" KeyPath="yes">
-          <PermissionEx Sddl="D:PAI(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KA;;;S-1-5-80-955452773-2337780239-555098662-296726712-2311605372)(A;CI;RC;;;OW)" />
-        </RegistryValue>
       </Component>
 
       <!-- SERVER_URL, written only when it is set (on the command line or remembered). -->

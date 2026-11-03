@@ -5,8 +5,9 @@ using WixToolset.Dtf.WindowsInstaller;
 namespace Mashkif.Installer.Tests;
 
 /// <summary>
-/// The installer as built: the tables that decide how the enrollment key,
-/// the server URL, the service SID type, and the ACLs are installed.
+/// The installer as built: the tables that decide how the server URL, the
+/// service SID type, and the ACLs are installed, and that no enrollment key
+/// is left.
 /// </summary>
 public sealed class MsiTableTests
 {
@@ -14,7 +15,6 @@ public sealed class MsiTableTests
     private const string ServiceSid = "S-1-5-80-955452773-2337780239-555098662-296726712-2311605372";
 
     private const int Transitive = 0x40;
-    private const int RegistryKeyPath = 0x4;
 
     private const string StateSddl = $"D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{ServiceSid})(A;OICI;RC;;;OW)";
     private const string RegistrySddl = $"D:PAI(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KA;;;{ServiceSid})(A;CI;RC;;;OW)";
@@ -23,28 +23,22 @@ public sealed class MsiTableTests
 
     [Theory]
     [MemberData(nameof(Packages))]
-    public void The_enrollment_key_is_written_only_when_the_property_is_given(string package)
+    public void The_package_has_no_enrollment_key(string package)
     {
         using var db = Open(package);
-        var component = Row(db, "SELECT `Condition`, `Attributes` FROM `Component` WHERE `Component` = 'EnrollmentKeyValue'");
-        Assert.Equal("ENROLLMENT_KEY", component[0]);
-        var attributes = Number(component[1]);
-        Assert.NotEqual(0, attributes & Transitive);
-        Assert.NotEqual(0, attributes & RegistryKeyPath);
-
-        var registry = Row(db, "SELECT `Root`, `Key`, `Name`, `Value` FROM `Registry` WHERE `Component_` = 'EnrollmentKeyValue'");
-        Assert.Equal(["2", @"SOFTWARE\Mashkif\Agent\Enrollment", "Key", "[ENROLLMENT_KEY]"], registry);
+        Assert.Empty(Rows(db, "SELECT `Property` FROM `Property` WHERE `Property` = 'ENROLLMENT_KEY'"));
+        Assert.Empty(Rows(db, "SELECT `Component` FROM `Component` WHERE `Component` = 'EnrollmentKeyValue'"));
+        Assert.DoesNotContain(Rows(db, "SELECT `Key`, `Value` FROM `Registry`"), r =>
+            r[0].Contains("Enrollment", StringComparison.OrdinalIgnoreCase) || r[1].Contains("ENROLLMENT_KEY", StringComparison.Ordinal));
+        Assert.Empty(Rows(db, "SELECT `Value` FROM `Property` WHERE `Property` = 'MsiHiddenProperties'"));
     }
 
     [Theory]
     [MemberData(nameof(Packages))]
-    public void The_enrollment_key_is_hidden_from_the_log_and_reaches_the_execute_sequence(string package)
+    public void The_server_URL_reaches_the_execute_sequence(string package)
     {
         using var db = Open(package);
-        Assert.Contains("ENROLLMENT_KEY", PropertyList(db, "MsiHiddenProperties"));
-        var secure = PropertyList(db, "SecureCustomProperties");
-        Assert.Contains("ENROLLMENT_KEY", secure);
-        Assert.Contains("SERVER_URL", secure);
+        Assert.Contains("SERVER_URL", PropertyList(db, "SecureCustomProperties"));
     }
 
     [Theory]
@@ -99,9 +93,8 @@ public sealed class MsiTableTests
             .Where(l => l.Table == "Registry")
             .Select(l => (Row: Row(db, $"SELECT `Key`, `Component_` FROM `Registry` WHERE `Registry` = '{l.Object}'"), l.Sddl))
             .ToList();
-        Assert.Contains(registryLocks, l => l.Row[0] == @"SOFTWARE\Mashkif\Agent\Enrollment" && l.Row[1] == "AgentRegistryKeys");
         Assert.Contains(registryLocks, l => l.Row[0] == @"SOFTWARE\Mashkif\Agent\Service" && l.Row[1] == "AgentRegistryKeys");
-        Assert.Contains(registryLocks, l => l.Row[0] == @"SOFTWARE\Mashkif\Agent\Enrollment" && l.Row[1] == "EnrollmentKeyValue");
+        Assert.Single(registryLocks);
         Assert.All(registryLocks, l => Assert.Equal(RegistrySddl, l.Sddl));
     }
 

@@ -23,7 +23,6 @@ namespace Mashkif.Install.Tests;
 /// </summary>
 public sealed partial class InstallTests(InstallSafetyGate gate)
 {
-    private const string DummyKey = "SW5zdGFsbFRlc3REdW1teUtleTAwMDAx";
     private const string ServiceSid = "S-1-5-80-955452773-2337780239-555098662-296726712-2311605372";
 
     private const string ProductSddl = "D:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(A;;RC;;;OW)";
@@ -35,7 +34,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
     private static readonly string ServiceLog = Path.Combine(InstallSafetyGate.ProductDirectory, "logs", "service.log");
 
     [Fact]
-    public async Task Install_repair_upgrade_and_uninstall_keep_the_key_out_and_the_ACLs_tight()
+    public async Task Install_registers_by_itself_and_repair_upgrade_and_uninstall_keep_the_identity_and_the_ACLs()
     {
         Assert.True(gate.Passed);
         var msi = RequiredFile("MASHKIF_INSTALL_TEST_MSI");
@@ -47,21 +46,22 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
         var userCreated = false;
         try
         {
-            // 1. Install with a dummy key and a loopback server.
+            // 1. Install with no property but the loopback server: the service registers by itself.
             var installLog = Path.Combine(logs, "install.log");
-            Msiexec("/i", msi, $"ENROLLMENT_KEY={DummyKey}", $"SERVER_URL={api.Origin}", "/qn", "/l*v", installLog);
+            Msiexec("/i", msi, $"SERVER_URL={api.Origin}", "/qn", "/l*v", installLog);
 
             // 2. Service SID type and ACLs.
             Assert.Contains("UNRESTRICTED", Run("sc.exe", "qsidtype", "Mashkif"), StringComparison.Ordinal);
             await WaitForStatusAsync(AgentStates.Connected);
             AssertAcls();
 
-            // 3. The key reached the server once and is gone from the registry and the logs.
-            Assert.Equal(DummyKey, api.RegisteredKeys.Single());
-            Assert.Null(EnrollmentValue());
-            Assert.DoesNotContain(DummyKey, ReadAll(installLog), StringComparison.Ordinal);
-            Assert.DoesNotContain(DummyKey, ReadAll(ServiceLog), StringComparison.Ordinal);
+            // 3. One registration with the saved install ID and token, and the
+            //    token in no log.
+            var registration = api.Registrations.Single();
             var identity = Identity();
+            Assert.Equal(registration.InstallId, StateValue("installId"));
+            Assert.Equal(registration.Token, IdentityToken());
+            AssertTokenAbsent(registration.Token, installLog, ServiceLog);
 
             // 4. A standard user: status yes, a server instance and the state no.
             //    A network logon of the same user is refused by the NETWORK rule.
@@ -79,29 +79,32 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
             AsUser(LogonNetwork, password, () =>
                 Assert.Throws<UnauthorizedAccessException>(() => ConnectWithClientRights().Dispose()));
 
-            // 5. Repair, then an upgrade to a higher version: the key is never written
-            //    again, the ACLs and the identity stay, and SERVER_URL is remembered.
-            Msiexec("/fa", msi, "/qn", "/l*v", Path.Combine(logs, "repair.log"));
+            // 5. Repair, then an upgrade to a higher version: the ACLs, the install
+            //    ID, and the identity stay, SERVER_URL is remembered, and the PC
+            //    never registers again.
+            var repairLog = Path.Combine(logs, "repair.log");
+            Msiexec("/fa", msi, "/qn", "/l*v", repairLog);
             await WaitForStatusAsync(AgentStates.Connected);
-            Assert.Null(EnrollmentValue());
             AssertAcls();
             Assert.Equal(identity, Identity());
 
             var oldProducts = ProductInstallation.GetRelatedProducts(InstallSafetyGate.UpgradeCode).Select(p => p.ProductCode).ToList();
-            Msiexec("/i", upgradeMsi, "/qn", "/l*v", Path.Combine(logs, "upgrade.log"));
+            var upgradeLog = Path.Combine(logs, "upgrade.log");
+            Msiexec("/i", upgradeMsi, "/qn", "/l*v", upgradeLog);
             await WaitForStatusAsync(AgentStates.Connected);
             Assert.All(oldProducts, code => Assert.False(new ProductInstallation(code).IsInstalled));
             var installed = ProductInstallation.GetRelatedProducts(InstallSafetyGate.UpgradeCode).Single();
             Assert.Equal(new Version(0, 1, 1), new Version(installed.ProductVersion.Major, installed.ProductVersion.Minor, installed.ProductVersion.Build));
-            Assert.Null(EnrollmentValue());
             Assert.Equal(api.Origin, ServerUrlValue());
             AssertAcls();
             Assert.Equal(identity, Identity());
-            Assert.Single(api.RegisteredKeys);
+            Assert.Single(api.Registrations);
+            AssertTokenAbsent(registration.Token, repairLog, upgradeLog, ServiceLog);
 
             // 6. Uninstall: the service and the registry keys go, the state stays.
-            Msiexec("/x", installed.ProductCode, "/qn", "/l*v", Path.Combine(logs, "uninstall.log"));
-            Assert.False(ServiceExists());
+            var uninstallLog = Path.Combine(logs, "uninstall.log");
+            Msiexec("/x", installed.ProductCode, "/qn", "/l*v", uninstallLog);
+            await WaitUntilAsync(() => !ServiceExists(), "the service is removed");
             using (var machine = Hklm())
             using (var product = machine.OpenSubKey(InstallSafetyGate.ProductRegistryKey))
             {
@@ -109,6 +112,8 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
             }
 
             Assert.True(File.Exists(StateFile));
+            Assert.Equal(identity, Identity());
+            AssertTokenAbsent(registration.Token, uninstallLog);
         }
         finally
         {
@@ -139,11 +144,12 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
         AssertSddl(ProductSddl, new DirectoryInfo(InstallSafetyGate.ProductDirectory).GetAccessControl());
         AssertSddl(StateSddl, new DirectoryInfo(StateDirectory).GetAccessControl());
         using var machine = Hklm();
-        foreach (var key in new[] { @"SOFTWARE\Mashkif\Agent\Enrollment", @"SOFTWARE\Mashkif\Agent\Service" })
+        using (var service = machine.OpenSubKey(@"SOFTWARE\Mashkif\Agent\Service")!)
         {
-            using var opened = machine.OpenSubKey(key)!;
-            AssertSddl(RegistrySddl, opened.GetAccessControl());
+            AssertSddl(RegistrySddl, service.GetAccessControl());
         }
+
+        Assert.Null(machine.OpenSubKey(@"SOFTWARE\Mashkif\Agent\Enrollment"));
 
         // state.json: written by the service with its explicit protected DACL.
         var file = new FileInfo(StateFile).GetAccessControl();
@@ -170,13 +176,6 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
 
     private static RegistryKey Hklm() => RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
 
-    private static string? EnrollmentValue()
-    {
-        using var machine = Hklm();
-        using var key = machine.OpenSubKey(@"SOFTWARE\Mashkif\Agent\Enrollment");
-        return key?.GetValue("Key") as string;
-    }
-
     private static string? ServerUrlValue()
     {
         using var machine = Hklm();
@@ -191,7 +190,35 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
         return service is not null;
     }
 
-    private static string Identity() => JsonNode.Parse(File.ReadAllText(StateFile))!["identity"]!.ToJsonString();
+    /// <summary>The install ID and the identity, as saved by the service.</summary>
+    private static string Identity()
+    {
+        var state = JsonNode.Parse(File.ReadAllText(StateFile))!;
+        return $"{state["installId"]!.ToJsonString()} {state["identity"]!.ToJsonString()}";
+    }
+
+    private static string StateValue(string name) => JsonNode.Parse(File.ReadAllText(StateFile))![name]!.GetValue<string>();
+
+    private static string IdentityToken() => JsonNode.Parse(File.ReadAllText(StateFile))!["identity"]!["token"]!.GetValue<string>();
+
+    private static void AssertTokenAbsent(string token, params string[] logFiles)
+    {
+        foreach (var file in logFiles)
+        {
+            Assert.True(File.Exists(file), $"{file} is missing");
+            Assert.DoesNotContain(token, ReadAll(file), StringComparison.Ordinal);
+        }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"Timed out waiting until {what}");
+            await Task.Delay(1000);
+        }
+    }
 
     private static string ReadAll(string path)
     {
@@ -211,7 +238,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
     private static void Msiexec(params string[] arguments)
     {
         var output = RunWithExitCode("msiexec.exe", arguments, out var exitCode);
-        Assert.True(exitCode == 0, $"msiexec {string.Join(' ', arguments.Select(a => a.StartsWith("ENROLLMENT_KEY=", StringComparison.Ordinal) ? "ENROLLMENT_KEY=***" : a))} exited with {exitCode}: {output}");
+        Assert.True(exitCode == 0, $"msiexec {string.Join(' ', arguments)} exited with {exitCode}: {output}");
     }
 
     private static string Run(string file, params string[] arguments)
@@ -310,12 +337,15 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool LogonUserW(string user, string domain, string password, int logonType, int logonProvider, out SafeAccessTokenHandle token);
 
+    /// <summary>One register request the fake API received.</summary>
+    private sealed record Registration(string InstallId, string Token);
+
     /// <summary>A minimal agent API on loopback: register answers 201, heartbeat 200.</summary>
     private sealed class FakeAgentApi : IDisposable
     {
         private readonly HttpListener _listener = new();
         private readonly Task _loop;
-        private readonly List<string> _keys = [];
+        private readonly List<Registration> _registrations = [];
 
         public FakeAgentApi()
         {
@@ -331,13 +361,14 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
 
         public string Origin { get; }
 
-        public IReadOnlyList<string> RegisteredKeys
+        /// <summary>Distinct registrations; a retry of the same body counts once.</summary>
+        public IReadOnlyList<Registration> Registrations
         {
             get
             {
-                lock (_keys)
+                lock (_registrations)
                 {
-                    return [.. _keys.Distinct()];
+                    return [.. _registrations.Distinct()];
                 }
             }
         }
@@ -361,12 +392,12 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
                 string json;
                 if (context.Request.Url!.AbsolutePath == "/api/agent/register")
                 {
-                    lock (_keys)
+                    lock (_registrations)
                     {
-                        _keys.Add(body!["enrollmentKey"]!.GetValue<string>());
+                        _registrations.Add(new Registration(body!["installId"]!.GetValue<string>(), body["token"]!.GetValue<string>()));
                     }
 
-                    context.Response.StatusCode = 200;
+                    context.Response.StatusCode = 201;
                     json = """{"agentId":"0b5f3c1a-9d2e-4f6a-8b7c-1d2e3f4a5b6c","heartbeatIntervalSeconds":30,"serverTime":"2026-11-02T09:00:00Z"}""";
                 }
                 else
