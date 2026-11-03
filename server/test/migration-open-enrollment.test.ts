@@ -133,40 +133,54 @@ describe("migrations 0004 and 0005 from data at 0003", () => {
     }
   });
 
-  it("finish on a second run after a run was interrupted", async () => {
-    const { sql, name } = await freshDatabase();
-    const blocker = await sql.reserve();
-    // A client whose statements give up after waiting 500 ms for a lock.
-    const url = new URL(testDatabaseUrl());
-    url.pathname = `/${name}`;
-    const impatient = postgres(url.toString(), {
-      max: 2,
-      onnotice: () => {},
-      connection: { lock_timeout: 500 },
-    });
+  it("roll back completely when a run fails after a schema change, and a second run completes", async () => {
+    const { sql } = await freshDatabase();
+    // A test copy of the migrations whose 0004 fails after its first statement,
+    // which has already dropped a foreign key inside the migration transaction.
+    const failing = mkdtempSync(join(tmpdir(), "mashkif-migrations-failing-"));
+    cpSync(MIGRATIONS_FOLDER, failing, { recursive: true });
+    const file = join(failing, "0004_drop_enrollment_keys.sql");
+    const [firstStatement, ...rest] = readFileSync(file, "utf8").split("--> statement-breakpoint");
+    writeFileSync(
+      file,
+      [firstStatement, "\nSELECT 1 / 0;", ...rest].join("--> statement-breakpoint"),
+    );
+    const applied = async () => {
+      const [row] = await sql`select count(*)::int as n from drizzle.__drizzle_migrations`;
+      return Number(row?.n);
+    };
+    const foreignKey = async () => {
+      const rows = await sql`select 1 from pg_constraint
+        where conname = 'agent_enrollment_key_id_enrollment_key_id_fk'`;
+      return rows.length === 1;
+    };
     try {
       await runMigrations(sql, partialFolder);
       await seedAt0003(sql);
+      expect(await applied()).toBe(4);
 
-      // Another session holds the agent table, so the migration stops in the
-      // middle of 0004, as a crashed or killed run would.
-      await blocker`begin`;
-      await blocker`lock table agent in access exclusive mode`;
-      await expect(runMigrations(impatient)).rejects.toThrow();
-      await blocker`rollback`;
+      await expect(runMigrations(sql, failing)).rejects.toThrow();
 
-      // Drizzle runs the pending migrations in one transaction: nothing of
-      // 0004 stayed behind, and a second run completes.
-      const [still] = await sql`select to_regclass('public.enrollment_key') as name`;
-      expect(still?.name).not.toBeNull();
+      // Drizzle runs the pending migrations in one transaction: the dropped
+      // foreign key is back, nothing of 0004 or 0005 stayed, and the
+      // migrations table still lists 0000 to 0003 only.
+      expect(await foreignKey()).toBe(true);
+      const [table] = await sql`select to_regclass('public.enrollment_key') as name`;
+      expect(table?.name).not.toBeNull();
+      const [column] = await sql`select count(*)::int as n from information_schema.columns
+        where table_name = 'agent' and column_name in ('enrollment_key_id', 'active_days')`;
+      expect(column?.n).toBe(1);
+      expect(await applied()).toBe(4);
+
       await runMigrations(sql);
+      expect(await foreignKey()).toBe(false);
       const [gone] = await sql`select to_regclass('public.enrollment_key') as name`;
       expect(gone?.name).toBeNull();
+      expect(await applied()).toBe(6);
       const [count] = await sql`select count(*)::int as agents from agent`;
       expect(count?.agents).toBe(2);
     } finally {
-      blocker.release();
-      await impatient.end({ timeout: 5 });
+      rmSync(failing, { recursive: true, force: true });
       await sql.end({ timeout: 5 });
     }
   }, 30_000);
