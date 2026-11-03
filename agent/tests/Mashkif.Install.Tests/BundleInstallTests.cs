@@ -213,9 +213,9 @@ public sealed partial class InstallTests
         });
     }
 
-    /// <summary>T3e: a direct MSI repair under an installed EXE makes the hidden MSI entry visible.</summary>
+    /// <summary>T3e: a direct MSI repair under an installed EXE keeps the MSI entry hidden (observed on the runner).</summary>
     [Fact]
-    public async Task Mix_exe_then_msiexec_repair_makes_the_msi_entry_visible()
+    public async Task Mix_exe_then_msiexec_repair_keeps_one_entry()
     {
         Assert.True(gate.Passed);
         var exe = RequiredFile("MASHKIF_INSTALL_TEST_EXE");
@@ -230,13 +230,20 @@ public sealed partial class InstallTests
 
             Msiexec("/fa", msi, "/qn", "/norestart", "/l*v", Path.Combine(logs, "repair.log"));
             await WaitForStatusAsync(AgentStates.Connected);
-            Assert.True(VisibleEntries().Count == 2, State());
+            var product = Assert.Single(Products());
+            Assert.True(InstallSafetyGate.ProductHidden(product.ProductCode), State());
+            Assert.True(VisibleEntries().Count == 1, State());
         });
     }
 
-    /// <summary>T3f: the EXE carries the English MSI, which does not upgrade the Hebrew MSI; the EXE fails and the Hebrew product stays.</summary>
+    /// <summary>
+    /// T3f: the EXE carries the English MSI, whose upgrade rows match only
+    /// English, so it does not upgrade the Hebrew MSI: it installs the English
+    /// product next to it, and both stay installed (observed on the runner).
+    /// Hebrew MSI users uninstall it before they install the EXE.
+    /// </summary>
     [Fact]
-    public async Task Mix_hebrew_msi_then_newer_exe_fails_and_keeps_the_hebrew_product()
+    public async Task Mix_hebrew_msi_then_newer_exe_installs_the_english_product_beside_it()
     {
         Assert.True(gate.Passed);
         var heMsi = RequiredFile("MASHKIF_INSTALL_TEST_HE_MSI");
@@ -249,12 +256,13 @@ public sealed partial class InstallTests
             await WaitForStatusAsync(AgentStates.Connected);
             var hebrew = Assert.Single(Products());
 
-            var result = TryRun(upgradeExe, "/quiet", "/norestart", "/log", Path.Combine(logs, "exe.log"), $"SERVER_URL={api.Origin}");
-            Assert.False(result.TimedOut, "the EXE timed out");
-            Assert.True(result.ExitCode != 0, $"the EXE succeeded over the Hebrew MSI; {State()}");
-            var product = Assert.Single(Products());
-            Assert.Equal(hebrew.ProductCode, product.ProductCode);
-            Assert.Empty(InstallSafetyGate.BundleEntries());
+            Exe(upgradeExe, "/quiet", "/norestart", "/log", Path.Combine(logs, "exe.log"), $"SERVER_URL={api.Origin}");
+            var products = Products();
+            Assert.True(products.Count == 2, State());
+            Assert.Contains(products, p => p.ProductCode == hebrew.ProductCode && VersionOf(p) == "0.1.0" && !InstallSafetyGate.ProductHidden(p.ProductCode));
+            Assert.Contains(products, p => p.ProductCode != hebrew.ProductCode && VersionOf(p) == "0.1.1" && InstallSafetyGate.ProductHidden(p.ProductCode));
+            Assert.Equal("0.1.1", Assert.Single(InstallSafetyGate.BundleEntries()).DisplayVersion);
+            Assert.True(VisibleEntries().Count == 2, State());
         });
     }
 
