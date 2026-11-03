@@ -117,7 +117,7 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
         }
     }
 
-    private NamedPipeServerStream Create(bool first)
+    internal NamedPipeServerStream Create(bool first)
     {
         var pipe = NamedPipeServerStreamAcl.Create(
             pipeName,
@@ -141,8 +141,8 @@ internal sealed partial class PipeServer(AgentEngine engine, PipeSecurity securi
         }
     }
 
-    /// <summary>One instance: wait for a client, answer it, disconnect, and wait again.</summary>
-    private async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken stoppingToken)
+    /// <summary>One instance: wait for a client, answer it, disconnect, and wait again. Internal for tests.</summary>
+    internal async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {

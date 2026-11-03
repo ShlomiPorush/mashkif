@@ -185,6 +185,95 @@ public sealed class PipeTests : IDisposable
         new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.FirstPipeInstance).Dispose();
     }
 
+    [Fact]
+    public async Task An_instance_whose_client_left_before_the_wait_answers_the_next_client()
+    {
+        _f.Create().Initialize();
+        var server = Server();
+        var ct = TestContext.Current.CancellationToken;
+        await using var pipe = server.Create(first: true);
+
+        // The client connects and closes before the instance waits.
+        using (var leaving = Client())
+        {
+            await leaving.ConnectAsync(5000, ct);
+        }
+
+        using var stop = new CancellationTokenSource();
+        var serving = server.ServeAsync(pipe, stop.Token);
+        var reply = await new PipeClient(_pipeName, static () => Environment.ProcessId).SendAsync(new PipeRequest { Command = PipeProtocol.StatusCommand }, ct);
+        Assert.Equal(PipeFailure.None, reply.Failure);
+        Assert.True(reply.Response!.Ok);
+        await StopAsync(stop, serving);
+    }
+
+    [Fact]
+    public async Task Instances_held_by_silent_clients_answer_again_after_the_request_timeout()
+    {
+        _f.Create().Initialize();
+        var server = Server();
+        using var stop = new CancellationTokenSource();
+        var running = server.RunAsync(stop.Token);
+        var ct = TestContext.Current.CancellationToken;
+        await Eventually.TrueAsync(() => server.Instances == PipeServer.MaxInstances, "the pool is created");
+
+        var silent = await HoldEveryInstanceAsync(ct);
+        using (var extra = Client())
+        {
+            await Assert.ThrowsAsync<TimeoutException>(() => extra.ConnectAsync(300, ct));
+        }
+
+        // After the request timeout every instance is disconnected and waits again.
+        await Task.Delay(PipeProtocol.RequestTimeout + TimeSpan.FromSeconds(1), ct);
+        var reply = await new PipeClient(_pipeName, static () => Environment.ProcessId).SendAsync(new PipeRequest { Command = PipeProtocol.StatusCommand }, ct);
+        Assert.Equal(PipeFailure.None, reply.Failure);
+        Assert.Equal(PipeServer.MaxInstances, server.Instances);
+        AssertNameHeld();
+
+        foreach (var client in silent)
+        {
+            await client.DisposeAsync();
+        }
+
+        await StopAsync(stop, running);
+    }
+
+    [Fact]
+    public async Task A_stop_completes_while_silent_clients_hold_every_instance()
+    {
+        _f.Create().Initialize();
+        var server = Server();
+        using var stop = new CancellationTokenSource();
+        var running = server.RunAsync(stop.Token);
+        var ct = TestContext.Current.CancellationToken;
+        await Eventually.TrueAsync(() => server.Instances == PipeServer.MaxInstances, "the pool is created");
+        var silent = await HoldEveryInstanceAsync(ct);
+
+        // Well before the request timeout would free them.
+        var stopped = System.Diagnostics.Stopwatch.StartNew();
+        await StopAsync(stop, running);
+        Assert.True(stopped.Elapsed < PipeProtocol.RequestTimeout, $"the stop took {stopped.Elapsed}");
+        Assert.Equal(0, server.Instances);
+
+        foreach (var client in silent)
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    private async Task<List<NamedPipeClientStream>> HoldEveryInstanceAsync(CancellationToken ct)
+    {
+        var clients = new List<NamedPipeClientStream>();
+        for (var i = 0; i < PipeServer.MaxInstances; i++)
+        {
+            var client = Client();
+            await client.ConnectAsync(5000, ct);
+            clients.Add(client);
+        }
+
+        return clients;
+    }
+
     /// <summary>A squat attempt: creating the first instance of the name is refused while the service holds it.</summary>
     private void AssertNameHeld()
     {
