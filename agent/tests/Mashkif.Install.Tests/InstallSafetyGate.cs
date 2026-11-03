@@ -230,6 +230,16 @@ public sealed class InstallSafetyGate
         return entries;
     }
 
+    /// <summary>
+    /// The bundle codes under test (from the manifests) whose Uninstall key
+    /// exists in either registry view, with or without a BundleUpgradeCode.
+    /// </summary>
+    public static List<string> KnownBundleKeys()
+    {
+        CacheFolders(out _, out var bundleCodes);
+        return [.. bundleCodes.Where(UninstallKeyExists)];
+    }
+
     /// <summary>Whether HKLM\...\Uninstall\<paramref name="code"/> exists in either registry view.</summary>
     private static bool UninstallKeyExists(string code)
     {

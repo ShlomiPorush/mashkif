@@ -69,6 +69,20 @@ public sealed class InstallCleanupTests
     }
 
     [Fact]
+    public void A_bundle_key_without_BundleUpgradeCode_blocks_the_data_deletion()
+    {
+        // Burn stopped before it wrote BundleUpgradeCode: the key is invisible
+        // to BundleEntries and is found only by its bundle code.
+        var fake = new FakeMachine { Products = ["{P1}"], KnownKeys = ["{B1}"], NoLeftovers = true };
+
+        var failures = CleanUp(fake.Build());
+
+        Assert.Contains("msiexec.exe /x {P1} /qn /norestart", fake.Runs);
+        Assert.Contains(failures, f => f.Contains("Mashkif is still installed", StringComparison.Ordinal));
+        Assert.False(fake.DataDeleted);
+    }
+
+    [Fact]
     public void A_timeout_blocks_the_data_deletion()
     {
         var fake = new FakeMachine { Products = ["{P1}"], TimedOut = true };
@@ -140,6 +154,9 @@ public sealed class InstallCleanupTests
 
         public bool NoLeftovers { get; init; }
 
+        /// <summary>Uninstall keys of the bundles under test, found by code (they may lack BundleUpgradeCode).</summary>
+        public List<string> KnownKeys { get; init; } = [];
+
         public Func<string, Exception?> Throw { get; init; } = _ => null;
 
         public List<string> Runs { get; } = [];
@@ -149,6 +166,7 @@ public sealed class InstallCleanupTests
         public Machine Build() => new(
             BundleEntries: () => ThrowOnBundles ? throw new UnauthorizedAccessException("registry denied") : [.. Bundles],
             ProductCodes: () => [.. Products],
+            KnownBundleKeys: () => [.. KnownKeys],
             Run: RunFake,
             UserCreated: UserCreated,
             TestUser: "mashkif-install-test",

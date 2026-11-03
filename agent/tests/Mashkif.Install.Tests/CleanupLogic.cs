@@ -22,6 +22,7 @@ internal static class CleanupLogic
     public sealed record Machine(
         Func<IReadOnlyList<BundleEntry>> BundleEntries,
         Func<IReadOnlyList<string>> ProductCodes,
+        Func<IReadOnlyList<string>> KnownBundleKeys,
         Func<string, string[], RunResult> Run,
         bool UserCreated,
         string TestUser,
@@ -63,7 +64,10 @@ internal static class CleanupLogic
 
         var stillInstalled = Read<bool?>(
             "check what is still installed",
-            () => machine.BundleEntries().Count > 0 || machine.ProductCodes().Count > 0,
+            // KnownBundleKeys: the Uninstall keys of the bundles under test, also
+            // when Burn stopped before it wrote BundleUpgradeCode, which
+            // BundleEntries cannot find.
+            () => machine.BundleEntries().Count > 0 || machine.ProductCodes().Count > 0 || machine.KnownBundleKeys().Count > 0,
             failures);
         var blocked = stillInstalled is null
             ? "the install state could not be read"

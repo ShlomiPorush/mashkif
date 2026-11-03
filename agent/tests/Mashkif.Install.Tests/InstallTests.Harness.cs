@@ -146,6 +146,7 @@ public sealed partial class InstallTests
     private List<string> CleanUp() => CleanupLogic.CleanUp(new CleanupLogic.Machine(
         BundleEntries: () => [.. InstallSafetyGate.BundleEntries().Select(e => new CleanupLogic.BundleEntry(e.Code, e.QuietUninstallString))],
         ProductCodes: () => [.. Products().Select(p => p.ProductCode)],
+        KnownBundleKeys: InstallSafetyGate.KnownBundleKeys,
         Run: TryRun,
         UserCreated: _userCreated,
         TestUser: InstallSafetyGate.TestUser,
