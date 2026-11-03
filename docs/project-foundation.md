@@ -151,7 +151,7 @@ All scripts are Bash run inside WSL, start with `#!/usr/bin/env bash`, use LF li
 
 ### Signing the agent installers
 
-Not implemented: signing is deferred (the "Code signing" decision), `scripts/release.sh` refuses every agent release until it exists, and the MSI and EXE that CI builds are unsigned. An unsigned EXE or MSI downloaded from the internet gets a SmartScreen warning, and UAC shows "Unknown publisher". When signing is set up, it follows the documented WiX 7 procedure ([FireGiant: Signing packages and bundles](https://docs.firegiant.com/wix/tools/signing/)):
+Not implemented: signing is deferred (the "Code signing" decision), `scripts/release.sh` refuses every agent release until it exists, and the MSI and EXE that CI builds are unsigned. An unsigned EXE or MSI downloaded from the internet is expected to get a SmartScreen warning and a UAC prompt that shows "Unknown publisher" (not yet checked on a real desktop). When signing is set up, it follows the documented WiX 7 procedure ([FireGiant: Signing packages and bundles](https://docs.firegiant.com/wix/tools/signing/)):
 
 1. Sign the MSI first, with the `SignMsi` target in `agent/installer/Mashkif.Installer.wixproj`, because the EXE embeds the MSI and its hash.
 2. In `agent/bundle/Mashkif.Bundle.wixproj`, set `SignOutput=true` and define the targets `SignBundleEngine` and `SignBundle`, which call the signing tool on `@(SignBundleEngine)` and `@(SignBundle)`. `WixToolset.Sdk` detaches the Burn engine, signs it, reattaches it, and then signs the whole EXE, so the cached engine copy that repair and uninstall run is signed too.
