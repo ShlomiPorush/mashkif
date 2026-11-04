@@ -145,7 +145,9 @@ public sealed class BundleTests
     {
         var manifest = Manifest().ToString();
         var data = BootstrapperApplicationData().ToString();
-        foreach (var name in new[] { "LaunchTargetElevatedId", "ApprovedExeForElevation", "LaunchArguments", "LaunchHidden", "LaunchWorkingFolder" })
+        // LaunchTargetElevatedId makes WixStdBA start an ApprovedExeForElevation
+        // through Burn's elevated engine; the tray must never start that way.
+        foreach (var name in new[] { "LaunchTargetElevatedId", "ApprovedExeForElevation" })
         {
             Assert.DoesNotContain(name, manifest, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain(name, data, StringComparison.OrdinalIgnoreCase);

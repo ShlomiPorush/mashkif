@@ -15,8 +15,8 @@
   registers has no /norestart, so append it when you run that string.
 
   The finish page of a full-UI install, repair, or upgrade offers Launch,
-  which starts the tray app, unless the EXE was started elevated (see
-  LaunchTarget below). A quiet or passive run never starts it.
+  which starts the tray app, unless the EXE was started elevated or a restart
+  is required (see LaunchTarget below). A quiet or passive run never starts it.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
@@ -41,16 +41,24 @@
     <Variable Name="SERVER_URL" bal:Overridable="yes" />
 
     <!--
-      The MSI's INSTALLFOLDER, ProgramFiles64Folder\Mashkif. The bundle never
-      passes it to the MSI and the MSI never remembers it, so an EXE install
-      always lands here. Not overridable.
+      The MSI's default INSTALLFOLDER, ProgramFiles64Folder\Mashkif. The bundle
+      passes the MSI no property but SERVER_URL, never INSTALLFOLDER, so when
+      the EXE installs the MSI, Windows Installer resolves INSTALLFOLDER from
+      the Directory table to this default ("If the property is not defined,
+      the destination directory is resolved to a subdirectory beneath the
+      resolved destination directory for the Directory_Parent entry",
+      https://learn.microsoft.com/windows/win32/msi/directory-table). An MSI
+      that was installed on its own to another folder keeps that folder, so
+      Launch would point at a missing file; the README does not support that
+      mix (uninstall such an MSI before using the EXE). Not overridable.
     -->
     <Variable Name="InstallFolder" Type="formatted" Value="[ProgramFiles64Folder]Mashkif\" />
 
     <!--
       LaunchTarget makes the WixStdBA finish page show Launch after an install,
-      repair, or upgrade; never after an uninstall or a failure, and never in a
-      quiet or passive run. WixStdBA starts it from the bootstrapper
+      repair, or upgrade; never after an uninstall or a failure, never in a
+      quiet or passive run, and not when a restart is required and allowed,
+      where the page shows Restart instead. WixStdBA starts it from the bootstrapper
       application process, which has the token the EXE was started with. It is
       set only when the bundle did not start elevated: after "Run as
       administrator" (or with UAC off) Launch would start the tray elevated,
