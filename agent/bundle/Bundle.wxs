@@ -13,6 +13,10 @@
   Always pass /norestart with /quiet: without it a quiet run restarts the PC
   by itself when a restart is needed. The QuietUninstallString that Burn
   registers has no /norestart, so append it when you run that string.
+
+  The finish page of a full-UI install, repair, or upgrade offers Launch,
+  which starts the tray app, unless the EXE was started elevated (see
+  LaunchTarget below). A quiet or passive run never starts it.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
@@ -35,6 +39,31 @@
       repair or upgrade without it keeps the value the MSI remembered.
     -->
     <Variable Name="SERVER_URL" bal:Overridable="yes" />
+
+    <!--
+      The MSI's INSTALLFOLDER, ProgramFiles64Folder\Mashkif. The bundle never
+      passes it to the MSI and the MSI never remembers it, so an EXE install
+      always lands here. Not overridable.
+    -->
+    <Variable Name="InstallFolder" Type="formatted" Value="[ProgramFiles64Folder]Mashkif\" />
+
+    <!--
+      LaunchTarget makes the WixStdBA finish page show Launch after an install,
+      repair, or upgrade; never after an uninstall or a failure, and never in a
+      quiet or passive run. WixStdBA starts it from the bootstrapper
+      application process, which has the token the EXE was started with. It is
+      set only when the bundle did not start elevated: after "Run as
+      administrator" (or with UAC off) Launch would start the tray elevated,
+      possibly as another account, so the button stays hidden and the tray
+      starts at the next sign-in through the machine Run key.
+      WixBundleElevated still holds the start state here: searches run at
+      detect, before Burn elevates at apply.
+    -->
+    <SetVariable Id="LaunchTrayWhenNotElevated"
+                 Variable="LaunchTarget"
+                 Type="formatted"
+                 Value="[InstallFolder]Tray\Mashkif.Tray.exe"
+                 Condition="NOT WixBundleElevated" />
 
     <Chain>
       <!-- Hidden in Apps and Features (Visible defaults to no): only the bundle entry shows. -->

@@ -81,8 +81,7 @@ public sealed class BundleTests
         Assert.Equal("[SERVER_URL]", (string?)serverUrl.Attribute("Value"));
         Assert.Equal("SERVER_URL", (string?)serverUrl.Attribute("Condition"));
 
-        var variable = Assert.Single(Manifest().Root!.Elements(Burn + "Variable"));
-        Assert.Equal("SERVER_URL", (string?)variable.Attribute("Id"));
+        var variable = Assert.Single(Variables(), v => (string?)v.Attribute("Id") == "SERVER_URL");
         Assert.Null(variable.Attribute("Value"));
         Assert.Equal("no", (string?)variable.Attribute("Hidden"));
         Assert.Equal("no", (string?)variable.Attribute("Persisted"));
@@ -96,6 +95,64 @@ public sealed class BundleTests
             .Select(e => (string?)e.Attribute("Name"))
             .ToList();
         Assert.Equal(["SERVER_URL"], overridable);
+    }
+
+    [Fact]
+    public void The_bundle_declares_only_the_server_URL_and_the_install_folder()
+    {
+        Assert.Equal(["SERVER_URL", "InstallFolder"], Variables().Select(v => (string?)v.Attribute("Id")));
+    }
+
+    [Fact]
+    public void The_finish_page_launches_the_tray_under_the_install_folder_only_when_the_bundle_did_not_start_elevated()
+    {
+        // WixStdBA shows Launch on the finish page only when LaunchTarget
+        // exists. A SetVariable search runs at detect, before Burn elevates,
+        // so WixBundleElevated is still the state the EXE was started with.
+        var launch = Assert.Single(Manifest().Root!.Elements(Burn + "SetVariable"));
+        Assert.Equal("LaunchTarget", (string?)launch.Attribute("Variable"));
+        Assert.Equal("formatted", (string?)launch.Attribute("Type"));
+        Assert.Equal(@"[InstallFolder]Tray\Mashkif.Tray.exe", (string?)launch.Attribute("Value"));
+        Assert.Equal("NOT WixBundleElevated", (string?)launch.Attribute("Condition"));
+
+        var installFolder = Assert.Single(Variables(), v => (string?)v.Attribute("Id") == "InstallFolder");
+        Assert.Equal("formatted", (string?)installFolder.Attribute("Type"));
+        Assert.Equal(@"[ProgramFiles64Folder]Mashkif\", (string?)installFolder.Attribute("Value"));
+        Assert.Equal("no", (string?)installFolder.Attribute("Persisted"));
+    }
+
+    [Fact]
+    public void The_launch_path_is_where_the_MSI_installs_the_tray()
+    {
+        using var msi = new Database(MsiPath(), DatabaseOpenMode.ReadOnly);
+        Assert.Equal(["ProgramFiles64Folder", "Mashkif"], MsiDirectory(msi, "INSTALLFOLDER"));
+        Assert.Equal(["INSTALLFOLDER", "Tray"], MsiDirectory(msi, "TrayFolder"));
+
+        using var view = msi.OpenView("SELECT `File`.`FileName`, `Component`.`Directory_` FROM `File`, `Component` WHERE `File`.`Component_` = `Component`.`Component` AND `File`.`File` = 'TrayExe'");
+        view.Execute();
+        using var record = view.Fetch();
+        Assert.NotNull(record);
+        Assert.Equal("Mashkif.Tray.exe", LongName(record.GetString(1)));
+        Assert.Equal("TrayFolder", record.GetString(2));
+
+        // The bundle does not move the MSI: it never passes INSTALLFOLDER.
+        var package = Manifest().Root!.Element(Burn + "Chain")!.Element(Burn + "MsiPackage")!;
+        Assert.Null(MsiProperty(package, "INSTALLFOLDER"));
+    }
+
+    [Fact]
+    public void The_tray_is_never_launched_elevated_or_from_a_fixed_path()
+    {
+        var manifest = Manifest().ToString();
+        var data = BootstrapperApplicationData().ToString();
+        foreach (var name in new[] { "LaunchTargetElevatedId", "ApprovedExeForElevation", "LaunchArguments", "LaunchHidden", "LaunchWorkingFolder" })
+        {
+            Assert.DoesNotContain(name, manifest, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(name, data, StringComparison.OrdinalIgnoreCase);
+        }
+
+        Assert.DoesNotContain("Program Files", manifest, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(@"C:\", manifest, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -122,6 +179,21 @@ public sealed class BundleTests
         Assert.True(File.Exists(path), $"{path} is missing");
         return XDocument.Load(path);
     }
+
+    private static List<XElement> Variables() => Manifest().Root!.Elements(Burn + "Variable").ToList();
+
+    /// <summary>The parent and the long name of a row in the MSI's Directory table.</summary>
+    private static string[] MsiDirectory(Database db, string id)
+    {
+        using var view = db.OpenView($"SELECT `Directory_Parent`, `DefaultDir` FROM `Directory` WHERE `Directory` = '{id}'");
+        view.Execute();
+        using var record = view.Fetch();
+        Assert.NotNull(record);
+        return [record.GetString(1), LongName(record.GetString(2))];
+    }
+
+    /// <summary>The long name of an MSI "short|long" file or folder name.</summary>
+    private static string LongName(string name) => name[(name.IndexOf('|', StringComparison.Ordinal) + 1)..];
 
     private static XElement? MsiProperty(XElement package, string id) =>
         package.Elements(Burn + "MsiProperty").SingleOrDefault(p => (string?)p.Attribute("Id") == id);
