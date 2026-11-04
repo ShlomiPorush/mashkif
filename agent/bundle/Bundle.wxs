@@ -15,8 +15,9 @@
   registers has no /norestart, so append it when you run that string.
 
   The finish page of a full-UI install, repair, or upgrade offers Launch,
-  which starts the tray app, unless the EXE was started elevated or a restart
-  is required (see LaunchTarget below). A quiet or passive run never starts it.
+  which starts the tray app, unless the EXE was started elevated or a
+  restart is required and allowed (see LaunchTarget below). A quiet or
+  passive run never starts it.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
