@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Mashkif for Windows: the EXE installer, a Burn bundle that installs the
+  English MSI with the WiX Standard Bootstrapper Application (English UI).
+  Apps and Features shows one entry, the bundle's; the MSI entry is hidden.
+
+  Install:          double-click, or right-click and "Run as administrator"
+  Silent install:   Mashkif-<version>-x64.exe /quiet /norestart /log <file>
+  Another server (development only):
+                    Mashkif-<version>-x64.exe /quiet /norestart /log <file> SERVER_URL=<url>
+  Repair:           Mashkif-<version>-x64.exe /repair /quiet /norestart /log <file>
+  Uninstall:        Mashkif-<version>-x64.exe /uninstall /quiet /norestart /log <file>
+  Always pass /norestart with /quiet: without it a quiet run restarts the PC
+  by itself when a restart is needed. The QuietUninstallString that Burn
+  registers has no /norestart, so append it when you run that string.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <!-- The bundle upgrade code never changes; it is not the MSI's upgrade code. -->
+  <Bundle Name="Mashkif for Windows"
+          Manufacturer="Mashkif"
+          Version="$(ProductVersion)"
+          UpgradeCode="8B44898D-0D6E-4E7D-AA33-220084833485"
+          AboutUrl="https://mashkif.co.il"
+          DisableModify="yes">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+          Theme="hyperlinkLicense"
+          LicenseUrl="https://github.com/ShlomiPorush/mashkif/blob/main/agent/LICENSE"
+          SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <!--
+      Development only: another server. Passed to the MSI only when set, so a
+      repair or upgrade without it keeps the value the MSI remembered.
+    -->
+    <Variable Name="SERVER_URL" bal:Overridable="yes" />
+
+    <Chain>
+      <!-- Hidden in Apps and Features (Visible defaults to no): only the bundle entry shows. -->
+      <MsiPackage Id="Mashkif" SourceFile="$(MsiPath)">
+        <MsiProperty Name="SERVER_URL" Value="[SERVER_URL]" Condition="SERVER_URL" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

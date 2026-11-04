@@ -14,6 +14,15 @@
     <NoWarn>$(NoWarn);CA1707</NoWarn>
   </PropertyGroup>
 
+  <!--
+    The install tests' cleanup logic, linked here so its tests run on any
+    machine: Mashkif.Install.Tests itself refuses every machine but a
+    GitHub-hosted runner (InstallSafetyGate).
+  -->
+  <ItemGroup>
+    <Compile Include="..\Mashkif.Install.Tests\CleanupLogic.cs" Link="Linked\CleanupLogic.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="WixToolset.Dtf.WindowsInstaller" />
     <PackageReference Include="xunit.v3" />

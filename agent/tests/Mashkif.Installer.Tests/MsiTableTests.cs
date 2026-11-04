@@ -108,6 +108,23 @@ public sealed class MsiTableTests
         Assert.Contains(rows, r => r[0] == @"SOFTWARE\Mashkif" && r[1] == "-");
     }
 
+    [Theory]
+    [MemberData(nameof(Packages))]
+    public void The_upgrade_rows_match_every_language(string package)
+    {
+        using var db = Open(package);
+        var rows = Rows(db, "SELECT `UpgradeCode`, `Language`, `Attributes` FROM `Upgrade`");
+        Assert.NotEmpty(rows);
+        Assert.All(rows, r =>
+        {
+            Assert.Equal("{D80A17FB-1D99-47D0-A228-8FC027BE1667}", r[0]);
+            // An empty Language column matches every language (IgnoreLanguage),
+            // and msidbUpgradeAttributesLanguagesExclusive (0x400) is not set.
+            Assert.Equal(string.Empty, r[1]);
+            Assert.Equal(0, Number(r[2]) & 0x400);
+        });
+    }
+
     [Fact]
     public void The_upgrade_code_never_changes()
     {

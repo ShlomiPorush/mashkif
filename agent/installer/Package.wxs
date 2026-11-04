@@ -22,7 +22,14 @@
            InstallerVersion="500"
            Compressed="yes">
 
-    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)" />
+    <!--
+      IgnoreLanguage: the English and the Hebrew MSI share one upgrade code but
+      have different languages, so without it a newer installer of one language
+      would install beside an older one of the other instead of replacing it.
+      The EXE installs the English MSI, so this also lets it replace a Hebrew
+      MSI.
+    -->
+    <MajorUpgrade DowngradeErrorMessage="!(loc.DowngradeError)" IgnoreLanguage="yes" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Property Id="ARPNOMODIFY" Value="1" />

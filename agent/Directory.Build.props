@@ -9,6 +9,19 @@
     <ArtifactsRoot>$(MSBuildThisFileDirectory)artifacts\</ArtifactsRoot>
   </PropertyGroup>
 
+  <!--
+    WiX Toolset v7 builds only after its Open Source Maintenance Fee EULA is
+    accepted. The maintainer accepted it for this project on 2026-11-03; the
+    condition is recorded in docs/project-foundation.md ("WiX version").
+    AcceptEula is the property both WixToolset.Sdk (the .wixproj files) and
+    the WixToolset.Dtf.WindowsInstaller package (the installer test projects)
+    check, so it is set for every project here. It writes nothing to the
+    user profile.
+  -->
+  <PropertyGroup>
+    <AcceptEula>wix7</AcceptEula>
+  </PropertyGroup>
+
   <PropertyGroup Condition="'$(MSBuildProjectExtension)' == '.csproj'">
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
