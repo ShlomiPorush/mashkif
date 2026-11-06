@@ -144,14 +144,17 @@ public sealed class QueueTests : IDisposable
     {
         var queue = Open(capacity: 3);
         var events = Enumerable.Range(0, 5).Select(_ => Event()).ToList();
-        foreach (var e in events)
+        foreach (var e in events.Take(4))
         {
             Append(queue, e);
         }
 
+        // The first overflow: the removal and the count in one line (before any compaction folds it).
+        Assert.Contains(File.ReadAllLines(queue.FilePath), line => line.Contains("\"type\":\"drop\"", StringComparison.Ordinal) && line.Contains(events[0].Event.Id.ToString(), StringComparison.Ordinal) && line.Contains("\"count\":1", StringComparison.Ordinal));
+        Append(queue, events[4]);
+
         Assert.Equal(events.Skip(2).Select(e => e.Event), queue.Pending.Select(p => p.Event));
         Assert.Equal(2, queue.DroppedCount(Boot));
-        Assert.Contains(File.ReadAllLines(queue.FilePath), line => line.Contains("\"type\":\"drop\"", StringComparison.Ordinal) && line.Contains(events[1].Event.Id.ToString(), StringComparison.Ordinal) && line.Contains("\"count\":2", StringComparison.Ordinal));
 
         var again = Open(capacity: 3);
         Assert.Equal(2, again.DroppedCount(Boot));
@@ -212,6 +215,78 @@ public sealed class QueueTests : IDisposable
 
         // Each later boot drops the event left by the boot before it, then its own first one.
         Assert.Equal(2, last.DroppedCount(boots[10]));
+    }
+
+    [Fact]
+    public void Writes_meant_for_the_old_identity_after_a_rebind_are_dropped_and_write_nothing()
+    {
+        var queue = Open(capacity: 1);
+        var a = Event();
+        Append(queue, Event());
+        Append(queue, a); // one drop: the old identity has a count
+        var rejoined = new QueueBinding(Guid.NewGuid(), EngineFixture.Origin);
+        queue.Rebind(rejoined);
+        var size = new FileInfo(queue.FilePath).Length;
+
+        // An answer to a request of the old identity, applied after the Rebind.
+        queue.Complete([a.Event.Id], expected: Binding);
+        queue.ConfirmDropped(new DroppedEvents { BootId = Boot, Count = 1 }, expected: Binding);
+        queue.Append(Event(), Boot, Now, 1_000, Frequency, expected: Binding);
+
+        Assert.Equal(size, new FileInfo(queue.FilePath).Length);
+        Assert.Empty(queue.Pending);
+        Assert.Null(queue.NextDroppedCount());
+        var (events, dropped) = queue.Batch(Binding, 300);
+        Assert.Empty(events);
+        Assert.Null(dropped);
+        var reloaded = Open(rejoined, capacity: 1);
+        Assert.Empty(reloaded.Pending);
+        Assert.Null(reloaded.NextDroppedCount());
+    }
+
+    [Fact]
+    public void A_batch_is_only_taken_for_the_identity_the_queue_belongs_to()
+    {
+        var queue = Open();
+        var a = Event();
+        Append(queue, a);
+        Assert.Equal([a.Event], queue.Batch(Binding, 300).Events);
+        Assert.Empty(queue.Batch(new QueueBinding(Guid.NewGuid(), EngineFixture.Origin), 300).Events);
+    }
+
+    [Fact]
+    public void Repeated_overflow_without_a_restart_keeps_the_file_bounded()
+    {
+        var queue = Open(capacity: 3);
+        Append(queue, Event());
+        var line = new FileInfo(queue.FilePath).Length;
+        for (var i = 0; i < 200; i++)
+        {
+            Append(queue, Event());
+        }
+
+        // Each overflow writes a drop line and replaces an event line; compaction keeps up.
+        Assert.InRange(new FileInfo(queue.FilePath).Length, 1, 30 * line);
+        var reloaded = Open(capacity: 3);
+        Assert.Equal(3, reloaded.Pending.Count);
+        Assert.Equal(198, reloaded.DroppedCount(Boot));
+    }
+
+    [Fact]
+    public void A_failed_compaction_after_a_written_record_is_not_a_failed_write_and_counts_stay_exact()
+    {
+        var queue = Open(capacity: 1);
+        queue.BeforeReplace = () => throw new IOException("disk full");
+        for (var i = 0; i < 6; i++)
+        {
+            Append(queue, Event()); // each overflow would compact; every compaction fails
+        }
+
+        Assert.Equal(5, queue.DroppedCount(Boot));
+        queue.BeforeReplace = null;
+        var reloaded = Open(capacity: 1);
+        Assert.Single(reloaded.Pending);
+        Assert.Equal(5, reloaded.DroppedCount(Boot));
     }
 
     [Fact]

@@ -124,6 +124,46 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     /// <summary>Called with a message whenever something is dropped or discarded.</summary>
     internal Action<string>? Log { get; set; }
 
+    /// <summary>
+    /// The batch for an identity: up to <paramref name="limit"/> of the oldest
+    /// events and the oldest unconfirmed dropped count, only when the queue
+    /// belongs to <paramref name="expected"/>; otherwise nothing. Checked under
+    /// the queue lock, so a batch never mixes in records of another identity.
+    /// </summary>
+    public (IReadOnlyList<AgentEvent> Events, DroppedEvents? Dropped) Batch(QueueBinding expected, int limit)
+    {
+        lock (_gate)
+        {
+            if (_binding != expected)
+            {
+                return ([], null);
+            }
+
+            var boot = _boots.Where(b => b.Total > b.Confirmed).OrderBy(b => b.Order).FirstOrDefault();
+            return ([.. _events.Take(limit).Select(e => e.Item.Event)], boot is null ? null : new DroppedEvents { BootId = boot.BootId, Count = boot.Total });
+        }
+    }
+
+    /// <summary>Whether a write meant for <paramref name="expected"/> may run: the queue still has that binding.</summary>
+    private bool Matches(QueueBinding? expected)
+    {
+        if (expected is null)
+        {
+            return true;
+        }
+
+        lock (_gate)
+        {
+            if (_binding == expected)
+            {
+                return true;
+            }
+        }
+
+        Log?.Invoke("a write for another identity was dropped");
+        return false;
+    }
+
     /// <summary>The live events, oldest first.</summary>
     public IReadOnlyList<QueuedEvent> Pending
     {
@@ -252,8 +292,13 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     }
 
     /// <summary>Appends an event, after dropping expired events and making room under the cap.</summary>
-    public void Append(QueuedEvent queued, Guid currentBoot, DateTimeOffset nowUtc, long nowTimestamp, long frequency)
+    public void Append(QueuedEvent queued, Guid currentBoot, DateTimeOffset nowUtc, long nowTimestamp, long frequency, QueueBinding? expected = null)
     {
+        if (!Matches(expected))
+        {
+            return;
+        }
+
         var binding = RequireBinding();
         Prune(currentBoot, nowUtc, nowTimestamp, frequency);
 
@@ -292,7 +337,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         {
             if (overflow.Count > 0)
             {
-                RemoveLocked(overflow);
+                _deadBytes += sizes[0] + RemoveLocked(overflow);
                 SetTotalLocked(currentBoot, newCount);
                 Log?.Invoke($"{overflow.Count} events were dropped because the queue is full");
             }
@@ -308,8 +353,13 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     }
 
     /// <summary>Removes events after a final server outcome (accepted, duplicate, rejected).</summary>
-    public void Complete(IReadOnlyCollection<Guid> ids)
+    public void Complete(IReadOnlyCollection<Guid> ids, QueueBinding? expected = null)
     {
+        if (!Matches(expected))
+        {
+            return;
+        }
+
         if (ids.Count == 0)
         {
             return;
@@ -337,9 +387,14 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     }
 
     /// <summary>Records the dropped count of a boot that the server confirmed with a 200.</summary>
-    public void ConfirmDropped(DroppedEvents confirmed)
+    public void ConfirmDropped(DroppedEvents confirmed, QueueBinding? expected = null)
     {
         ArgumentNullException.ThrowIfNull(confirmed);
+        if (!Matches(expected))
+        {
+            return;
+        }
+
         var binding = RequireBinding();
         var sizes = Write([new QueueRecord { Type = RecordTypes.DropConfirmed, InstallId = binding.InstallId, ServerOrigin = binding.ServerOrigin, BootId = confirmed.BootId, Count = confirmed.Count }]);
         lock (_gate)
@@ -537,9 +592,20 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
             compact = _deadBytes > CompactionDeadBytes || (_validLength > 0 && _deadBytes * 2 > _validLength);
         }
 
-        if (compact)
+        if (!compact)
+        {
+            return;
+        }
+
+        try
         {
             CompactCore();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The record before it is already on disk: a failed compaction is not a failed
+            // write, and the queue stays valid (a leftover temporary file is deleted later).
+            Log?.Invoke($"compaction failed ({exception.GetType().Name}); tried again later");
         }
     }
 

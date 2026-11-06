@@ -264,11 +264,12 @@ internal sealed partial class AgentEngine
         var now = _time.GetUtcNow();
         var nowTimestamp = _time.GetTimestamp();
         var frequency = _time.TimestampFrequency;
+        var binding = BindingLocked();
         var append = _writer!.Post(queue =>
         {
             try
             {
-                queue.Append(queued, boot, now, nowTimestamp, frequency);
+                queue.Append(queued, boot, now, nowTimestamp, frequency, binding);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
@@ -468,14 +469,17 @@ internal sealed partial class AgentEngine
     private async Task<Step> SendBatchAsync(IReadOnlyList<AgentEvent>? only, CancellationToken cancellationToken)
     {
         AgentIdentity identity;
+        QueueBinding binding;
         int epoch;
         int limit;
         lock (_gate)
         {
-            if (_writer is null || _state.Identity is null || _state.IdentityState != IdentityStates.Active || _blockedReason is not null || ServerChanged())
+            if (_writer is null || _state.Identity is null || _state.IdentityState != IdentityStates.Active || _blockedReason is not null || ServerChanged() || BindingLocked() is not { } current)
             {
                 return Step.Stop;
             }
+
+            binding = current;
 
             if (only is null && (IsQuiescingLocked() || DeferredLocked(out _)))
             {
@@ -487,12 +491,25 @@ internal sealed partial class AgentEngine
             limit = _batchLimit;
         }
 
-        var queue = _writer.Queue;
-        var events = only ?? [.. queue.Pending.Take(limit).Select(q => q.Event)];
-        var dropped = only is null ? queue.NextDroppedCount() : null;
+        IReadOnlyList<AgentEvent> events;
+        DroppedEvents? dropped = null;
+        if (only is null)
+        {
+            // Expired events go first, through the drop record (P8); then the batch, only from
+            // the queue of the identity this request is sent with (an unfinished Rebind gives nothing).
+            var boot = _options.BootId;
+            var (now, nowTimestamp, frequency) = (_time.GetUtcNow(), _time.GetTimestamp(), _time.TimestampFrequency);
+            await _writer.Post(q => q.Prune(boot, now, nowTimestamp, frequency)).ConfigureAwait(false);
+            (events, dropped) = _writer.Queue.Batch(binding, limit);
+        }
+        else
+        {
+            events = only;
+        }
         if (events.Count == 0 && dropped is null)
         {
-            return Step.Done;
+            // Nothing for this identity: the sender waits for the next signal.
+            return Step.Stop;
         }
 
         var request = new EventsRequest { Events = events, DroppedEvents = dropped };
@@ -516,12 +533,13 @@ internal sealed partial class AgentEngine
 
         if (done.Count > 0)
         {
-            await _writer.Post(q => q.Complete(done)).ConfigureAwait(false);
+            // The writer drops this when the queue no longer belongs to the identity of the request.
+            await _writer.Post(q => q.Complete(done, binding)).ConfigureAwait(false);
         }
 
         if (step.Kind == StepKind.Done && request.DroppedEvents is { } confirmed)
         {
-            await _writer.Post(q => q.ConfirmDropped(confirmed)).ConfigureAwait(false);
+            await _writer.Post(q => q.ConfirmDropped(confirmed, binding)).ConfigureAwait(false);
         }
 
         return step;

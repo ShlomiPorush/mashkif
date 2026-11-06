@@ -136,7 +136,7 @@ public sealed class ResilienceTests
 
             // Counts never double or go back; the last one sent is what the disk holds.
             var counts = Bodies(f).Select(b => b["droppedEvents"]).Where(d => d is not null).Select(d => d!["count"]!.GetValue<long>()).ToList();
-            Assert.All(counts, c => Assert.InRange(c, 1, 2));
+            Assert.True(counts.All(c => c is >= 1 and <= 2), $"crash at write {at} of {string.Join(",", crash.Writes)}: counts {string.Join(",", counts)}");
             Assert.Equal(counts.OrderBy(c => c), counts);
             Assert.Equal(f.Queue.DroppedCount(f.BootId), counts.Count == 0 ? 0 : counts[^1]);
 
@@ -283,6 +283,103 @@ public sealed class ResilienceTests
         await UntilAsync(f, () => f.Handler.Events.Any(r => r.Authorization == $"Bearer {newToken}") && f.Queue.Pending.Count == 0, "sent under the new identity");
         Assert.Null(engine.State.DeferredUntilUtc);
         Assert.Null(engine.State.DeferredSeconds);
+    }
+
+    // Review R1: the queue is isolated from a new identity at run time.
+
+    [Fact]
+    public async Task With_the_writer_held_behind_an_old_write_the_new_identity_never_sends_the_old_events()
+    {
+        using var f = new EventsFixture();
+        f.Seed(EngineFixture.Registered());
+        f.Handler.EventsAnswer = static (_, _) => Task.FromResult(RoutedHandler.Json(HttpStatusCode.ServiceUnavailable, "{}"));
+        var engine = f.Start();
+        await UntilAsync(f, () => engine.State.LastSync is not null, "first answer", TimeSpan.FromMilliseconds(1));
+        f.Time.Advance(TimeSpan.FromSeconds(1));
+        engine.Resume();
+        await UntilAsync(f, () => f.Queue.Pending.Count == 1, "an old event queued", TimeSpan.FromMilliseconds(1));
+        var oldIds = f.Queue.Pending.Select(p => p.Event.Id.ToString()).ToHashSet();
+
+        // A second old event whose write is held, so the Rebind of Join again waits behind it.
+        using var held = new ManualResetEventSlim();
+        f.Queue.BeforeFlush = () => held.Wait(TimeSpan.FromSeconds(30));
+        engine.Resume();
+        f.Handler.HeartbeatAnswer = static (_, _) => Task.FromResult(RoutedHandler.Json(HttpStatusCode.Forbidden, """{"error":"agent_revoked"}"""));
+        await UntilAsync(f, () => engine.State.IdentityState == IdentityStates.Revoked, "revoked", TimeSpan.FromSeconds(10));
+        f.Handler.HeartbeatAnswer = null;
+        f.Handler.EventsAnswer = null;
+        Assert.True(engine.Rejoin().Ok);
+        await UntilAsync(f, () => engine.State.LastSync is not null && engine.State.IdentityState == IdentityStates.Active, "the new identity reports", TimeSpan.FromMilliseconds(500));
+        var newToken = engine.State.Identity!.Token;
+        f.Time.Advance(TimeSpan.FromMinutes(1)); // the sender is signalled while the writer is still held
+
+        f.Queue.BeforeFlush = null;
+        held.Set();
+        f.Time.Advance(TimeSpan.FromSeconds(1));
+        engine.Resume();
+        await UntilAsync(f, () => f.Handler.Events.Any(r => r.Authorization == $"Bearer {newToken}") && f.Queue.Pending.Count == 0, "the new event sent");
+
+        var underNewToken = f.Handler.Events.Where(r => r.Authorization == $"Bearer {newToken}").Select(r => JsonNode.Parse(r.Body)!).ToList();
+        Assert.All(underNewToken, b => Assert.Null(b["droppedEvents"]));
+        var newIds = underNewToken.SelectMany(b => b["events"]!.AsArray()).Select(e => e!["id"]!.GetValue<string>()).ToList();
+        Assert.NotEmpty(newIds);
+        Assert.DoesNotContain(newIds, oldIds.Contains);
+        Assert.All(underNewToken.SelectMany(b => b["events"]!.AsArray()), e => Assert.Equal(EventKinds.Resume, e!["kind"]!.GetValue<string>()));
+        Assert.Single(newIds.Distinct());
+    }
+
+    // Review R2: expiry while the service keeps running.
+
+    [Fact]
+    public async Task An_event_that_ages_past_seven_days_while_running_is_dropped_and_counted_not_sent()
+    {
+        using var f = new EventsFixture();
+        f.Seed(EngineFixture.Registered());
+        f.Handler.EventsAnswer = static (_, _) => Task.FromResult(RoutedHandler.Json(HttpStatusCode.ServiceUnavailable, "{}"));
+        var engine = f.Start();
+        await UntilAsync(f, () => engine.State.LastSync is not null, "first answer", TimeSpan.FromMilliseconds(1));
+        f.Time.Advance(TimeSpan.FromSeconds(1));
+        engine.Resume();
+        await UntilAsync(f, () => f.Queue.Pending.Count == 1, "queued", TimeSpan.FromMilliseconds(1));
+        var aged = f.Queue.Pending.Single().Event.Id.ToString();
+        var start = f.Time.GetUtcNow();
+
+        // /events fails for more than 7 days while heartbeats keep succeeding.
+        await UntilAsync(f, () => f.Time.GetUtcNow() - start > TimeSpan.FromDays(7) + TimeSpan.FromHours(2), "8 days", TimeSpan.FromHours(2));
+        await UntilAsync(f, () => f.Queue.Pending.Count == 0, "dropped while running", TimeSpan.FromMinutes(15));
+
+        var before = f.Handler.Events.Count;
+        f.Handler.EventsAnswer = null;
+        await UntilAsync(f, () => f.Queue.NextDroppedCount() is null, "the count confirmed");
+        var later = f.Handler.Events.Skip(before).Select(r => JsonNode.Parse(r.Body)!).ToList();
+        Assert.DoesNotContain(later.SelectMany(b => b["events"]!.AsArray()), e => e!["id"]!.GetValue<string>() == aged);
+        Assert.Contains(later, b => b["droppedEvents"]?["count"]?.GetValue<long>() == 1);
+        Assert.Equal(1, f.Queue.DroppedCount(f.BootId));
+    }
+
+    // Deviation 4: a deferred answer without retryAfterSeconds.
+
+    [Fact]
+    public async Task A_deferred_answer_without_a_retry_time_waits_60_seconds()
+    {
+        using var f = new EventsFixture();
+        f.Seed(EngineFixture.Registered());
+        ConcurrentQueue<DateTimeOffset> times = new();
+        f.Handler.EventsAnswer = (body, _) =>
+        {
+            times.Enqueue(f.Time.GetUtcNow());
+            return Task.FromResult(times.Count == 1 ? RoutedHandler.Results(body, "deferred") : RoutedHandler.Results(body));
+        };
+        var engine = f.Start();
+        await UntilAsync(f, () => engine.State.LastSync is not null, "first answer", TimeSpan.FromMilliseconds(1));
+        f.Time.Advance(TimeSpan.FromSeconds(1));
+        engine.Resume();
+        await UntilAsync(f, () => times.Count >= 2, "sent again", TimeSpan.FromSeconds(1));
+        var sent = times.ToArray();
+        Assert.Equal(60, engine.State.DeferredSeconds);
+        Assert.True(sent[1] - sent[0] >= TimeSpan.FromSeconds(60), $"waited {sent[1] - sent[0]}");
+        Assert.True(sent[1] - sent[0] < TimeSpan.FromSeconds(90), $"waited {sent[1] - sent[0]}");
+        Assert.Empty(f.Queue.Pending);
     }
 
     // 4. 429 and the spacing between requests.

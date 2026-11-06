@@ -177,12 +177,6 @@ internal static class ProtocolConstants
 
     public const string InfrastructureUnknown = "unknown";
 
-    /// <summary>Most events in one request.</summary>
-    public const int MaxEventsPerRequest = 500;
-
-    /// <summary>Largest request body.</summary>
-    public const int MaxBodyBytes = 64 * 1024;
-
     /// <summary>Longest elapsed time an event may report: 400 days.</summary>
     public const long MaxElapsedMs = 400L * 24 * 60 * 60 * 1000;
 }
