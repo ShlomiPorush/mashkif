@@ -53,6 +53,22 @@ services:
     # directory to this UID:GID before the first start.
     user: "999:999"
     env_file: .env
+    # The same password guard as in docker-compose.yml.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -z "$${POSTGRES_PASSWORD_FILE:-}" ]; then
+          case "$${POSTGRES_PASSWORD:-}" in
+            "" | change-me)
+              echo "db: POSTGRES_PASSWORD is empty or the .env.example placeholder; set a random one in .env (openssl rand -hex 32)" >&2
+              exit 1
+              ;;
+          esac
+        fi
+        exec docker-entrypoint.sh "$$@"
+      - db-password-guard
+    command: ["postgres"]
     volumes:
       # PostgreSQL 18 keeps PGDATA at /var/lib/postgresql/18/docker.
       - type: bind

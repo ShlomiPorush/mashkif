@@ -85,8 +85,14 @@ describe("DATABASE_URL password", () => {
       `postgres://mashkif:${ENV_EXAMPLE_PLACEHOLDER}@db:5432/mashkif`,
     ],
     ["the encoded placeholder", "postgres://mashkif:change%2Dme@db:5432/mashkif"],
+    [
+      "the placeholder with several hosts",
+      "postgres://mashkif:change-me@db1:5432,db2:5432/mashkif",
+    ],
+    ["the placeholder with a Unix socket", "postgres://mashkif:change-me@/mashkif?host=/run/pg"],
     ["an empty password", "postgres://mashkif:@db:5432/mashkif"],
     ["no password", "postgres://mashkif@db:5432/mashkif"],
+    ["no userinfo", "postgres://db:5432/mashkif?application_name=a:b@c"],
   ])("refuses %s without quoting the URL", (_name, url) => {
     try {
       loadConfig({ ...valid, DATABASE_URL: url });
@@ -98,18 +104,28 @@ describe("DATABASE_URL password", () => {
     }
   });
 
-  it("accepts a random password", () => {
-    const url = `postgres://mashkif:${randomBytes(32).toString("hex")}@db:5432/mashkif`;
+  // Forms that postgres.js accepts; none of them may stop working.
+  it.each([
+    ["one host", (p: string) => `postgres://mashkif:${p}@db:5432/mashkif`],
+    ["several hosts", (p: string) => `postgres://mashkif:${p}@db1:5432,db2:5432/mashkif`],
+    ["a Unix socket", (p: string) => `postgres://mashkif:${p}@/mashkif?host=/var/run/postgresql`],
+    ["IPv6", (p: string) => `postgresql://mashkif:${p}@[::1]:5432/mashkif`],
+    ["sslmode", (p: string) => `postgres://mashkif:${p}@db:5432/mashkif?sslmode=require`],
+    ["percent-encoded / @ :", (p: string) => `postgres://mashkif:${p}%2F%40%3A@db:5432/mashkif`],
+  ])("accepts a random password with %s", (_name, urlWith) => {
+    const url = urlWith(randomBytes(32).toString("hex"));
     expect(loadConfig({ ...valid, DATABASE_URL: url }).databaseUrl).toBe(url);
   });
 
-  it("never puts an unparsable URL or its password in the message", () => {
+  it("refuses broken percent-encoding without quoting the password", () => {
     const password = randomBytes(16).toString("hex");
     try {
-      loadConfig({ ...valid, DATABASE_URL: `postgres://mashkif:${password}@db:port/mashkif` });
+      loadConfig({ ...valid, DATABASE_URL: `postgres://mashkif:${password}%zz@db:5432/mashkif` });
       expect.unreachable();
     } catch (error) {
-      expect(String(error)).toMatch(/DATABASE_URL is not a valid URL/);
+      expect(String(error)).toMatch(
+        /DATABASE_URL has a password that is not valid percent-encoding/,
+      );
       expect(String(error)).not.toContain(password);
     }
   });

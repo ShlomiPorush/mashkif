@@ -68,6 +68,9 @@ data = db.get("volumes", [])
 need(len(data) == 1 and data[0].get("source") == "/absolute/path/to/mashkif-data/postgres"
      and data[0].get("target") == "/var/lib/postgresql",
      "db: data must be a bind of ${MASHKIF_DATA_DIR}/postgres at /var/lib/postgresql")
+need(db.get("command") == ["postgres"], "db command must repeat the image CMD [postgres]")
+need("exec docker-entrypoint.sh" in " ".join(db.get("entrypoint") or []),
+     "db entrypoint must end by running the image ENTRYPOINT docker-entrypoint.sh")
 test = " ".join(db.get("healthcheck", {}).get("test", []))
 need("pg_isready" in test and "POSTGRES_DB" in test, "db health check must run pg_isready against the application database")
 
@@ -282,6 +285,81 @@ _docker_expect() {
 
 # _docker_runtime <scratch> <image> <id>: runs the image the way Compose does,
 # without Compose, against PostgreSQL on tmpfs.
+# _docker_db_entrypoint <compose-json>: sets _DOCKER_DB_ENTRYPOINT to the db
+# service's entrypoint from the effective Compose configuration. compose config
+# keeps $$ escaped so that its output stays valid Compose; docker compose up
+# and run pass $$ on as $, and so does this.
+_docker_db_entrypoint() {
+  _DOCKER_DB_ENTRYPOINT=()
+  [[ -s "$1" ]] || return 1
+  mapfile -d '' -t _DOCKER_DB_ENTRYPOINT < <(python3 -I -c '
+import json, sys
+db = json.load(open(sys.argv[1], encoding="utf-8"))["services"]["db"]
+for word in db.get("entrypoint") or []:
+    sys.stdout.write(word.replace("$$", "$") + "\0")
+' "$1")
+  ((${#_DOCKER_DB_ENTRYPOINT[@]} > 0))
+}
+
+# _docker_db_guard [docker run options...]: runs the db image with
+# _DOCKER_DB_ENTRYPOINT and the command true instead of postgres, so only the
+# password guard and the image entrypoint run. Sets _DOCKER_DB_OUT.
+_docker_db_guard() {
+  _DOCKER_DB_OUT="$(docker run --rm --network none --user 999:999 --cap-drop ALL \
+    --security-opt no-new-privileges:true "$@" --entrypoint "${_DOCKER_DB_ENTRYPOINT[0]}" \
+    "$MASHKIF_DB_IMAGE" "${_DOCKER_DB_ENTRYPOINT[@]:1}" true 2>&1)"
+}
+
+# _docker_db_refused <name> <rc> <placeholder>: the guard exited non-zero with
+# its message and without printing the placeholder.
+_docker_db_refused() {
+  if (($2 != 0)) && [[ "$_DOCKER_DB_OUT" == *"POSTGRES_PASSWORD is empty or the .env.example placeholder"* &&
+    "$_DOCKER_DB_OUT" != *"$3"* ]]; then
+    _docker_pass "$1"
+  else
+    _docker_failed "$1" "exit $2: $_DOCKER_DB_OUT"
+  fi
+}
+
+# _docker_db_guard_checks <scratch>: the db password guard of both Compose
+# files refuses the .env.example placeholder and an empty password without
+# printing them, and lets a random password and POSTGRES_PASSWORD_FILE through.
+_docker_db_guard_checks() {
+  local scratch="$1" kind placeholder random rc
+  placeholder="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$MASHKIF_ROOT/.env.example")"
+  if [[ -z "$placeholder" ]]; then
+    _docker_failed ".env.example has a POSTGRES_PASSWORD placeholder"
+    return 0
+  fi
+  random="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  for kind in production development; do
+    if ! _docker_db_entrypoint "$scratch/compose/$kind.json"; then
+      _docker_failed "$kind db has a password guard entrypoint"
+      continue
+    fi
+    rc=0
+    _docker_db_guard -e POSTGRES_PASSWORD="$placeholder" || rc=$?
+    _docker_db_refused "$kind db refuses the .env.example placeholder password" "$rc" "$placeholder"
+    rc=0
+    _docker_db_guard || rc=$?
+    _docker_db_refused "$kind db refuses an empty password" "$rc" "$placeholder"
+    rc=0
+    _docker_db_guard -e POSTGRES_PASSWORD="$random" || rc=$?
+    if ((rc == 0)); then
+      _docker_pass "$kind db accepts a random password"
+    else
+      _docker_failed "$kind db accepts a random password" "exit $rc"
+    fi
+    rc=0
+    _docker_db_guard -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password || rc=$?
+    if ((rc == 0)); then
+      _docker_pass "$kind db accepts POSTGRES_PASSWORD_FILE"
+    else
+      _docker_failed "$kind db accepts POSTGRES_PASSWORD_FILE" "exit $rc: $_DOCKER_DB_OUT"
+    fi
+  done
+}
+
 _docker_runtime() {
   local scratch="$1" image="$2" id="$3" net db app password url app_key
   app_key="$(head -c 32 /dev/urandom | base64)"
@@ -294,19 +372,24 @@ _docker_runtime() {
   _DOCKER_NETWORK="$net"
 
   docker network create "$net" >/dev/null || return "$MASHKIF_EXIT_ENV"
-  # The db service settings from the Compose files.
+  if ! _docker_db_entrypoint "$scratch/compose/production.json"; then
+    _docker_failed "PostgreSQL starts through the db entrypoint of docker-compose.yml" "no entrypoint"
+    return 0
+  fi
+  # The db service settings from the Compose files, with its entrypoint and
+  # command.
   # shellcheck disable=SC2016 # Expanded inside the container.
   docker run -d --name "$db" --network "$net" --user 999:999 --tmpfs /var/lib/postgresql \
     --shm-size 128m --cap-drop ALL --security-opt no-new-privileges:true \
     -e POSTGRES_USER=mashkif -e POSTGRES_PASSWORD="$password" -e POSTGRES_DB=mashkif \
     --health-cmd 'pg_isready -q -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
-    --health-interval 2s --health-retries 30 \
-    "$MASHKIF_DB_IMAGE" >/dev/null || return "$MASHKIF_EXIT_ENV"
+    --health-interval 2s --health-retries 30 --entrypoint "${_DOCKER_DB_ENTRYPOINT[0]}" \
+    "$MASHKIF_DB_IMAGE" "${_DOCKER_DB_ENTRYPOINT[@]:1}" postgres >/dev/null || return "$MASHKIF_EXIT_ENV"
   if ! _docker_wait_health "$db" healthy 90; then
     docker logs "$db" >&2 || true
     return "$MASHKIF_EXIT_ENV"
   fi
-  _docker_pass "PostgreSQL runs as 999:999 with the pg_isready health check"
+  _docker_pass "PostgreSQL runs as 999:999 through the db entrypoint, with the pg_isready health check"
 
   mkdir -p "$scratch/geoip"
   chmod 755 "$scratch/geoip"
@@ -422,6 +505,7 @@ verify_docker() (
   marker="MASHKIF-CONTEXT-LEAK-$id"
 
   _docker_compose_checks "$_DOCKER_SCRATCH"
+  _docker_db_guard_checks "$_DOCKER_SCRATCH"
 
   _docker_context "$_DOCKER_SCRATCH" "$marker" || {
     fail "could not prepare the build context copy"

@@ -59,6 +59,26 @@ services:
     # The official image's postgres user. The data directory must be owned by it.
     user: "999:999"
     env_file: .env
+    # Refuses an empty or placeholder password before PostgreSQL initializes
+    # with it, then runs the image's own ENTRYPOINT ["docker-entrypoint.sh"]
+    # and CMD ["postgres"]. Setting entrypoint clears the image's CMD, so
+    # command repeats it. change-me is the .env.example placeholder; the docker
+    # area checks that this guard refuses it.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -z "$${POSTGRES_PASSWORD_FILE:-}" ]; then
+          case "$${POSTGRES_PASSWORD:-}" in
+            "" | change-me)
+              echo "db: POSTGRES_PASSWORD is empty or the .env.example placeholder; set a random one in .env (openssl rand -hex 32)" >&2
+              exit 1
+              ;;
+          esac
+        fi
+        exec docker-entrypoint.sh "$$@"
+      - db-password-guard
+    command: ["postgres"]
     volumes:
       # PostgreSQL 18 keeps PGDATA at /var/lib/postgresql/18/docker.
       - type: bind

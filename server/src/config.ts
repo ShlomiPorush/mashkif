@@ -48,7 +48,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     // Neither the URL nor the password is ever part of the message.
     const password = databasePassword(databaseUrl);
     if (password === undefined) {
-      problems.push("DATABASE_URL is not a valid URL");
+      problems.push("DATABASE_URL has a password that is not valid percent-encoding");
     } else if (password === "" || password === ENV_EXAMPLE_PLACEHOLDER) {
       problems.push(
         "DATABASE_URL needs a database password other than the .env.example placeholder (generate one with: openssl rand -hex 32)",
@@ -85,17 +85,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   return { databaseUrl, geoipAsnPath, port, authSecret };
 }
 
-/** The decoded password of a connection URL, or undefined when it does not parse. */
+/**
+ * The decoded password of a connection URL: "" when the URL has none, and
+ * undefined when its percent-encoding is broken. Reads only the userinfo, so
+ * every URL that postgres.js accepts keeps working, also several hosts and a
+ * Unix socket: like postgres.js, it takes the authority up to the first / or ?
+ * and the userinfo up to the first @, which an unencoded userinfo cannot
+ * contain.
+ */
 function databasePassword(databaseUrl: string): string | undefined {
-  let password: string;
-  try {
-    password = new URL(databaseUrl).password;
-  } catch {
-    return undefined;
+  const authority = databaseUrl.slice(databaseUrl.indexOf("://") + 3).split(/[/?#]/)[0] ?? "";
+  const at = authority.indexOf("@");
+  const userinfo = at < 0 ? "" : authority.slice(0, at);
+  const colon = userinfo.indexOf(":");
+  if (colon < 0) {
+    return "";
   }
   try {
-    return decodeURIComponent(password);
+    return decodeURIComponent(userinfo.slice(colon + 1));
   } catch {
-    return password;
+    return undefined;
   }
 }
