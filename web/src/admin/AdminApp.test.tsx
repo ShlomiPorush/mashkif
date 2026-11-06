@@ -338,6 +338,24 @@ describe("sign-in", () => {
     expect(await screen.findByRole("heading", { level: 1, name: en.forgot.heading })).toBeTruthy();
     expect(window.location.pathname).toBe("/admin/forgot-password");
   });
+
+  it("keeps a click on the forgot link that lands before the redirect to /admin/sign-in", async () => {
+    serve(boot(false, null));
+    // Click the link as soon as React puts it in the page: the mutation
+    // callback runs before React's pending effects, like a very fast user.
+    const observer = new MutationObserver(() => {
+      const link = screen.queryByRole("link", { name: en.signIn.forgotLink });
+      if (link !== null) {
+        observer.disconnect();
+        link.click();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    renderAdmin(createI18n("en"));
+    expect(await screen.findByRole("heading", { level: 1, name: en.forgot.heading })).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/forgot-password");
+    observer.disconnect();
+  });
 });
 
 describe("setup", () => {
