@@ -101,6 +101,13 @@ internal sealed partial record AgentState
 
     public int? DeferredSeconds { get; init; }
 
+    /// <summary>
+    /// Events dropped because the queue file was at its size bound, as a
+    /// cumulative count per boot (at most 10 boots). They live here, a separate
+    /// file, because the queue file could not take them; cleared by Join again.
+    /// </summary>
+    public IReadOnlyList<DroppedEvents>? QueueRejected { get; init; }
+
     /// <summary>A state with nothing in it, for a PC that never registered.</summary>
     public static AgentState Empty { get; } = new();
 
@@ -121,6 +128,12 @@ internal sealed partial record AgentState
         }
 
         if ((DeferredUntilUtc is null) != (DeferredSeconds is null) || DeferredSeconds is < 1)
+        {
+            return false;
+        }
+
+        if (QueueRejected is { } rejected
+            && (rejected.Count > 10 || rejected.Any(r => r is null || r.BootId == Guid.Empty || r.Count < 1) || rejected.Select(r => r.BootId).Distinct().Count() != rejected.Count))
         {
             return false;
         }

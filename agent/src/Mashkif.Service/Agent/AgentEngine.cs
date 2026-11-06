@@ -199,6 +199,7 @@ internal sealed partial class AgentEngine : IDisposable
                 LastSync = null,
                 DeferredUntilUtc = null,
                 DeferredSeconds = null,
+                QueueRejected = null,
             };
             if (!TrySave(rejoined))
             {

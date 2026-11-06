@@ -39,9 +39,9 @@ internal sealed class EventsFixture : IDisposable
     public EventQueue Queue { get; private set; } = null!;
 
     /// <summary>Starts an engine; <paramref name="configure"/> sets test hooks before the state and the queue are loaded.</summary>
-    public AgentEngine Start(int capacity = EventQueue.MaxEvents, Action<StateStore, EventQueue>? configure = null)
+    public AgentEngine Start(int capacity = EventQueue.MaxEvents, Action<StateStore, EventQueue>? configure = null, long maxFileBytes = 16L * 1024 * 1024)
     {
-        Queue = new EventQueue(State.StateDirectory, State.Policy) { Capacity = capacity };
+        Queue = new EventQueue(State.StateDirectory, State.Policy) { Capacity = capacity, MaxFileBytes = maxFileBytes };
         Store = State.CreateStore();
         configure?.Invoke(Store, Queue);
         var loggerFactory = LoggerFactory.Create(builder => builder.AddProvider(Logs).SetMinimumLevel(LogLevel.Trace));

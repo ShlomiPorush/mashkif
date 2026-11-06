@@ -106,6 +106,9 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     private long _deadBytes;
     private long _bootOrder;
     private bool _needsRepair;
+    private bool _full;
+    private bool _compactionFailing;
+    private int _compactionBackoff;
     private Guid _currentBoot;
 
     public string FilePath => Path.Combine(stateDirectory, FileName);
@@ -114,6 +117,14 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
 
     /// <summary>Most live events (<see cref="MaxEvents"/>; smaller in tests).</summary>
     public int Capacity { get; init; } = MaxEvents;
+
+    /// <summary>
+    /// Hard bound of the queue file (about four times the size at the cap of
+    /// 10,000 events). Above it, while compaction keeps failing, nothing more is
+    /// written: a new event is not appended (the caller counts it elsewhere), and
+    /// removals and confirmations apply in memory only.
+    /// </summary>
+    public long MaxFileBytes { get; init; } = 16L * 1024 * 1024;
 
     /// <summary>Test hook: runs after the bytes are written and before the flush to disk.</summary>
     internal Action? BeforeFlush { get; set; }
@@ -139,8 +150,31 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
                 return ([], null);
             }
 
-            var boot = _boots.Where(b => b.Total > b.Confirmed).OrderBy(b => b.Order).FirstOrDefault();
-            return ([.. _events.Take(limit).Select(e => e.Item.Event)], boot is null ? null : new DroppedEvents { BootId = boot.BootId, Count = boot.Total });
+            var boot = _boots.Where(b => b.Reported > b.Confirmed).OrderBy(b => b.Order).FirstOrDefault();
+            return ([.. _events.Take(limit).Select(e => e.Item.Event)], boot is null ? null : new DroppedEvents { BootId = boot.BootId, Count = boot.Reported });
+        }
+    }
+
+    /// <summary>Whether the queue belongs to <paramref name="binding"/> now, under the queue lock (like <see cref="Batch"/>).</summary>
+    public bool Holds(QueueBinding binding)
+    {
+        lock (_gate)
+        {
+            return _binding == binding;
+        }
+    }
+
+    /// <summary>
+    /// The count of events of a boot that were dropped at the file bound, kept
+    /// in state.json: reported with the queue's own count of that boot, never
+    /// written to the queue, so nothing is counted twice.
+    /// </summary>
+    public void SetExternalDropped(Guid bootId, long count)
+    {
+        lock (_gate)
+        {
+            var boot = BootLocked(bootId);
+            boot.External = Math.Max(boot.External, count);
         }
     }
 
@@ -193,8 +227,8 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     {
         lock (_gate)
         {
-            var boot = _boots.Where(b => b.Total > b.Confirmed).OrderBy(b => b.Order).FirstOrDefault();
-            return boot is null ? null : new DroppedEvents { BootId = boot.BootId, Count = boot.Total };
+            var boot = _boots.Where(b => b.Reported > b.Confirmed).OrderBy(b => b.Order).FirstOrDefault();
+            return boot is null ? null : new DroppedEvents { BootId = boot.BootId, Count = boot.Reported };
         }
     }
 
@@ -203,7 +237,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     {
         lock (_gate)
         {
-            return _boots.FirstOrDefault(b => b.BootId == bootId)?.Total ?? 0;
+            return _boots.FirstOrDefault(b => b.BootId == bootId)?.Reported ?? 0;
         }
     }
 
@@ -291,12 +325,16 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         CompactCore();
     }
 
-    /// <summary>Appends an event, after dropping expired events and making room under the cap.</summary>
-    public void Append(QueuedEvent queued, Guid currentBoot, DateTimeOffset nowUtc, long nowTimestamp, long frequency, QueueBinding? expected = null)
+    /// <summary>
+    /// Appends an event, after dropping expired events and making room under
+    /// the cap. <see cref="AppendResult.Full"/>: the file is at its bound, the
+    /// event was not written, and the caller counts it as dropped.
+    /// </summary>
+    public AppendResult Append(QueuedEvent queued, Guid currentBoot, DateTimeOffset nowUtc, long nowTimestamp, long frequency, QueueBinding? expected = null)
     {
         if (!Matches(expected))
         {
-            return;
+            return AppendResult.OtherIdentity;
         }
 
         var binding = RequireBinding();
@@ -332,6 +370,10 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         };
         records.Add(eventRecord);
         var sizes = Write(records);
+        if (sizes is null)
+        {
+            return AppendResult.Full;
+        }
 
         lock (_gate)
         {
@@ -350,6 +392,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         }
 
         CompactIfNeeded();
+        return AppendResult.Appended;
     }
 
     /// <summary>Removes events after a final server outcome (accepted, duplicate, rejected).</summary>
@@ -380,7 +423,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         var sizes = Write([new QueueRecord { Type = RecordTypes.Done, InstallId = binding.InstallId, ServerOrigin = binding.ServerOrigin, Ids = present }]);
         lock (_gate)
         {
-            _deadBytes += sizes[0] + RemoveLocked(present);
+            _deadBytes += (sizes?[0] ?? 0) + RemoveLocked(present);
         }
 
         CompactIfNeeded();
@@ -405,7 +448,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
                 boot.Confirmed = Math.Max(boot.Confirmed, confirmed.Count);
             }
 
-            _deadBytes += sizes[0];
+            _deadBytes += sizes?[0] ?? 0;
         }
 
         CompactIfNeeded();
@@ -439,7 +482,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         var sizes = Write([DropRecord(binding, expired, currentBoot, newCount)]);
         lock (_gate)
         {
-            _deadBytes += sizes[0] + RemoveLocked(expired);
+            _deadBytes += (sizes?[0] ?? 0) + RemoveLocked(expired);
             SetTotalLocked(currentBoot, newCount);
         }
 
@@ -576,7 +619,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     /// <summary>Keeps at most <see cref="MaxUnconfirmedBoots"/> boots with unconfirmed counts; the oldest goes.</summary>
     private void TrimUnconfirmedLocked()
     {
-        var unconfirmed = _boots.Where(b => b.Total > b.Confirmed).OrderBy(b => b.Order).ToList();
+        var unconfirmed = _boots.Where(b => b.Reported > b.Confirmed).OrderBy(b => b.Order).ToList();
         foreach (var boot in unconfirmed.Take(Math.Max(0, unconfirmed.Count - MaxUnconfirmedBoots)))
         {
             _boots.Remove(boot);
@@ -592,21 +635,93 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
             compact = _deadBytes > CompactionDeadBytes || (_validLength > 0 && _deadBytes * 2 > _validLength);
         }
 
-        if (!compact)
+        if (!compact || !CompactionAllowed())
         {
             return;
         }
 
+        TryCompact();
+    }
+
+    /// <summary>After a failed compaction the next 100 attempts are skipped, so a lasting failure is not retried on every write.</summary>
+    private bool CompactionAllowed()
+    {
+        if (_compactionBackoff > 0)
+        {
+            _compactionBackoff--;
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryCompact()
+    {
         try
         {
             CompactCore();
+            if (_compactionFailing)
+            {
+                _compactionFailing = false;
+                Log?.Invoke("compaction works again");
+            }
+
+            return true;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             // The record before it is already on disk: a failed compaction is not a failed
             // write, and the queue stays valid (a leftover temporary file is deleted later).
-            Log?.Invoke($"compaction failed ({exception.GetType().Name}); tried again later");
+            // Logged once when it starts failing, not on every attempt.
+            if (!_compactionFailing)
+            {
+                _compactionFailing = true;
+                Log?.Invoke($"compaction failed ({exception.GetType().Name}); tried again every 100 writes");
+            }
+
+            _compactionBackoff = 100;
+            return false;
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="bytes"/> more fit under <see cref="MaxFileBytes"/>,
+    /// after a compaction to make room when one is allowed. Logged once when the
+    /// bound is reached and once when it is left.
+    /// </summary>
+    private bool FitsUnderBound(int bytes)
+    {
+        long length;
+        lock (_gate)
+        {
+            length = _validLength;
+        }
+
+        if (length + bytes <= MaxFileBytes)
+        {
+            return true;
+        }
+
+        if (CompactionAllowed() && TryCompact())
+        {
+            lock (_gate)
+            {
+                length = _validLength;
+            }
+
+            if (length + bytes <= MaxFileBytes)
+            {
+                return true;
+            }
+        }
+
+        if (!_full)
+        {
+            _full = true;
+            Log?.Invoke("the queue file reached its size bound; new events are dropped and counted in the state file");
+        }
+
+        return false;
     }
 
     /// <summary>Writes the live records and the summaries to the temporary file, then moves it over the queue.</summary>
@@ -686,7 +801,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
             }
 
             // A past boot whose count the server confirmed in full cannot grow any more; the current boot can.
-            _boots.RemoveAll(b => b.Confirmed >= b.Total && b.BootId != _currentBoot);
+            _boots.RemoveAll(b => b.Confirmed >= b.Reported && b.BootId != _currentBoot);
         }
     }
 
@@ -694,10 +809,15 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     /// Appends the records and flushes them to disk. After a failure the
     /// file is cut back to the last valid record before the next write.
     /// </summary>
-    private int[] Write(IReadOnlyList<QueueRecord> records)
+    private int[]? Write(IReadOnlyList<QueueRecord> records)
     {
         var lines = records.Select(Encode).ToList();
         var bytes = lines.SelectMany(l => l).ToArray();
+        if (!FitsUnderBound(bytes.Length))
+        {
+            return null;
+        }
+
         long offset;
         bool repair;
         lock (_gate)
@@ -733,6 +853,12 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         {
             _validLength = offset + bytes.Length;
             _needsRepair = false;
+        }
+
+        if (_full)
+        {
+            _full = false;
+            Log?.Invoke("the queue file is below its size bound again; events are written again");
         }
 
         return [.. lines.Select(l => l.Length)];
@@ -798,6 +924,11 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
 
         public long Confirmed { get; set; }
 
+        /// <summary>Events of this boot dropped at the file bound; the count lives in state.json, not here.</summary>
+        public long External { get; set; }
+
+        public long Reported => Total + External;
+
         public required long Order { get; init; }
     }
 
@@ -809,4 +940,17 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         public const string DropConfirmed = "dropConfirmed";
         public const string Connectivity = "connectivity";
     }
+}
+
+/// <summary>The outcome of <see cref="EventQueue.Append"/>.</summary>
+internal enum AppendResult
+{
+    /// <summary>Written and flushed.</summary>
+    Appended,
+
+    /// <summary>Meant for another identity than the queue's: nothing written.</summary>
+    OtherIdentity,
+
+    /// <summary>The file is at its bound while compaction fails: not written; the caller counts it as dropped.</summary>
+    Full,
 }

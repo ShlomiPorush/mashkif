@@ -90,7 +90,7 @@ internal sealed class StateStore(string productDirectory, string stateDirectory,
         {
             // Version 1 (0.1.0 before step 2c) has none of the version 2 fields;
             // the migration only raises the version, and the next save writes it.
-            if (state.LastSync is not null || state.DeferredUntilUtc is not null || state.DeferredSeconds is not null)
+            if (state.LastSync is not null || state.DeferredUntilUtc is not null || state.DeferredSeconds is not null || state.QueueRejected is not null)
             {
                 return new StateLoad(null, $"{FilePath} is not consistent");
             }

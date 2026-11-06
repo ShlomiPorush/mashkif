@@ -328,6 +328,93 @@ public sealed class ResilienceTests
         Assert.Single(newIds.Distinct());
     }
 
+    [Fact]
+    public async Task A_sleep_written_late_after_a_revoke_and_Join_again_is_never_sent_with_the_new_token()
+    {
+        using var f = new EventsFixture();
+        f.Seed(EngineFixture.Registered());
+        var engine = f.Start();
+        await UntilAsync(f, () => engine.State.LastSync is not null, "first answer", TimeSpan.FromMilliseconds(1));
+
+        // A heartbeat in flight that will answer "revoked".
+        var heartbeatHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Handler.HeartbeatAnswer = async (_, _) =>
+        {
+            await heartbeatHeld.Task;
+            return RoutedHandler.Json(HttpStatusCode.Forbidden, """{"error":"agent_revoked"}""");
+        };
+        var beats = f.Handler.Heartbeats.Count;
+        await UntilAsync(f, () => f.Handler.Heartbeats.Count > beats, "a heartbeat in flight", TimeSpan.FromSeconds(10));
+
+        // The sleep event of the old identity, whose write is held.
+        using var writeHeld = new ManualResetEventSlim();
+        using var inWrite = new ManualResetEventSlim();
+        f.Queue.BeforeFlush = () =>
+        {
+            inWrite.Set();
+            writeHeld.Wait(TimeSpan.FromSeconds(30));
+        };
+        var sleep = Task.Run(engine.SuspendAsync, TestContext.Current.CancellationToken);
+        await Eventually.TrueAsync(() => inWrite.IsSet, "the sleep write is held");
+
+        // The heartbeat returns revoked; Join again and the registration run while the write waits.
+        heartbeatHeld.SetResult();
+        await Eventually.TrueAsync(() => engine.State.IdentityState == IdentityStates.Revoked, "revoked");
+        f.Handler.HeartbeatAnswer = null;
+        Assert.True(engine.Rejoin().Ok);
+        await Eventually.TrueAsync(() => engine.State.IdentityState == IdentityStates.Active, "registered again");
+        var newToken = engine.State.Identity!.Token;
+
+        f.Queue.BeforeFlush = null;
+        writeHeld.Set();
+        await sleep.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(f.Handler.Events, r => r.Authorization == $"Bearer {newToken}");
+        Assert.DoesNotContain(SentKinds(f), k => k == EventKinds.Sleep);
+    }
+
+    // Review R6: a lasting compaction failure.
+
+    [Fact]
+    public async Task At_the_file_bound_new_events_are_counted_in_the_state_file_exactly_also_after_a_reload()
+    {
+        using var f = new EventsFixture();
+        f.Seed(EngineFixture.Registered());
+        f.Handler.EventsAnswer = static (_, _) => Task.FromResult(RoutedHandler.Json(HttpStatusCode.ServiceUnavailable, "{}"));
+        var engine = f.Start(maxFileBytes: 4 * 1024, configure: (_, queue) => queue.BeforeReplace = () =>
+        {
+            // The first compaction, at load, works; later ones fail, as when another process holds the file.
+            if (queue.Pending.Count > 0)
+            {
+                throw new IOException("the replacement fails");
+            }
+        });
+        await UntilAsync(f, () => engine.State.LastSync is not null, "first answer", TimeSpan.FromMilliseconds(1));
+        f.Time.Advance(TimeSpan.FromSeconds(1));
+        const int Recorded = 30;
+        for (var i = 0; i < Recorded; i++)
+        {
+            engine.Resume();
+        }
+
+        await Eventually.TrueAsync(() => f.Queue.Pending.Count + f.Queue.DroppedCount(f.BootId) == Recorded, "every event queued or counted");
+        Assert.InRange(new FileInfo(f.Queue.FilePath).Length, 1, 4 * 1024);
+        var rejected = engine.State.QueueRejected!.Single();
+        Assert.Equal(f.BootId, rejected.BootId);
+        Assert.Equal(Recorded - f.Queue.Pending.Count, rejected.Count);
+        Assert.Single(f.Logs.Lines, line => line.Contains("size bound", StringComparison.Ordinal));
+
+        // A reload: the counts come back exactly, from the queue and from the state file.
+        var pending = f.Queue.Pending.Count;
+        await f.StopAllAsync();
+        f.Handler.EventsAnswer = null;
+        f.Start(maxFileBytes: 4 * 1024);
+        Assert.Equal(pending, f.Queue.Pending.Count);
+        Assert.Equal(Recorded - pending, f.Queue.DroppedCount(f.BootId));
+        await UntilAsync(f, () => f.Queue.Pending.Count == 0 && f.Queue.NextDroppedCount() is null, "sent and confirmed");
+        var last = Bodies(f).Select(b => b["droppedEvents"]).Last(d => d is not null)!;
+        Assert.Equal(Recorded - pending, last["count"]!.GetValue<long>());
+    }
+
     // Review R2: expiry while the service keeps running.
 
     [Fact]

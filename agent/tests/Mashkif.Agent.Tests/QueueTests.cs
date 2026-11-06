@@ -290,6 +290,24 @@ public sealed class QueueTests : IDisposable
     }
 
     [Fact]
+    public void While_compaction_keeps_failing_the_file_stays_under_its_bound_and_new_events_are_refused()
+    {
+        var queue = new EventQueue(_f.StateDirectory, _f.Policy) { Capacity = 3, MaxFileBytes = 8 * 1024 };
+        Assert.Null(queue.Load(Binding, Boot, Now, 1_000, Frequency));
+        List<string> log = [];
+        queue.Log = log.Add;
+        queue.BeforeReplace = () => throw new IOException("another process holds the file without FileShare.Delete");
+
+        var results = Enumerable.Range(0, 200).Select(_ => queue.Append(Event(), Boot, Now, 1_000, Frequency)).ToList();
+
+        Assert.InRange(new FileInfo(queue.FilePath).Length, 1, 8 * 1024);
+        Assert.Contains(AppendResult.Full, results);
+        Assert.Equal(AppendResult.Full, results[^1]);
+        Assert.Single(log, line => line.Contains("size bound", StringComparison.Ordinal));
+        Assert.Single(log, line => line.Contains("compaction failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Removed_events_are_not_loaded_again()
     {
         var queue = Open();

@@ -117,6 +117,11 @@ internal sealed partial class AgentEngine
 
         _writer = new QueueWriter(queue);
         _confirmedOnline = queue.LastOnline;
+        foreach (var rejected in _state.QueueRejected ?? [])
+        {
+            queue.SetExternalDropped(rejected.BootId, rejected.Count);
+        }
+
         if (_state is { DeferredUntilUtc: { } until, DeferredSeconds: { } seconds })
         {
             // After a restart the wait continues until the saved end, never longer
@@ -267,9 +272,10 @@ internal sealed partial class AgentEngine
         var binding = BindingLocked();
         var append = _writer!.Post(queue =>
         {
+            AppendResult result;
             try
             {
-                queue.Append(queued, boot, now, nowTimestamp, frequency, binding);
+                result = queue.Append(queued, boot, now, nowTimestamp, frequency, binding);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
@@ -278,9 +284,52 @@ internal sealed partial class AgentEngine
                 throw;
             }
 
+            if (result == AppendResult.Full)
+            {
+                RecordQueueRejected(boot);
+            }
+
             _senderSignal.Release();
         });
         return append;
+    }
+
+    /// <summary>
+    /// An event the queue file could not take (at its size bound while compaction
+    /// fails, R6): counted per boot in state.json, a separate file, and reported
+    /// with the queue's own count of that boot. Runs on the queue writer.
+    /// </summary>
+    private void RecordQueueRejected(Guid boot)
+    {
+        long count;
+        lock (_gate)
+        {
+            List<DroppedEvents> rejected = [.. _state.QueueRejected ?? []];
+            var index = rejected.FindIndex(r => r.BootId == boot);
+            count = (index >= 0 ? rejected[index].Count : 0) + 1;
+            var entry = new DroppedEvents { BootId = boot, Count = count };
+            if (index >= 0)
+            {
+                rejected[index] = entry;
+            }
+            else
+            {
+                rejected.Add(entry);
+                if (rejected.Count > EventQueue.MaxUnconfirmedBoots)
+                {
+                    rejected.RemoveAt(0);
+                }
+            }
+
+            var updated = _state with { QueueRejected = rejected };
+            if (!TrySave(updated))
+            {
+                // Keep counting in memory; the next save writes it.
+                _state = updated;
+            }
+        }
+
+        _writer!.Queue.SetExternalDropped(boot, count);
     }
 
     // Connectivity.
@@ -439,7 +488,7 @@ internal sealed partial class AgentEngine
                     }
 
                     var step = await pipeline.ExecuteAsync(
-                        async token => await SendBatchAsync(only: null, token).ConfigureAwait(false),
+                        async token => await SendBatchAsync(only: null, onlyBinding: null, token).ConfigureAwait(false),
                         stoppingToken).ConfigureAwait(false);
                     if (step.Kind != StepKind.Done || (_writer.Queue.Pending.Count == 0 && _writer.Queue.NextDroppedCount() is null))
                     {
@@ -466,7 +515,7 @@ internal sealed partial class AgentEngine
     /// for an immediate send) with the oldest unconfirmed dropped count.
     /// Results are applied only while the identity and its epoch are unchanged.
     /// </summary>
-    private async Task<Step> SendBatchAsync(IReadOnlyList<AgentEvent>? only, CancellationToken cancellationToken)
+    private async Task<Step> SendBatchAsync(IReadOnlyList<AgentEvent>? only, QueueBinding? onlyBinding, CancellationToken cancellationToken)
     {
         AgentIdentity identity;
         QueueBinding binding;
@@ -504,6 +553,13 @@ internal sealed partial class AgentEngine
         }
         else
         {
+            // An immediate send goes only with the identity the event was recorded under, and only
+            // while the queue still belongs to it (P3): after a revoke and Join again it is never sent.
+            if (onlyBinding != binding || !_writer.Queue.Holds(binding))
+            {
+                return Step.Stop;
+            }
+
             events = only;
         }
         if (events.Count == 0 && dropped is null)
@@ -647,6 +703,7 @@ internal sealed partial class AgentEngine
         {
             var at = await LifecycleObservationAsync(budget.Token).ConfigureAwait(false);
             AgentEvent sleep;
+            QueueBinding? sleepBinding;
             Task append;
             lock (_gate)
             {
@@ -657,11 +714,12 @@ internal sealed partial class AgentEngine
                 }
 
                 sleep = BuildEvent(EventKinds.Sleep, at);
+                sleepBinding = BindingLocked();
                 append = PostAppendLocked(sleep, at);
             }
 
             await append.WaitAsync(budget.Token).ConfigureAwait(false);
-            await SendNowAsync(sleep, budget.Token).ConfigureAwait(false);
+            await SendNowAsync(sleep, sleepBinding, budget.Token).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is OperationCanceledException or IOException or UnauthorizedAccessException)
         {
@@ -726,16 +784,18 @@ internal sealed partial class AgentEngine
             using var appendBy = new CancellationTokenSource(Left(start, ShutdownAppendBy), _time);
             var at = await LifecycleObservationAsync(appendBy.Token).ConfigureAwait(false);
             AgentEvent agentEvent;
+            QueueBinding? eventBinding;
             Task append;
             lock (_gate)
             {
                 agentEvent = BuildEvent(kind, at);
+                eventBinding = BindingLocked();
                 append = PostAppendLocked(agentEvent, at);
             }
 
             await append.WaitAsync(appendBy.Token).ConfigureAwait(false);
             using var sendBy = new CancellationTokenSource(Left(start, ShutdownSendBy), _time);
-            await SendNowAsync(agentEvent, sendBy.Token).ConfigureAwait(false);
+            await SendNowAsync(agentEvent, eventBinding, sendBy.Token).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is OperationCanceledException or IOException or UnauthorizedAccessException)
         {
@@ -749,8 +809,11 @@ internal sealed partial class AgentEngine
         return left > TimeSpan.Zero ? left : TimeSpan.Zero;
     }
 
-    /// <summary>The immediate send of exactly one lifecycle event; skipped while a deferral runs.</summary>
-    private async Task SendNowAsync(AgentEvent agentEvent, CancellationToken cancellationToken)
+    /// <summary>
+    /// The immediate send of exactly one lifecycle event, with the binding it was
+    /// recorded under; skipped while a deferral runs.
+    /// </summary>
+    private async Task SendNowAsync(AgentEvent agentEvent, QueueBinding? recordedUnder, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
@@ -760,7 +823,10 @@ internal sealed partial class AgentEngine
             }
         }
 
-        await SendBatchAsync([agentEvent], cancellationToken).ConfigureAwait(false);
+        if (recordedUnder is { } binding)
+        {
+            await SendBatchAsync([agentEvent], binding, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     [LoggerMessage(EventId = 30, Level = LogLevel.Warning, Message = "Event queue: {Message}")]
