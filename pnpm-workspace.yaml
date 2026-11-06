@@ -15,6 +15,8 @@ allowBuilds:
 # whose @esbuild-kit/core-utils pins esbuild ~0.18.20. drizzle-kit's own code
 # never loads @esbuild-kit, so its esbuild moves to 0.25.12, the version
 # drizzle-kit itself uses. Remove this entry once drizzle-kit no longer depends
-# on @esbuild-kit/esm-loader (its 1.0 release candidates no longer do).
+# on @esbuild-kit/esm-loader (its 1.0 release candidates no longer do). The
+# selector names the locked core-utils version, so it stops applying when
+# that changes: check this entry again whenever drizzle-kit is updated.
 overrides:
-  '@esbuild-kit/core-utils>esbuild': 0.25.12
+  '@esbuild-kit/core-utils@3.3.2>esbuild': 0.25.12
