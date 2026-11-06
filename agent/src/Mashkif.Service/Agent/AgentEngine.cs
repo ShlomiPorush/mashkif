@@ -295,6 +295,7 @@ internal sealed partial class AgentEngine : IDisposable
         lock (_gate)
         {
             _wake.Dispose();
+            _senderWake.Dispose();
         }
 
         _senderSignal.Dispose();

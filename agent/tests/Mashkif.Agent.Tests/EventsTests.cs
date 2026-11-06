@@ -32,18 +32,23 @@ internal sealed class EventsFixture : IDisposable
 
     public ListLoggerProvider Logs { get; } = new();
 
-    public Guid BootId { get; } = Guid.Parse("7c9e6679-7425-40de-944b-e07fc1f90ae7");
+    public Guid BootId { get; set; } = Guid.Parse("7c9e6679-7425-40de-944b-e07fc1f90ae7");
+
+    public StateStore Store { get; private set; } = null!;
 
     public EventQueue Queue { get; private set; } = null!;
 
-    public AgentEngine Start(int capacity = EventQueue.MaxEvents)
+    /// <summary>Starts an engine; <paramref name="configure"/> sets test hooks before the state and the queue are loaded.</summary>
+    public AgentEngine Start(int capacity = EventQueue.MaxEvents, Action<StateStore, EventQueue>? configure = null)
     {
         Queue = new EventQueue(State.StateDirectory, State.Policy) { Capacity = capacity };
+        Store = State.CreateStore();
+        configure?.Invoke(Store, Queue);
         var loggerFactory = LoggerFactory.Create(builder => builder.AddProvider(Logs).SetMinimumLevel(LogLevel.Trace));
         var engine = new AgentEngine(
             new AgentEngineOptions
             {
-                Store = State.CreateStore(),
+                Store = Store,
                 Origin = ServerOrigin.Parse(EngineFixture.Origin),
                 Http = Http,
                 BootId = BootId,
@@ -141,7 +146,7 @@ public sealed class EventsTests : IDisposable
 
         // Back: the probe succeeds first (sync-1 is still the latest answer), then a heartbeat
         // answer with a newer sync arrives in the middle of the debounce (P6).
-        _f.Handler.HeartbeatAnswer = static _ => Task.FromResult(RoutedHandler.Json(HttpStatusCode.ServiceUnavailable, "{}"));
+        _f.Handler.HeartbeatAnswer = static (_, _) => Task.FromResult(RoutedHandler.Json(HttpStatusCode.ServiceUnavailable, "{}"));
         _f.Handler.Online = true;
         var probes = _f.Handler.Probes.Count;
         while (_f.Handler.Probes.Count == probes)
@@ -351,7 +356,7 @@ public sealed class EventsTests : IDisposable
     public async Task A_hung_heartbeat_is_abandoned_after_1_s_and_the_shutdown_is_still_recorded_and_sent()
     {
         var engine = await StartRegisteredAsync();
-        _f.Handler.HeartbeatAnswer = static async ct =>
+        _f.Handler.HeartbeatAnswer = static async (_, ct) =>
         {
             await Task.Delay(Timeout.Infinite, ct);
             return RoutedHandler.Json(HttpStatusCode.OK, "{}");
@@ -411,7 +416,7 @@ public sealed class EventsTests : IDisposable
     public async Task A_sleep_does_not_wait_for_a_heartbeat_in_flight_and_is_sent_within_its_budget()
     {
         var engine = await StartRegisteredAsync();
-        _f.Handler.HeartbeatAnswer = static async ct =>
+        _f.Handler.HeartbeatAnswer = static async (_, ct) =>
         {
             await Task.Delay(Timeout.Infinite, ct);
             return RoutedHandler.Json(HttpStatusCode.OK, "{}");

@@ -50,6 +50,9 @@ internal sealed partial class AgentEngine
     public const int ConnectivityConfirmations = 2;
 
     private readonly SemaphoreSlim _senderSignal = new(0);
+
+    // Cancelled by every identity switch, so a running deferral wait of the old identity ends (P17).
+    private CancellationTokenSource _senderWake = new();
     private QueueWriter? _writer;
     private long _powerSequence;
     private long? _quiescingSince;
@@ -407,6 +410,7 @@ internal sealed partial class AgentEngine
                 {
                     TimeSpan wait;
                     bool deferred;
+                    CancellationToken wake;
                     lock (_gate)
                     {
                         if (CurrentPhase() != Phase.Heartbeat || _writer is null)
@@ -415,11 +419,21 @@ internal sealed partial class AgentEngine
                         }
 
                         deferred = DeferredLocked(out wait);
+                        wake = _senderWake.Token;
                     }
 
                     if (deferred)
                     {
-                        await Task.Delay(wait, _time, stoppingToken).ConfigureAwait(false);
+                        using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, wake);
+                        try
+                        {
+                            await Task.Delay(wait, _time, linked.Token).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+                        {
+                            // An identity switch ended the deferral of the old identity.
+                        }
+
                         continue;
                     }
 
@@ -578,6 +592,10 @@ internal sealed partial class AgentEngine
         _batchLimit = MaxBatchEvents;
         _candidateOnline = null;
         _candidateCount = 0;
+        var previous = _senderWake;
+        _senderWake = new CancellationTokenSource();
+        previous.Cancel();
+        previous.Dispose();
         if (_writer is not null)
         {
             _senderSignal.Release();

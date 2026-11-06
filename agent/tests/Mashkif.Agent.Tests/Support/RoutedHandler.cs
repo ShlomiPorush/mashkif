@@ -33,7 +33,14 @@ internal sealed class RoutedHandler : HttpMessageHandler
     public Func<JsonNode, CancellationToken, Task<HttpResponseMessage>>? EventsAnswer { get; set; }
 
     /// <summary>Answers heartbeat requests; null records them with the next sync ID.</summary>
-    public Func<CancellationToken, Task<HttpResponseMessage>>? HeartbeatAnswer { get; set; }
+    public Func<RecordedRequest, CancellationToken, Task<HttpResponseMessage>>? HeartbeatAnswer { get; set; }
+
+    /// <summary>The default heartbeat answer: recorded, with the next sync ID.</summary>
+    public HttpResponseMessage NextSync()
+    {
+        var n = Interlocked.Increment(ref _syncs);
+        return Json(HttpStatusCode.OK, $$"""{"syncId":"sync-{{n}}","serverTime":"2026-11-02T09:01:00Z","nextIntervalSeconds":60}""");
+    }
 
     public static HttpResponseMessage Json(HttpStatusCode status, string json) =>
         new(status) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
@@ -61,11 +68,13 @@ internal sealed class RoutedHandler : HttpMessageHandler
         var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         request.Headers.TryGetValues("Mashkif-Protocol-Version", out var versions);
         var recorded = new RecordedRequest(request.Method.Method, request.RequestUri!, request.Headers.Authorization?.ToString(), versions?.FirstOrDefault(), body);
-        _requests.Enqueue(recorded);
         if (!Online)
         {
+            // Not recorded: it never reached the server.
             throw new HttpRequestException("offline");
         }
+
+        _requests.Enqueue(recorded);
 
         var path = request.RequestUri!.AbsolutePath;
         if (path.EndsWith("/register", StringComparison.Ordinal))
@@ -82,11 +91,10 @@ internal sealed class RoutedHandler : HttpMessageHandler
         {
             if (HeartbeatAnswer is { } answer)
             {
-                return await answer(cancellationToken).ConfigureAwait(false);
+                return await answer(recorded, cancellationToken).ConfigureAwait(false);
             }
 
-            var n = Interlocked.Increment(ref _syncs);
-            return Json(HttpStatusCode.OK, $$"""{"syncId":"sync-{{n}}","serverTime":"2026-11-02T09:01:00Z","nextIntervalSeconds":60}""");
+            return NextSync();
         }
 
         if (path.EndsWith("/events", StringComparison.Ordinal))
