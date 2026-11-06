@@ -162,10 +162,13 @@ jobs:
       - name: Verify agent
         timeout-minutes: 35
         run: bash scripts/verify.sh --area agent
-      # Only after a failure: the TRX reports, hang dumps, and installer and
-      # test logs that scripts/lib/verify-agent.sh keeps in its scratch folder.
+      # Only after a failure: the TRX reports, hang dumps with their lists of
+      # running tests, and the installer and test logs that
+      # scripts/lib/verify-agent.sh keeps in its scratch folder. Its own
+      # timeout leaves the job time to close within the job timeout.
       - name: Upload the agent test diagnostics
         if: failure()
+        timeout-minutes: 5
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent-test-diagnostics

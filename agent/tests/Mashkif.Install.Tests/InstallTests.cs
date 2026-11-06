@@ -189,7 +189,11 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
         foreach (var file in logFiles)
         {
             Assert.True(File.Exists(file), $"{file} is missing");
-            Assert.DoesNotContain(token, ReadAll(file), StringComparison.Ordinal);
+            // Name only the file: the failure message must not repeat the token.
+            if (ReadAll(file).Contains(token, StringComparison.Ordinal))
+            {
+                Assert.Fail($"The token is in {file}");
+            }
         }
     }
 

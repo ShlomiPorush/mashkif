@@ -21,11 +21,13 @@
 #   for the builds, -acceptEula wix7 on each wix command.
 # - Install tests (tests/Mashkif.Install.Tests, outside the solution) run only
 #   on a GitHub-hosted runner.
-# - Both test steps write a TRX report into <scratch>/test-results/<step>/,
-#   and a test run that completes no test for the hang timeout is dumped
-#   (Microsoft.Testing.Extensions.HangDump, Triage type) and stopped. In CI the
-#   scratch folder stays when a check fails, so the workflow can upload the
-#   reports, dumps, and installer logs.
+# - Both test steps write a TRX report into <scratch>/test-results/<step>/
+#   when the test run ends by itself. A run that completes no test for the
+#   hang timeout is dumped (Microsoft.Testing.Extensions.HangDump, Triage type)
+#   and killed; it then writes no TRX, but HangDump prints the tests that were
+#   still running to the step log and writes them into a .log file next to
+#   the dump. In CI the scratch folder stays when a check fails, so the
+#   workflow can upload the reports, dumps, and installer logs.
 
 _AGENT_DIR="$MASHKIF_ROOT/agent"
 _AGENT_SDK_HINT="install the .NET 10 SDK"
