@@ -21,6 +21,13 @@ export const DEFAULT_PORT = 8080;
 /** Minimum length of BETTER_AUTH_SECRET, as Better Auth recommends. */
 export const AUTH_SECRET_MIN_LENGTH = 32;
 
+/**
+ * The placeholder that .env.example puts in every secret. The server refuses
+ * it as the database password; a test checks that .env.example still uses it,
+ * and scripts/local.sh reads it from there.
+ */
+export const ENV_EXAMPLE_PLACEHOLDER = "change-me";
+
 export class ConfigError extends Error {
   override name = "ConfigError";
 }
@@ -37,6 +44,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     problems.push("DATABASE_URL is required");
   } else if (!/^postgres(?:ql)?:\/\//.test(databaseUrl)) {
     problems.push("DATABASE_URL must start with postgres:// or postgresql://");
+  } else {
+    // Neither the URL nor the password is ever part of the message.
+    const password = databasePassword(databaseUrl);
+    if (password === undefined) {
+      problems.push("DATABASE_URL is not a valid URL");
+    } else if (password === "" || password === ENV_EXAMPLE_PLACEHOLDER) {
+      problems.push(
+        "DATABASE_URL needs a database password other than the .env.example placeholder (generate one with: openssl rand -hex 32)",
+      );
+    }
   }
 
   const geoipAsnPath = env.MASHKIF_GEOIP_ASN_PATH?.trim() ?? "";
@@ -66,4 +83,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new ConfigError(problems.join("; "));
   }
   return { databaseUrl, geoipAsnPath, port, authSecret };
+}
+
+/** The decoded password of a connection URL, or undefined when it does not parse. */
+function databasePassword(databaseUrl: string): string | undefined {
+  let password: string;
+  try {
+    password = new URL(databaseUrl).password;
+  } catch {
+    return undefined;
+  }
+  try {
+    return decodeURIComponent(password);
+  } catch {
+    return password;
+  }
 }

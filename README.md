@@ -37,6 +37,7 @@ Run the scripts from WSL, in the repository root:
 
 The server reads only a few values from `.env` (template: `.env.example`): the database settings, the GeoLite2-ASN path, and:
 
+- `POSTGRES_PASSWORD`, repeated in `DATABASE_URL`: the database password. Generate one with `openssl rand -hex 32`. The server refuses to start with an empty password or the `.env.example` placeholder.
 - `BETTER_AUTH_SECRET`: a secret of at least 32 random characters. Generate one with `openssl rand -base64 32` and back it up together with `.env`. A new secret signs the admin out and makes the enrolled TOTP, the backup codes, and the stored SMTP password unusable.
 
 Every other setting is managed in the admin panel under Settings, with a default: the heartbeat interval, how long raw data is kept, the public URL, other trusted origins, the trusted proxies, the session length, and SMTP for email. An environment variable may override a setting (for example `BETTER_AUTH_URL` for the public URL or `MASHKIF_TRUSTED_PROXIES`; `.env.example` lists them); the panel then shows the field locked. The public URL, the trusted proxies, and the session length apply after a restart.

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ConfigError, DEFAULT_PORT, loadConfig } from "../src/config.js";
+import { ConfigError, DEFAULT_PORT, ENV_EXAMPLE_PLACEHOLDER, loadConfig } from "../src/config.js";
 import { parsePublicUrl } from "../src/settings.js";
 
 const secret = randomBytes(32).toString("base64");
@@ -71,6 +72,51 @@ describe("BETTER_AUTH_SECRET", () => {
 
   it("is passed on as is, without derivation", () => {
     expect(loadConfig({ ...valid, BETTER_AUTH_SECRET: ` ${secret} ` }).authSecret).toBe(secret);
+  });
+});
+
+describe("DATABASE_URL password", () => {
+  const refused = /DATABASE_URL needs a database password other than the \.env\.example placeholder/;
+
+  it.each([
+    ["the .env.example placeholder", `postgres://mashkif:${ENV_EXAMPLE_PLACEHOLDER}@db:5432/mashkif`],
+    ["the encoded placeholder", "postgres://mashkif:change%2Dme@db:5432/mashkif"],
+    ["an empty password", "postgres://mashkif:@db:5432/mashkif"],
+    ["no password", "postgres://mashkif@db:5432/mashkif"],
+  ])("refuses %s without quoting the URL", (_name, url) => {
+    try {
+      loadConfig({ ...valid, DATABASE_URL: url });
+      expect.unreachable();
+    } catch (error) {
+      expect(String(error)).toMatch(refused);
+      expect(String(error)).not.toContain("postgres://");
+      expect(String(error)).not.toContain("mashkif:");
+    }
+  });
+
+  it("accepts a random password", () => {
+    const url = `postgres://mashkif:${randomBytes(32).toString("hex")}@db:5432/mashkif`;
+    expect(loadConfig({ ...valid, DATABASE_URL: url }).databaseUrl).toBe(url);
+  });
+
+  it("never puts an unparsable URL or its password in the message", () => {
+    const password = randomBytes(16).toString("hex");
+    try {
+      loadConfig({ ...valid, DATABASE_URL: `postgres://mashkif:${password}@db:port/mashkif` });
+      expect.unreachable();
+    } catch (error) {
+      expect(String(error)).toMatch(/DATABASE_URL is not a valid URL/);
+      expect(String(error)).not.toContain(password);
+    }
+  });
+
+  it("matches the placeholder of every secret in .env.example", () => {
+    const text = readFileSync(new URL("../../.env.example", import.meta.url), "utf8");
+    const value = (name: string) => text.match(new RegExp(`^${name}=(.*)$`, "m"))?.[1];
+    expect(value("POSTGRES_PASSWORD")).toBe(ENV_EXAMPLE_PLACEHOLDER);
+    expect(new URL(value("DATABASE_URL") ?? "").password).toBe(ENV_EXAMPLE_PLACEHOLDER);
+    expect(value("BETTER_AUTH_SECRET")).toBe(ENV_EXAMPLE_PLACEHOLDER);
+    expect(() => loadConfig({ ...valid, DATABASE_URL: value("DATABASE_URL") })).toThrow(refused);
   });
 });
 
