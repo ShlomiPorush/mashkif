@@ -339,7 +339,8 @@ internal sealed partial class AgentEngine
     /// <summary>
     /// After the server acknowledged a boot's total and that confirmation is on disk:
     /// when the total covers the boot's own count and its rejections in state.json,
-    /// the entry is removed from state.json (R9), under the same binding check as R7.
+    /// the entry of a previous boot is removed from state.json (R9, R10), under the
+    /// same binding check as R7.
     /// Until that write succeeds, compaction keeps the boot's summary.
     /// </summary>
     private void ForgetAcknowledgedRejections(DroppedEvents confirmed, QueueBinding binding)
@@ -352,7 +353,9 @@ internal sealed partial class AgentEngine
             }
 
             var entry = rejected.FirstOrDefault(r => r.BootId == confirmed.BootId);
-            if (entry is null || confirmed.Count < _writer!.Queue.DroppedParts(confirmed.BootId).Own + entry.Count)
+            // The current boot keeps its entry (R10): it is the cumulative base of the next
+            // rejection, also after a service restart in the same Windows boot.
+            if (entry is null || confirmed.BootId == _options.BootId || confirmed.Count < _writer!.Queue.DroppedParts(confirmed.BootId).Own + entry.Count)
             {
                 return;
             }

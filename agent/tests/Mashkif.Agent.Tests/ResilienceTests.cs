@@ -606,6 +606,29 @@ public sealed class ResilienceTests
         Assert.Empty(CountsFor(f, bootA, acknowledged));
     }
 
+    [Fact]
+    public async Task After_an_acknowledgment_and_a_service_restart_in_the_same_boot_the_next_rejection_is_reported_as_16()
+    {
+        using var f = new EventsFixture();
+        var boot = SeedBootWithRejections(f);
+        f.BootId = boot; // the same Windows boot throughout: only the service restarts
+
+        // 5 own drops and 10 rejections, acknowledged as 15; the current boot keeps its entry.
+        var engine = f.Start(capacity: 1);
+        await UntilAsync(f, () => f.Queue.NextDroppedCount() is null && f.Queue.Pending.Count == 0 && f.Handler.Events.Count > 0, "15 acknowledged");
+        Assert.Equal(15, CountsFor(f, boot, 0).Last()["count"]!.GetValue<long>());
+        Assert.Equal(10, engine.State.QueueRejected!.Single().Count);
+
+        // A service restart with a bound the next event cannot fit under: it is rejected.
+        await f.StopAllAsync();
+        engine = f.Start(capacity: 1, maxFileBytes: 600);
+        await UntilAsync(f, () => engine.State.LastSync is not null, "running", TimeSpan.FromMilliseconds(1));
+        var before = f.Handler.Events.Count;
+        engine.Resume();
+        await UntilAsync(f, () => CountsFor(f, boot, before).Any(c => c["count"]!.GetValue<long>() == 16), "16 reported");
+        Assert.Equal(11, engine.State.QueueRejected!.Single().Count);
+    }
+
     // Review R2: expiry while the service keeps running.
 
     [Fact]
