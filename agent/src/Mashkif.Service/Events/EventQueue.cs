@@ -246,7 +246,7 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     /// temporary file, reads the queue, drops records of another binding,
     /// and compacts. Returns a problem when a file fails its checks.
     /// </summary>
-    public string? Load(QueueBinding? binding, Guid currentBoot, DateTimeOffset nowUtc, long nowTimestamp, long frequency)
+    public string? Load(QueueBinding? binding, Guid currentBoot, DateTimeOffset nowUtc, long nowTimestamp, long frequency, IReadOnlyList<DroppedEvents>? external = null)
     {
         var problem = PathSecurity.CheckStateFile(TempPath, policy) ?? PathSecurity.CheckStateFile(FilePath, policy);
         if (problem is not null)
@@ -300,6 +300,13 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         {
             AddDropped(currentBoot, bad);
             Log?.Invoke($"{bad} unreadable queue lines were dropped");
+        }
+
+        // The rejections counted in state.json join their boots before the compaction decides
+        // which boots are fully confirmed (R8), so a boot is always judged by its whole count.
+        foreach (var rejected in external ?? [])
+        {
+            SetExternalDropped(rejected.BootId, rejected.Count);
         }
 
         CompactCore();

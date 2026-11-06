@@ -101,7 +101,7 @@ internal sealed partial class AgentEngine
         string? problem;
         try
         {
-            problem = queue.Load(BindingLocked(), _options.BootId, _time.GetUtcNow(), _time.GetTimestamp(), _time.TimestampFrequency);
+            problem = queue.Load(BindingLocked(), _options.BootId, _time.GetUtcNow(), _time.GetTimestamp(), _time.TimestampFrequency, _state.QueueRejected);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
@@ -117,11 +117,6 @@ internal sealed partial class AgentEngine
 
         _writer = new QueueWriter(queue);
         _confirmedOnline = queue.LastOnline;
-        foreach (var rejected in _state.QueueRejected ?? [])
-        {
-            queue.SetExternalDropped(rejected.BootId, rejected.Count);
-        }
-
         if (_state is { DeferredUntilUtc: { } until, DeferredSeconds: { } seconds })
         {
             // After a restart the wait continues until the saved end, never longer
@@ -286,7 +281,7 @@ internal sealed partial class AgentEngine
 
             if (result == AppendResult.Full)
             {
-                RecordQueueRejected(boot);
+                RecordQueueRejected(boot, binding);
             }
 
             _senderSignal.Release();
@@ -299,11 +294,18 @@ internal sealed partial class AgentEngine
     /// fails, R6): counted per boot in state.json, a separate file, and reported
     /// with the queue's own count of that boot. Runs on the queue writer.
     /// </summary>
-    private void RecordQueueRejected(Guid boot)
+    private void RecordQueueRejected(Guid boot, QueueBinding? binding)
     {
         long count;
         lock (_gate)
         {
+            // A write of an old identity that comes back Full after Join again belongs to
+            // that identity, not to the new one (R7): nothing is counted.
+            if (binding is null || BindingLocked() != binding)
+            {
+                return;
+            }
+
             List<DroppedEvents> rejected = [.. _state.QueueRejected ?? []];
             var index = rejected.FindIndex(r => r.BootId == boot);
             count = (index >= 0 ? rejected[index].Count : 0) + 1;

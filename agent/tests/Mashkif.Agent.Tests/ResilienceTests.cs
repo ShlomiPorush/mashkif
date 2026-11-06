@@ -415,6 +415,82 @@ public sealed class ResilienceTests
         Assert.Equal(Recorded - pending, last["count"]!.GetValue<long>());
     }
 
+    [Fact]
+    public async Task An_old_write_that_comes_back_full_after_Join_again_does_not_count_for_the_new_identity()
+    {
+        using var f = new EventsFixture();
+        f.Seed(EngineFixture.Registered());
+        using var compactionHeld = new ManualResetEventSlim();
+        using var inCompaction = new ManualResetEventSlim();
+        var armed = false;
+
+        // A bound below one line: the next append tries a compaction to make room, which is held, then fails.
+        var engine = f.Start(maxFileBytes: 100, configure: (_, queue) => queue.BeforeReplace = () =>
+        {
+            if (Volatile.Read(ref armed))
+            {
+                inCompaction.Set();
+                compactionHeld.Wait(TimeSpan.FromSeconds(30));
+                throw new IOException("the replacement fails");
+            }
+        });
+        await UntilAsync(f, () => engine.State.LastSync is not null, "first answer", TimeSpan.FromMilliseconds(1));
+
+        var heartbeatHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Handler.HeartbeatAnswer = async (_, _) =>
+        {
+            await heartbeatHeld.Task;
+            return RoutedHandler.Json(HttpStatusCode.Forbidden, """{"error":"agent_revoked"}""");
+        };
+        var beats = f.Handler.Heartbeats.Count;
+        await UntilAsync(f, () => f.Handler.Heartbeats.Count > beats, "a heartbeat in flight", TimeSpan.FromSeconds(10));
+
+        // The old identity's event: its write waits in the compaction attempt.
+        Volatile.Write(ref armed, true);
+        engine.Resume();
+        await Eventually.TrueAsync(() => inCompaction.IsSet, "the old write is in its compaction");
+
+        heartbeatHeld.SetResult();
+        await Eventually.TrueAsync(() => engine.State.IdentityState == IdentityStates.Revoked, "revoked");
+        f.Handler.HeartbeatAnswer = null;
+        Assert.True(engine.Rejoin().Ok);
+        await Eventually.TrueAsync(() => engine.State.IdentityState == IdentityStates.Active, "registered again");
+
+        // The old write now comes back Full.
+        Volatile.Write(ref armed, false);
+        compactionHeld.Set();
+        await Eventually.TrueAsync(() => f.Queue.Pending.Count == 0 && !f.Queue.Holds(new QueueBinding(EngineFixture.InstallId, EngineFixture.Origin)), "the Rebind ran");
+        Assert.Null(engine.State.QueueRejected);
+        Assert.Equal(0, f.Queue.DroppedCount(f.BootId));
+    }
+
+    [Fact]
+    public async Task A_boot_with_confirmed_drops_and_rejections_in_the_state_file_reports_its_whole_count_after_a_reboot()
+    {
+        using var f = new EventsFixture();
+        var bootA = f.BootId;
+        var binding = new QueueBinding(EngineFixture.InstallId, EngineFixture.Origin);
+
+        // Boot A: 5 drops in the queue, confirmed by the server, and 10 rejections in state.json not yet reported.
+        var queueA = new EventQueue(f.State.StateDirectory, f.State.Policy) { Capacity = 1 };
+        Assert.Null(queueA.Load(binding, bootA, f.Time.GetUtcNow(), f.Time.GetTimestamp(), f.Time.TimestampFrequency));
+        for (var i = 0; i < 6; i++)
+        {
+            queueA.Append(new QueuedEvent(new AgentEvent { Id = Guid.NewGuid(), Kind = EventKinds.Resume, BootId = bootA, SyncId = null, ElapsedMs = null }, f.Time.GetUtcNow(), f.Time.GetTimestamp()), bootA, f.Time.GetUtcNow(), f.Time.GetTimestamp(), f.Time.TimestampFrequency);
+        }
+
+        queueA.ConfirmDropped(new DroppedEvents { BootId = bootA, Count = 5 });
+        f.Seed(EngineFixture.Registered() with { QueueRejected = [new DroppedEvents { BootId = bootA, Count = 10 }] });
+
+        // A reboot: boot B.
+        f.BootId = Guid.NewGuid();
+        f.Start(capacity: 1);
+        Assert.Equal(15, f.Queue.DroppedCount(bootA));
+        await UntilAsync(f, () => f.Queue.NextDroppedCount() is null && f.Queue.Pending.Count == 0, "reported and confirmed");
+        var last = Bodies(f).Select(b => b["droppedEvents"]).Last(d => d is not null && d["bootId"]!.GetValue<string>() == bootA.ToString())!;
+        Assert.Equal(15, last["count"]!.GetValue<long>());
+    }
+
     // Review R2: expiry while the service keeps running.
 
     [Fact]
