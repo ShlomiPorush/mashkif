@@ -55,7 +55,8 @@ _server_tests() (
   id="$(printf '%s' "${scratch##*.}" | tr '[:upper:]' '[:lower:]')"
   net="mashkif-verify-server-tests-$id"
   db="$net-db"
-  password="verify-$id"
+  # Random, not derived from the run ID, which is public in the container names.
+  password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 
   # shellcheck disable=SC2329 # Invoked by the EXIT trap.
   cleanup() {
@@ -91,7 +92,7 @@ _server_readiness_tests() (
   net="mashkif-verify-server-$id"
   db="$net-db"
   app="$net-app"
-  password="verify-$id"
+  password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   database_url="postgres://mashkif:$password@$db:5432/mashkif"
   auth_secret="$(head -c 32 /dev/urandom | base64)"
 

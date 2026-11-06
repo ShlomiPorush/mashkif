@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { latLngToCell } from "h3-js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cachedSettings, SETTINGS_CACHE_TTL_MS } from "../src/settings.js";
@@ -353,6 +354,7 @@ describe("settings", () => {
 });
 
 describe("settings from the environment", () => {
+  const envPassword = randomBytes(18).toString("base64url");
   const ENV = {
     BETTER_AUTH_URL: "https://mashkif.example",
     MASHKIF_SESSION_HOURS: "8",
@@ -361,7 +363,7 @@ describe("settings from the environment", () => {
     MASHKIF_SMTP_HOST: "smtp.example",
     MASHKIF_SMTP_PORT: "587",
     MASHKIF_SMTP_USER: "mailer",
-    MASHKIF_SMTP_PASSWORD: "from-the-environment",
+    MASHKIF_SMTP_PASSWORD: envPassword,
     MASHKIF_SMTP_FROM: "mashkif@mashkif.example",
   };
 
@@ -401,7 +403,7 @@ describe("settings from the environment", () => {
         "trustedProxies",
       ].sort(),
     );
-    expect(JSON.stringify(reply.body)).not.toContain("from-the-environment");
+    expect(JSON.stringify(reply.body)).not.toContain(envPassword);
     // A locked setting cannot be changed in the panel.
     for (const field of ["publicUrl", "sessionHours", "smtpPassword", "trustedProxies"]) {
       const value = field === "sessionHours" ? 4 : field === "trustedProxies" ? [] : "x";
@@ -416,9 +418,10 @@ describe("settings from the environment", () => {
 
   it("keeps a secret from the environment exactly as given, spaces included", async () => {
     const { resolveSettings } = await import("../src/settings.js");
-    const env = { MASHKIF_SMTP_PASSWORD: "  spaced secret  ", MASHKIF_SMTP_USER: "  mailer  " };
+    const spaced = `  ${randomBytes(18).toString("base64url")}  `;
+    const env = { MASHKIF_SMTP_PASSWORD: spaced, MASHKIF_SMTP_USER: "  mailer  " };
     const resolved = await resolveSettings(database.db, { env, secret: harness.secret });
-    expect(resolved.values.smtpPassword).toBe("  spaced secret  ");
+    expect(resolved.values.smtpPassword).toBe(spaced);
     // Other settings are trimmed.
     expect(resolved.values.smtpUser).toBe("mailer");
     expect(resolved.locked).toEqual(expect.arrayContaining(["smtpPassword", "smtpUser"]));
@@ -485,7 +488,7 @@ describe("panel settings", () => {
 
   it("stores the SMTP password encrypted, never returns it, and keeps it out of the audit log", async () => {
     const browser = await fullAdmin(harness);
-    const password = "smtp password 1234";
+    const password = randomBytes(18).toString("base64url");
     const saved = await browser.post("/api/admin/settings", { smtpPassword: password });
     expect(saved.status).toBe(200);
     expect(saved.body.smtpPasswordSet).toBe(true);
@@ -504,7 +507,7 @@ describe("panel settings", () => {
     expect(own.values.smtpPassword).toBe(password);
     const other = await resolveSettings(database.db, {
       env: {},
-      secret: "another secret 0123456789abcdef",
+      secret: randomBytes(32).toString("base64"),
     });
     expect(other.values.smtpPassword).toBe("");
   });

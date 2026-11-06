@@ -39,18 +39,21 @@ async function freshDatabase(): Promise<{ sql: Sql; name: string }> {
 const ACTIVE = randomUUID();
 const REVOKED = randomUUID();
 
+/** A per-run value for a key or token hash column. */
+const randomHash = () => randomBytes(32).toString("hex");
+
 async function seedAt0003(sql: Sql): Promise<void> {
   const [keyA] =
     await sql`insert into enrollment_key (label, key_hash, created_by, expires_at, used_at)
-    values ('Office PC', 'hash-a', 'shlomi', now() + interval '1 day', now()) returning id`;
+    values ('Office PC', ${randomHash()}, 'shlomi', now() + interval '1 day', now()) returning id`;
   const [keyB] =
     await sql`insert into enrollment_key (label, key_hash, created_by, expires_at, used_at)
-    values ('Old PC', 'hash-b', 'shlomi', now() + interval '1 day', now()) returning id`;
+    values ('Old PC', ${randomHash()}, 'shlomi', now() + interval '1 day', now()) returning id`;
   await sql`insert into enrollment_key (label, key_hash, created_by, expires_at)
-    values ('Unused', 'hash-c', 'shlomi', now() + interval '1 day')`;
+    values ('Unused', ${randomHash()}, 'shlomi', now() + interval '1 day')`;
   await sql`insert into agent (id, install_id, token_hash, enrollment_key_id, label, agent_version)
-    values (${ACTIVE}, ${randomUUID()}, 'token-a', ${keyA?.id}, 'Office PC', '0.1.0'),
-           (${REVOKED}, ${randomUUID()}, 'token-b', ${keyB?.id}, 'Old PC', '0.1.0')`;
+    values (${ACTIVE}, ${randomUUID()}, ${randomHash()}, ${keyA?.id}, 'Office PC', '0.1.0'),
+           (${REVOKED}, ${randomUUID()}, ${randomHash()}, ${keyB?.id}, 'Old PC', '0.1.0')`;
   await sql`update agent set revoked_at = now() where id = ${REVOKED}`;
   const boot = randomUUID();
   await sql`insert into heartbeat (agent_id, received_at, boot_id, sequence, address, site_key,
@@ -126,7 +129,7 @@ describe("migrations 0004 and 0005 from data at 0003", () => {
       const [revoked] = await sql`select install_id from agent where id = ${REVOKED}`;
       await expect(
         sql`insert into agent (id, install_id, token_hash, agent_version)
-          values (${randomUUID()}, ${revoked?.install_id}, 'token-c', '0.1.0')`,
+          values (${randomUUID()}, ${revoked?.install_id}, ${randomHash()}, '0.1.0')`,
       ).rejects.toThrow();
     } finally {
       await sql.end({ timeout: 5 });

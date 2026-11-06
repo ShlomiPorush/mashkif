@@ -14,7 +14,8 @@ import { secretFromUri, totpCode } from "./totp.js";
 
 export const ORIGIN = "https://admin.test";
 export const USERNAME = "Shlomi";
-export const PASSWORD = "correct horse battery";
+/** The admin password of this test run; Better Auth takes 12 to 128 characters. */
+export const PASSWORD = randomBytes(24).toString("base64url");
 export const EMAIL = "admin@example.test";
 
 const ok = async () => {};

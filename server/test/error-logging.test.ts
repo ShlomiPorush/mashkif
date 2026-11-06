@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import type { Auth } from "../src/auth/auth.js";
@@ -8,7 +9,7 @@ import { ORIGIN } from "./support/harness.js";
 
 // Database errors carry SQL parameters (password hashes, session tokens) in
 // their message. None of them may reach a log line.
-const SECRET = "dummy-secret-session-token-4f9a";
+const SECRET = randomBytes(24).toString("hex");
 
 let database: TestDatabase;
 let queryError: unknown;
@@ -71,7 +72,7 @@ describe("error logging", () => {
       admin: {
         db: database.db,
         auth: failing,
-        authSecret: "x".repeat(32),
+        authSecret: randomBytes(32).toString("base64"),
         publicUrl: ORIGIN,
         clientAddress: () => "198.51.100.1",
       },

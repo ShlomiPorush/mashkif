@@ -36,8 +36,26 @@ const SESSION = {
 const ENROLLMENT = { session: SESSION, user: USER };
 const FULL = { session: SESSION, user: { ...USER, twoFactorEnabled: true } };
 
-const TOTP_URI =
-  "otpauth://totp/Mashkif:shlomi?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Mashkif&algorithm=SHA1&digits=6&period=30";
+// Secret-like values are random per run (Web Crypto), never fixed in the repository.
+const randomHex = (bytes: number) =>
+  Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+const randomCode = () => `${randomHex(3)}-${randomHex(3)}`;
+const PASSWORD = randomHex(16);
+const NEW_PASSWORD = randomHex(16);
+const SMTP_PASSWORD = randomHex(16);
+const BACKUP_CODE = randomCode();
+const BACKUP_ONE = randomCode();
+const BACKUP_TWO = randomCode();
+const FRESH_ONE = randomCode();
+const FRESH_TWO = randomCode();
+/** 32 base32 characters; 256 is a multiple of 32, so every character is equally likely. */
+const TOTP_SECRET = Array.from(
+  crypto.getRandomValues(new Uint8Array(32)),
+  (byte) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"[byte % 32],
+).join("");
+const TOTP_URI = `otpauth://totp/Mashkif:shlomi?secret=${TOTP_SECRET}&issuer=Mashkif&algorithm=SHA1&digits=6&period=30`;
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -181,7 +199,7 @@ describe("sign-in", () => {
       target: { value: "shlomi" },
     });
     fireEvent.change(screen.getByLabelText(language.signIn.password), {
-      target: { value: "a long password" },
+      target: { value: PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: language.signIn.submit }));
   }
@@ -197,7 +215,7 @@ describe("sign-in", () => {
     ).toBeTruthy();
     expect(calls.find((call) => call.path === "/api/auth/sign-in/username")?.body).toEqual({
       username: "shlomi",
-      password: "a long password",
+      password: PASSWORD,
     });
   });
 
@@ -257,13 +275,13 @@ describe("sign-in", () => {
     await password(en);
     fireEvent.click(await screen.findByRole("button", { name: en.signIn.useBackup }));
     fireEvent.change(await screen.findByLabelText(en.signIn.backupCode), {
-      target: { value: "abcde-12345" },
+      target: { value: BACKUP_CODE },
     });
     fireEvent.click(screen.getByRole("button", { name: en.signIn.verify }));
     await waitFor(() => expect(window.location.pathname).toBe("/admin"));
     expect(
       calls.find((call) => call.path === "/api/auth/two-factor/verify-backup-code")?.body,
-    ).toMatchObject({ code: "abcde-12345" });
+    ).toMatchObject({ code: BACKUP_CODE });
   });
 
   it("maps a used backup code to its message in Hebrew", async () => {
@@ -280,7 +298,7 @@ describe("sign-in", () => {
     await password(he);
     fireEvent.click(await screen.findByRole("button", { name: he.signIn.useBackup }));
     fireEvent.change(await screen.findByLabelText(he.signIn.backupCode), {
-      target: { value: "abcde-12345" },
+      target: { value: BACKUP_CODE },
     });
     fireEvent.click(screen.getByRole("button", { name: he.signIn.verify }));
     expect((await screen.findByRole("alert")).textContent).toBe(he.errors.invalidBackupCode);
@@ -350,10 +368,10 @@ describe("setup", () => {
       target: { value: "admin@example.test" },
     });
     fireEvent.change(screen.getByLabelText(language.setup.password), {
-      target: { value: "a long password" },
+      target: { value: PASSWORD },
     });
     fireEvent.change(screen.getByLabelText(language.setup.confirm), {
-      target: { value: "a long password" },
+      target: { value: PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: language.setup.submit }));
   }
@@ -373,7 +391,7 @@ describe("setup", () => {
         session = ENROLLMENT;
         return { token: "t", user: USER };
       },
-      "POST /api/auth/two-factor/enable": { totpURI: TOTP_URI, backupCodes: ["one-1", "two-2"] },
+      "POST /api/auth/two-factor/enable": { totpURI: TOTP_URI, backupCodes: [BACKUP_ONE, BACKUP_TWO] },
     });
     renderAdmin(createI18n("en"));
     await fill(en);
@@ -382,7 +400,7 @@ describe("setup", () => {
       name: "shlomi",
       username: "shlomi",
       email: "admin@example.test",
-      password: "a long password",
+      password: PASSWORD,
     });
     // The password typed at setup starts the enrollment without asking again.
     expect(await screen.findByRole("img", { name: en.totp.qrAlt })).toBeTruthy();
@@ -410,32 +428,32 @@ describe("setup", () => {
 
 describe("TOTP enrollment", () => {
   it("shows a QR code drawn locally, the manual key, and the backup codes once", async () => {
-    rememberPassword("a long password");
+    rememberPassword(PASSWORD);
     const calls = serve(
       boot(false, ENROLLMENT, {
         "POST /api/auth/two-factor/enable": {
           totpURI: TOTP_URI,
-          backupCodes: ["backup-one", "backup-two"],
+          backupCodes: [BACKUP_ONE, BACKUP_TWO],
         },
       }),
     );
     renderAdmin(createI18n("en"));
     const qr = (await screen.findByRole("img", { name: en.totp.qrAlt })) as HTMLImageElement;
     expect(qr.src).toMatch(/^data:image\/svg\+xml/);
-    expect(screen.getByText("JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP")).toBeTruthy();
+    expect(screen.getByText(TOTP_SECRET.match(/.{4}/g)?.join(" ") ?? "")).toBeTruthy();
     expect(calls.find((call) => call.path === "/api/auth/two-factor/enable")?.body).toMatchObject({
-      password: "a long password",
+      password: PASSWORD,
     });
     expect(screen.getByRole("heading", { level: 2, name: en.backupCodes.heading })).toBeTruthy();
-    expect(screen.getByText("backup-one")).toBeTruthy();
-    expect(screen.getByText("backup-two")).toBeTruthy();
+    expect(screen.getByText(BACKUP_ONE)).toBeTruthy();
+    expect(screen.getByText(BACKUP_TWO)).toBeTruthy();
   });
 
   it("has only locale text besides the codes", async () => {
-    rememberPassword("a long password");
+    rememberPassword(PASSWORD);
     serve(
       boot(false, ENROLLMENT, {
-        "POST /api/auth/two-factor/enable": { totpURI: TOTP_URI, backupCodes: ["backup-one"] },
+        "POST /api/auth/two-factor/enable": { totpURI: TOTP_URI, backupCodes: [BACKUP_ONE] },
       }),
     );
     const { container } = renderAdmin(createI18n("he", pseudoResources()));
@@ -482,7 +500,7 @@ describe("forgot and reset password", () => {
     await screen.findByRole("heading", { level: 1, name: language.reset.heading });
     for (const label of [language.reset.password, language.reset.confirm]) {
       fireEvent.change(screen.getByLabelText(label), {
-        target: { value: "a brand new passphrase" },
+        target: { value: NEW_PASSWORD },
       });
     }
     fireEvent.click(screen.getByRole("button", { name: language.reset.submit }));
@@ -512,7 +530,7 @@ describe("forgot and reset password", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/admin/sign-in"));
     expect(calls.find((call) => call.path === "/api/auth/reset-password")?.body).toEqual({
       token: "link-token",
-      newPassword: "a brand new passphrase",
+      newPassword: NEW_PASSWORD,
     });
   });
 
@@ -561,16 +579,16 @@ describe("account page", () => {
       boot(false, FULL, {
         "POST /api/auth/two-factor/generate-backup-codes": {
           status: true,
-          backupCodes: ["fresh-one", "fresh-two"],
+          backupCodes: [FRESH_ONE, FRESH_TWO],
         },
       }),
     );
     renderAdmin(createI18n("en"));
     fireEvent.change(await screen.findByLabelText(en.account.password), {
-      target: { value: "a long password" },
+      target: { value: PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: en.account.generateBackup }));
-    expect(await screen.findByText("fresh-one")).toBeTruthy();
+    expect(await screen.findByText(FRESH_ONE)).toBeTruthy();
   });
 });
 
@@ -1017,12 +1035,12 @@ describe("management pages", () => {
     );
     renderAdmin(createI18n("he"));
     fireEvent.change(await screen.findByLabelText(he.settings.smtpPassword), {
-      target: { value: "mail secret" },
+      target: { value: SMTP_PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: he.settings.save }));
     expect((await screen.findByRole("alert")).textContent).toBe(he.errors.settingInvalid);
     expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({
-      smtpPassword: "mail secret",
+      smtpPassword: SMTP_PASSWORD,
     });
   });
 
