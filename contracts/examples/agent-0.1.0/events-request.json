@@ -1,0 +1,32 @@
+{
+  "summary": "sendEvents request sent by agent 0.1.0",
+  "value": {
+    "events": [
+      {
+        "id": "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+        "kind": "connectivity_lost",
+        "bootId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "syncId": "q3Zk1Yb8T0mW2xRf9Lp4sA",
+        "elapsedMs": 42000
+      },
+      {
+        "id": "6e2d3c4b-5f6a-4b7c-9d8e-0f1a2b3c4d5e",
+        "kind": "connectivity_restored",
+        "bootId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "syncId": "q3Zk1Yb8T0mW2xRf9Lp4sA",
+        "elapsedMs": 318000
+      },
+      {
+        "id": "7f3e4d5c-6a7b-4c8d-ae9f-1a2b3c4d5e6f",
+        "kind": "resume",
+        "bootId": "2b4c6d8e-0a1b-4c3d-8e5f-6a7b8c9d0e1f",
+        "syncId": null,
+        "elapsedMs": null
+      }
+    ],
+    "droppedEvents": {
+      "bootId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "count": 3
+    }
+  }
+}

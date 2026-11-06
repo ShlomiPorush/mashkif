@@ -86,7 +86,39 @@ internal sealed class AgentApiClient(HttpClient http, Uri origin, TimeProvider t
             static r => !string.IsNullOrEmpty(r.SyncId) && r.NextIntervalSeconds > 0 && r.ServerTime != default,
             cancellationToken);
 
-    private async Task<ApiResult<TResponse>> SendAsync<TRequest, TResponse>(
+    /// <summary>
+    /// Sends events. The caller checks that the results match the request
+    /// one by one; a 2xx without a <c>results</c> array is a bad body.
+    /// </summary>
+    public Task<ApiResult<EventsResponse>> EventsAsync(EventsRequest request, string token, CancellationToken cancellationToken) =>
+        SendAsync(
+            "api/agent/events",
+            request,
+            ProtocolJsonContext.Default.EventsRequest,
+            ProtocolJsonContext.Default.EventsResponse,
+            token,
+            static r => r.Results is not null,
+            cancellationToken);
+
+    /// <summary>Time the connectivity check may take.</summary>
+    public static readonly TimeSpan HealthTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// The connectivity check: <c>GET /api/agent/health</c> without a token.
+    /// Success shows only that the Mashkif server answers.
+    /// </summary>
+    public Task<ApiResult<HealthResponse>> HealthAsync(CancellationToken cancellationToken) =>
+        SendCoreAsync(
+            HttpMethod.Get,
+            "api/agent/health",
+            content: null,
+            ProtocolJsonContext.Default.HealthResponse,
+            token: null,
+            static r => r.Status == "ok",
+            HealthTimeout,
+            cancellationToken);
+
+    private Task<ApiResult<TResponse>> SendAsync<TRequest, TResponse>(
         string path,
         TRequest body,
         JsonTypeInfo<TRequest> requestInfo,
@@ -94,14 +126,26 @@ internal sealed class AgentApiClient(HttpClient http, Uri origin, TimeProvider t
         string? token,
         Func<TResponse, bool> isValid,
         CancellationToken cancellationToken)
+        where TResponse : class =>
+        SendCoreAsync(HttpMethod.Post, path, JsonContent.Create(body, requestInfo), responseInfo, token, isValid, AttemptTimeout, cancellationToken);
+
+    private async Task<ApiResult<TResponse>> SendCoreAsync<TResponse>(
+        HttpMethod method,
+        string path,
+        HttpContent? content,
+        JsonTypeInfo<TResponse> responseInfo,
+        string? token,
+        Func<TResponse, bool> isValid,
+        TimeSpan attemptTimeout,
+        CancellationToken cancellationToken)
         where TResponse : class
     {
         var started = time.GetTimestamp();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(AttemptTimeout);
-        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(origin, path))
+        timeout.CancelAfter(attemptTimeout);
+        using var request = new HttpRequestMessage(method, new Uri(origin, path))
         {
-            Content = JsonContent.Create(body, requestInfo),
+            Content = content,
         };
         request.Headers.Add(ProtocolConstants.ProtocolVersionHeader, ProtocolConstants.ProtocolVersion.ToString(CultureInfo.InvariantCulture));
         if (token is not null)
@@ -126,10 +170,10 @@ internal sealed class AgentApiClient(HttpClient http, Uri origin, TimeProvider t
         using (response)
         {
             var status = (int)response.StatusCode;
-            byte[] content;
+            byte[] received;
             try
             {
-                content = await response.Content.ReadAsByteArrayAsync(timeout.Token).ConfigureAwait(false);
+                received = await response.Content.ReadAsByteArrayAsync(timeout.Token).ConfigureAwait(false);
             }
             catch (HttpRequestException)
             {
@@ -143,7 +187,7 @@ internal sealed class AgentApiClient(HttpClient http, Uri origin, TimeProvider t
             var elapsed = time.GetElapsedTime(started);
             if (response.IsSuccessStatusCode)
             {
-                var value = TryParse(content, responseInfo);
+                var value = TryParse(received, responseInfo);
                 return value is not null && isValid(value)
                     ? new ApiResult<TResponse> { Outcome = ApiOutcome.Success, StatusCode = status, Value = value, Elapsed = elapsed }
                     : new ApiResult<TResponse> { Outcome = ApiOutcome.Status, StatusCode = status, BadBody = true, Elapsed = elapsed };
@@ -153,7 +197,7 @@ internal sealed class AgentApiClient(HttpClient http, Uri origin, TimeProvider t
             {
                 Outcome = ApiOutcome.Status,
                 StatusCode = status,
-                ErrorCode = TryParse(content, ProtocolJsonContext.Default.ErrorBody)?.Error,
+                ErrorCode = TryParse(received, ProtocolJsonContext.Default.ErrorBody)?.Error,
                 RetryAfter = response.StatusCode == HttpStatusCode.TooManyRequests ? RetryAfterOf(response) : null,
                 Elapsed = elapsed,
             };

@@ -23,6 +23,10 @@ internal sealed class StateStore(string productDirectory, string stateDirectory,
         return new StateStore(product, Path.Combine(product, "state"), PathPolicy.Production());
     }
 
+    public string StateDirectory => stateDirectory;
+
+    public PathPolicy Policy => policy;
+
     public string FilePath => Path.Combine(stateDirectory, FileName);
 
     public string TempPath => Path.Combine(stateDirectory, TempFileName);
@@ -77,9 +81,21 @@ internal sealed class StateStore(string productDirectory, string stateDirectory,
             return new StateLoad(null, $"{FilePath} cannot be read: access denied");
         }
 
-        if (state is null || state.SchemaVersion != AgentState.CurrentSchemaVersion)
+        if (state is null || state.SchemaVersion is not (AgentState.CurrentSchemaVersion or AgentState.PreviousSchemaVersion))
         {
             return new StateLoad(null, $"{FilePath} has an unknown schema version");
+        }
+
+        if (state.SchemaVersion == AgentState.PreviousSchemaVersion)
+        {
+            // Version 1 (0.1.0 before step 2c) has none of the version 2 fields;
+            // the migration only raises the version, and the next save writes it.
+            if (state.LastSync is not null || state.DeferredUntilUtc is not null || state.DeferredSeconds is not null)
+            {
+                return new StateLoad(null, $"{FilePath} is not consistent");
+            }
+
+            state = state with { SchemaVersion = AgentState.CurrentSchemaVersion };
         }
 
         return state.IsValid() ? new StateLoad(state, null) : new StateLoad(null, $"{FilePath} is not consistent");

@@ -117,13 +117,25 @@ internal static class PathSecurity
             return problem;
         }
 
-        var file = new FileInfo(stateFile);
+        return CheckStateFile(stateFile, policy);
+    }
+
+    /// <summary>
+    /// Returns null when a file of the state directory is absent or safe (no
+    /// reparse point, an expected owner, and only SYSTEM, Administrators, and
+    /// the service SID with access), or a description of the first failed check.
+    /// The queue files are checked like <c>state.json</c>.
+    /// </summary>
+    public static string? CheckStateFile(string path, PathPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        var file = new FileInfo(path);
         if (!file.Exists)
         {
             return null;
         }
 
-        problem = CheckReparse(file);
+        var problem = CheckReparse(file);
         if (problem is not null)
         {
             return problem;
@@ -133,10 +145,10 @@ internal static class PathSecurity
         var owner = fileAcl.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
         if (owner is null || !policy.FileOwners.Contains(owner))
         {
-            return $"{stateFile} has an unexpected owner {owner?.Value ?? "(none)"}";
+            return $"{path} has an unexpected owner {owner?.Value ?? "(none)"}";
         }
 
-        return CheckRules(fileAcl, stateFile, onlyFull: [PathPolicy.LocalSystem, PathPolicy.Administrators, policy.ServiceSid], readOnlyAllowed: false, requireOwnerRights: true);
+        return CheckRules(fileAcl, path, onlyFull: [PathPolicy.LocalSystem, PathPolicy.Administrators, policy.ServiceSid], readOnlyAllowed: false, requireOwnerRights: true);
     }
 
     private static string? CheckReparse(FileSystemInfo info) =>

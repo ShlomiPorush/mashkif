@@ -29,7 +29,9 @@ sides derive their types from it. This directory is licensed under MIT (see
 | `getAgentHealth` | `GET /api/agent/health` | The agent checks that the server is up and accepts its protocol version. |
 | `registerAgent` | `POST /api/agent/register` | Open registration: the agent registers by itself, without a key. It generates its install ID and token and saves them before the request; a retry with the same install ID and token succeeds again. The admin can close registration for new agents. |
 | `sendHeartbeat` | `POST /api/agent/heartbeat` | Bearer token. Reports that the agent is up, with its area cell, infrastructure, interval, and latency; the answer carries a new sync ID (also for a retry), the server time, and the next interval. |
-| `sendEvents` | `POST /api/agent/events` | Bearer token. Delivers events, also those recorded offline, timed by sync ID and monotonic elapsed time; one result per event, `deferred` past the hourly event budget. |
+| `sendEvents` | `POST /api/agent/events` | Bearer token. Delivers events, also those recorded offline, timed by sync ID and monotonic elapsed time; one result per event, `deferred` past the hourly event budget. The agent sends connectivity lost and restored, sleep, resume, shutdown, and service stop. |
+
+The request examples in `examples/agent-<version>/` are what that agent build sends; the register example holds a placeholder token that never authenticates, and the server replay test registers a random token of its own on every run.
 
 Stable error codes are listed in `AgentErrorCode`. Limits: 64 KB per body, 500 events per request, an event budget per agent and hour, rate limits with 429 and `Retry-After`.
 
