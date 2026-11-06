@@ -233,6 +233,16 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     }
 
     /// <summary>The cumulative dropped count of a boot, for tests and the status.</summary>
+    /// <summary>The queue's own dropped count of a boot and its count from state.json.</summary>
+    public (long Own, long External) DroppedParts(Guid bootId)
+    {
+        lock (_gate)
+        {
+            var boot = _boots.FirstOrDefault(b => b.BootId == bootId);
+            return (boot?.Total ?? 0, boot?.External ?? 0);
+        }
+    }
+
     public long DroppedCount(Guid bootId)
     {
         lock (_gate)
@@ -437,12 +447,12 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
     }
 
     /// <summary>Records the dropped count of a boot that the server confirmed with a 200.</summary>
-    public void ConfirmDropped(DroppedEvents confirmed, QueueBinding? expected = null)
+    public bool ConfirmDropped(DroppedEvents confirmed, QueueBinding? expected = null)
     {
         ArgumentNullException.ThrowIfNull(confirmed);
         if (!Matches(expected))
         {
-            return;
+            return false;
         }
 
         var binding = RequireBinding();
@@ -459,6 +469,9 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
         }
 
         CompactIfNeeded();
+
+        // Whether the confirmation is on disk (not at the file bound, R9).
+        return sizes is not null;
     }
 
     /// <summary>
@@ -808,7 +821,9 @@ internal sealed class EventQueue(string stateDirectory, PathPolicy policy)
             }
 
             // A past boot whose count the server confirmed in full cannot grow any more; the current boot can.
-            _boots.RemoveAll(b => b.Confirmed >= b.Reported && b.BootId != _currentBoot);
+            // A boot that still has rejections in state.json keeps its summary (R9): otherwise a
+            // restart would bring that count back without the confirmation and send it again.
+            _boots.RemoveAll(b => b.Confirmed >= b.Reported && b.BootId != _currentBoot && b.External == 0);
         }
     }
 

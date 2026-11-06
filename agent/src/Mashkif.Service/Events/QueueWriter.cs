@@ -59,7 +59,10 @@ internal sealed class QueueWriter(EventQueue queue)
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // Writes posted during a stop still run, so a shutdown record is not left behind.
+            // No write is accepted after the stop: a later Post fails at once instead of
+            // waiting forever, so nothing that awaits a write can hold the stop. Writes
+            // posted before it still run, so a shutdown record is not left behind.
+            _work.Writer.TryComplete();
             while (_work.Reader.TryRead(out var write))
             {
                 write();

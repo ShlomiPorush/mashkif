@@ -491,6 +491,121 @@ public sealed class ResilienceTests
         Assert.Equal(15, last["count"]!.GetValue<long>());
     }
 
+    /// <summary>Boot A as R8 and R9 describe it: 5 drops in the queue and 10 rejections in state.json, none acknowledged.</summary>
+    private static Guid SeedBootWithRejections(EventsFixture f)
+    {
+        var bootA = f.BootId;
+        var queueA = new EventQueue(f.State.StateDirectory, f.State.Policy) { Capacity = 1 };
+        Assert.Null(queueA.Load(new QueueBinding(EngineFixture.InstallId, EngineFixture.Origin), bootA, f.Time.GetUtcNow(), f.Time.GetTimestamp(), f.Time.TimestampFrequency));
+        for (var i = 0; i < 6; i++)
+        {
+            queueA.Append(new QueuedEvent(new AgentEvent { Id = Guid.NewGuid(), Kind = EventKinds.Resume, BootId = bootA, SyncId = null, ElapsedMs = null }, f.Time.GetUtcNow(), f.Time.GetTimestamp()), bootA, f.Time.GetUtcNow(), f.Time.GetTimestamp(), f.Time.TimestampFrequency);
+        }
+
+        f.Seed(EngineFixture.Registered() with { QueueRejected = [new DroppedEvents { BootId = bootA, Count = 10 }] });
+        f.BootId = Guid.NewGuid(); // the later boot
+        return bootA;
+    }
+
+    private static bool FileMentions(EventsFixture f, Guid boot)
+    {
+        try
+        {
+            using var stream = new FileStream(f.Queue.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd().Contains(boot.ToString(), StringComparison.Ordinal);
+        }
+        catch (IOException)
+        {
+            return true; // replaced at this moment; read again
+        }
+    }
+
+    /// <summary>Sends and removes new events until a compaction ran after <paramref name="boot"/> left memory.</summary>
+    private static Task CompactUntilGoneAsync(EventsFixture f, AgentEngine engine, Guid boot) =>
+        UntilAsync(
+            f,
+            () =>
+            {
+                if (!FileMentions(f, boot))
+                {
+                    return true;
+                }
+
+                engine.Resume();
+                return false;
+            },
+            "a compaction without the boot",
+            TimeSpan.FromSeconds(5));
+
+    private static IEnumerable<JsonNode> CountsFor(EventsFixture f, Guid boot, int after) =>
+        Bodies(f).Skip(after).Select(b => b["droppedEvents"]).Where(d => d is not null && d["bootId"]!.GetValue<string>() == boot.ToString()).Select(d => d!);
+
+    [Fact]
+    public async Task An_acknowledged_count_with_rejections_is_never_sent_again_after_compactions_and_restarts()
+    {
+        using var f = new EventsFixture();
+        var bootA = SeedBootWithRejections(f);
+        var engine = f.Start(capacity: 1);
+        await UntilAsync(f, () => f.Queue.NextDroppedCount() is null && engine.State.QueueRejected is null, "15 acknowledged and the entry removed");
+        Assert.Equal(15, CountsFor(f, bootA, 0).Last()["count"]!.GetValue<long>());
+        var acknowledged = f.Handler.Events.Count;
+
+        // A restart (the compaction at load) and a compaction while running: A leaves the file.
+        await f.StopAllAsync();
+        engine = f.Start(capacity: 1);
+        await UntilAsync(f, () => engine.State.LastSync is not null, "running", TimeSpan.FromMilliseconds(1));
+        await CompactUntilGoneAsync(f, engine, bootA);
+
+        await f.StopAllAsync();
+        engine = f.Start(capacity: 1);
+        await UntilAsync(f, () => engine.State.LastSync is not null && f.Queue.Pending.Count == 0, "running again");
+        f.Time.Advance(TimeSpan.FromMinutes(2));
+        await UntilAsync(f, () => f.Queue.NextDroppedCount() is null, "nothing left to report");
+
+        Assert.Empty(CountsFor(f, bootA, acknowledged));
+        Assert.Null(engine.State.QueueRejected);
+        Assert.Equal(0, f.Queue.DroppedCount(bootA));
+    }
+
+    [Fact]
+    public async Task When_removing_the_entry_fails_the_summary_stays_and_nothing_is_sent_again()
+    {
+        using var f = new EventsFixture();
+        var bootA = SeedBootWithRejections(f);
+
+        // Every state write that would drop queueRejected fails; the others go through.
+        var engine = f.Start(capacity: 1, configure: (store, _) => store.BeforeReplace = () =>
+        {
+            // A write without a queueRejected array (the field written as null) is the removal.
+            if (!System.Text.RegularExpressions.Regex.IsMatch(File.ReadAllText(store.TempPath), @"""queueRejected"":\s*\["))
+            {
+                throw new IOException("state.json cannot be written");
+            }
+        });
+        await UntilAsync(f, () => f.Queue.NextDroppedCount() is null && f.Handler.Events.Count > 0, "15 acknowledged");
+        Assert.Equal(10, engine.State.QueueRejected!.Single().Count);
+        var acknowledged = f.Handler.Events.Count;
+
+        // Compactions while running keep A's summary as long as its entry is in state.json.
+        for (var i = 0; i < 10; i++)
+        {
+            engine.Resume();
+            f.Time.Advance(TimeSpan.FromSeconds(5));
+            await UntilAsync(f, () => f.Queue.Pending.Count == 0, "sent", TimeSpan.FromSeconds(1));
+        }
+
+        Assert.True(FileMentions(f, bootA));
+        await f.StopAllAsync();
+        engine = f.Start(capacity: 1);
+        Assert.Equal(15, f.Queue.DroppedCount(bootA));
+        Assert.NotEqual(bootA, f.Queue.NextDroppedCount()?.BootId); // A is confirmed; only the drops of this run may wait
+        await UntilAsync(f, () => engine.State.LastSync is not null, "running", TimeSpan.FromMilliseconds(1));
+        f.Time.Advance(TimeSpan.FromMinutes(2));
+        await UntilAsync(f, () => f.Queue.NextDroppedCount() is null && f.Queue.Pending.Count == 0, "idle");
+        Assert.Empty(CountsFor(f, bootA, acknowledged));
+    }
+
     // Review R2: expiry while the service keeps running.
 
     [Fact]

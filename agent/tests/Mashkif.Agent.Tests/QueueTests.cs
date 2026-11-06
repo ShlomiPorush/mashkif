@@ -308,6 +308,21 @@ public sealed class QueueTests : IDisposable
     }
 
     [Fact]
+    public async Task A_write_posted_after_the_writer_stopped_fails_at_once_instead_of_waiting()
+    {
+        var writer = new QueueWriter(Open());
+        using var stop = new CancellationTokenSource();
+        var run = writer.RunAsync(stop.Token);
+        await writer.Post(_ => { });
+        await stop.CancelAsync();
+        await run;
+
+        // Before, this waited forever, so a sender awaiting it held the service stop.
+        var late = writer.Post(_ => { });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => late.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public void Removed_events_are_not_loaded_again()
     {
         var queue = Open();

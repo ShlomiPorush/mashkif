@@ -308,7 +308,9 @@ internal sealed partial class AgentEngine
 
             List<DroppedEvents> rejected = [.. _state.QueueRejected ?? []];
             var index = rejected.FindIndex(r => r.BootId == boot);
-            count = (index >= 0 ? rejected[index].Count : 0) + 1;
+            // Cumulative per boot: also after an acknowledged entry was removed (R9), the queue still
+            // holds the count of this run, so the next one grows from it.
+            count = Math.Max(index >= 0 ? rejected[index].Count : 0, _writer!.Queue.DroppedParts(boot).External) + 1;
             var entry = new DroppedEvents { BootId = boot, Count = count };
             if (index >= 0)
             {
@@ -332,6 +334,32 @@ internal sealed partial class AgentEngine
         }
 
         _writer!.Queue.SetExternalDropped(boot, count);
+    }
+
+    /// <summary>
+    /// After the server acknowledged a boot's total and that confirmation is on disk:
+    /// when the total covers the boot's own count and its rejections in state.json,
+    /// the entry is removed from state.json (R9), under the same binding check as R7.
+    /// Until that write succeeds, compaction keeps the boot's summary.
+    /// </summary>
+    private void ForgetAcknowledgedRejections(DroppedEvents confirmed, QueueBinding binding)
+    {
+        lock (_gate)
+        {
+            if (BindingLocked() != binding || _state.QueueRejected is not { } rejected)
+            {
+                return;
+            }
+
+            var entry = rejected.FirstOrDefault(r => r.BootId == confirmed.BootId);
+            if (entry is null || confirmed.Count < _writer!.Queue.DroppedParts(confirmed.BootId).Own + entry.Count)
+            {
+                return;
+            }
+
+            List<DroppedEvents> left = [.. rejected.Where(r => r.BootId != confirmed.BootId)];
+            TrySave(_state with { QueueRejected = left.Count == 0 ? null : left });
+        }
     }
 
     // Connectivity.
@@ -597,7 +625,10 @@ internal sealed partial class AgentEngine
 
         if (step.Kind == StepKind.Done && request.DroppedEvents is { } confirmed)
         {
-            await _writer.Post(q => q.ConfirmDropped(confirmed, binding)).ConfigureAwait(false);
+            if (await _writer.Post(q => q.ConfirmDropped(confirmed, binding)).ConfigureAwait(false))
+            {
+                ForgetAcknowledgedRejections(confirmed, binding);
+            }
         }
 
         return step;
