@@ -76,10 +76,14 @@ describe("BETTER_AUTH_SECRET", () => {
 });
 
 describe("DATABASE_URL password", () => {
-  const refused = /DATABASE_URL needs a database password other than the \.env\.example placeholder/;
+  const refused =
+    /DATABASE_URL needs a database password other than the \.env\.example placeholder/;
 
   it.each([
-    ["the .env.example placeholder", `postgres://mashkif:${ENV_EXAMPLE_PLACEHOLDER}@db:5432/mashkif`],
+    [
+      "the .env.example placeholder",
+      `postgres://mashkif:${ENV_EXAMPLE_PLACEHOLDER}@db:5432/mashkif`,
+    ],
     ["the encoded placeholder", "postgres://mashkif:change%2Dme@db:5432/mashkif"],
     ["an empty password", "postgres://mashkif:@db:5432/mashkif"],
     ["no password", "postgres://mashkif@db:5432/mashkif"],
