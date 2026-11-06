@@ -391,7 +391,10 @@ describe("setup", () => {
         session = ENROLLMENT;
         return { token: "t", user: USER };
       },
-      "POST /api/auth/two-factor/enable": { totpURI: TOTP_URI, backupCodes: [BACKUP_ONE, BACKUP_TWO] },
+      "POST /api/auth/two-factor/enable": {
+        totpURI: TOTP_URI,
+        backupCodes: [BACKUP_ONE, BACKUP_TWO],
+      },
     });
     renderAdmin(createI18n("en"));
     await fill(en);
