@@ -110,6 +110,14 @@ internal static class CleanupLogic
         return (file, [.. arguments, "/norestart"]);
     }
 
+    /// <summary>
+    /// The msiexec arguments with /norestart appended unless they have it.
+    /// A quiet msiexec run without it restarts the PC by itself when a
+    /// restart is needed, which takes the runner down with the test.
+    /// </summary>
+    public static string[] MsiexecArguments(IReadOnlyList<string> arguments) =>
+        arguments.Contains("/norestart", StringComparer.OrdinalIgnoreCase) ? [.. arguments] : [.. arguments, "/norestart"];
+
     /// <summary>Splits a command line whose first token may be a quoted path.</summary>
     public static (string File, string[] Arguments) SplitCommandLine(string commandLine)
     {

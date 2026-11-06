@@ -33,6 +33,9 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
     private static readonly string StateFile = Path.Combine(StateDirectory, "state.json");
     private static readonly string ServiceLog = Path.Combine(InstallSafetyGate.ProductDirectory, "logs", "service.log");
 
+    /// <summary>How long one status request may wait for the service's answer.</summary>
+    private static readonly TimeSpan StatusTimeout = TimeSpan.FromSeconds(10);
+
     [Fact]
     public async Task Install_registers_by_itself_and_repair_upgrade_and_uninstall_keep_the_identity_and_the_ACLs()
     {
@@ -49,7 +52,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
 
             // 1. Install with no property but the loopback server: the service registers by itself.
             var installLog = Path.Combine(logs, "install.log");
-            Msiexec("/i", msi, $"SERVER_URL={api.Origin}", "/qn", "/l*v", installLog);
+            Msiexec("/i", msi, $"SERVER_URL={api.Origin}", "/qn", "/norestart", "/l*v", installLog);
 
             // 2. Service SID type and ACLs.
             Assert.Contains("UNRESTRICTED", Run("sc.exe", "qsidtype", "Mashkif"), StringComparison.Ordinal);
@@ -85,14 +88,14 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
             //    ID, and the identity stay, SERVER_URL is remembered, and the PC
             //    never registers again.
             var repairLog = Path.Combine(logs, "repair.log");
-            Msiexec("/fa", msi, "/qn", "/l*v", repairLog);
+            Msiexec("/fa", msi, "/qn", "/norestart", "/l*v", repairLog);
             await WaitForStatusAsync(AgentStates.Connected);
             AssertAcls();
             Assert.Equal(identity, Identity());
 
             var oldProducts = ProductInstallation.GetRelatedProducts(InstallSafetyGate.UpgradeCode).Select(p => p.ProductCode).ToList();
             var upgradeLog = Path.Combine(logs, "upgrade.log");
-            Msiexec("/i", upgradeMsi, "/qn", "/l*v", upgradeLog);
+            Msiexec("/i", upgradeMsi, "/qn", "/norestart", "/l*v", upgradeLog);
             await WaitForStatusAsync(AgentStates.Connected);
             Assert.All(oldProducts, code => Assert.False(new ProductInstallation(code).IsInstalled));
             var installed = ProductInstallation.GetRelatedProducts(InstallSafetyGate.UpgradeCode).Single();
@@ -105,7 +108,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
 
             // 6. Uninstall: the service and the registry keys go, the state stays.
             var uninstallLog = Path.Combine(logs, "uninstall.log");
-            Msiexec("/x", installed.ProductCode, "/qn", "/l*v", uninstallLog);
+            Msiexec("/x", installed.ProductCode, "/qn", "/norestart", "/l*v", uninstallLog);
             await WaitUntilAsync(() => !ServiceExists(), "the service is removed");
             using (var machine = Hklm())
             using (var product = machine.OpenSubKey(InstallSafetyGate.ProductRegistryKey))
@@ -219,6 +222,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(90);
         AgentStatus? last = null;
+        string? lastError = null;
         while (DateTime.UtcNow < deadline)
         {
             try
@@ -231,21 +235,23 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
             }
             catch (Exception exception) when (exception is IOException or TimeoutException or UnauthorizedAccessException)
             {
+                lastError = $"{exception.GetType().Name}: {exception.Message}";
             }
 
             await Task.Delay(1000);
         }
 
-        Assert.Fail($"The service did not reach {state}; last status {last}");
+        Assert.Fail($"The service did not reach {state}; last status {last}; last error {lastError ?? "none"}");
     }
 
+    /// <summary>A client end with the tray's rights; asynchronous, so a read can be cancelled.</summary>
     private static NamedPipeClientStream ConnectWithClientRights()
     {
         var pipe = new NamedPipeClientStream(
             ".",
             PipeProtocol.PipeName,
             PipeAccessRights.ReadData | PipeAccessRights.WriteData | PipeAccessRights.ReadAttributes | PipeAccessRights.Synchronize,
-            PipeOptions.None,
+            PipeOptions.Asynchronous,
             TokenImpersonationLevel.Identification,
             HandleInheritability.None);
         pipe.Connect(5000);
@@ -258,13 +264,26 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
         pipe.Connect(5000);
     }
 
-    /// <summary>One status request over the pipe, synchronously (it may run impersonated).</summary>
+    /// <summary>
+    /// One status request over the pipe, synchronously (it may run
+    /// impersonated). A service that accepts the connection but does not
+    /// answer within StatusTimeout is a TimeoutException, never a wait
+    /// without a bound.
+    /// </summary>
     private static AgentStatus? Status()
     {
         using var pipe = ConnectWithClientRights();
-        PipeLines.WriteLineAsync(pipe, new PipeRequest { Command = PipeProtocol.StatusCommand }, PipeJsonContext.Default.PipeRequest, CancellationToken.None).GetAwaiter().GetResult();
-        var line = PipeLines.ReadLineAsync(pipe, PipeProtocol.MaxResponseBytes, CancellationToken.None).GetAwaiter().GetResult();
-        return PipeLines.Parse(line, PipeJsonContext.Default.PipeResponse)?.Status;
+        using var timeout = new CancellationTokenSource(StatusTimeout);
+        try
+        {
+            PipeLines.WriteLineAsync(pipe, new PipeRequest { Command = PipeProtocol.StatusCommand }, PipeJsonContext.Default.PipeRequest, timeout.Token).GetAwaiter().GetResult();
+            var line = PipeLines.ReadLineAsync(pipe, PipeProtocol.MaxResponseBytes, timeout.Token).GetAwaiter().GetResult();
+            return PipeLines.Parse(line, PipeJsonContext.Default.PipeResponse)?.Status;
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            throw new TimeoutException($"The service accepted the pipe connection but did not answer within {StatusTimeout.TotalSeconds} seconds");
+        }
     }
 
     private const int LogonInteractive = 2;
