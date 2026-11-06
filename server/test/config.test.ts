@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import postgres from "postgres";
 import { describe, expect, it } from "vitest";
 import { ConfigError, DEFAULT_PORT, ENV_EXAMPLE_PLACEHOLDER, loadConfig } from "../src/config.js";
 import { parsePublicUrl } from "../src/settings.js";
@@ -89,7 +90,6 @@ describe("DATABASE_URL password", () => {
       "the placeholder with several hosts",
       "postgres://mashkif:change-me@db1:5432,db2:5432/mashkif",
     ],
-    ["the placeholder with a Unix socket", "postgres://mashkif:change-me@/mashkif?host=/run/pg"],
     ["an empty password", "postgres://mashkif:@db:5432/mashkif"],
     ["no password", "postgres://mashkif@db:5432/mashkif"],
     ["no userinfo", "postgres://db:5432/mashkif?application_name=a:b@c"],
@@ -104,28 +104,79 @@ describe("DATABASE_URL password", () => {
     }
   });
 
-  // Forms that postgres.js accepts; none of them may stop working.
+  // The check must see the password that postgres.js sends. Each URL is also
+  // given to the driver itself, which parses it without connecting, so a
+  // change in the driver's parsing fails here.
+  const random = randomBytes(32).toString("hex");
   it.each([
-    ["one host", (p: string) => `postgres://mashkif:${p}@db:5432/mashkif`],
-    ["several hosts", (p: string) => `postgres://mashkif:${p}@db1:5432,db2:5432/mashkif`],
-    ["a Unix socket", (p: string) => `postgres://mashkif:${p}@/mashkif?host=/var/run/postgresql`],
-    ["IPv6", (p: string) => `postgresql://mashkif:${p}@[::1]:5432/mashkif`],
-    ["sslmode", (p: string) => `postgres://mashkif:${p}@db:5432/mashkif?sslmode=require`],
-    ["percent-encoded / @ :", (p: string) => `postgres://mashkif:${p}%2F%40%3A@db:5432/mashkif`],
-  ])("accepts a random password with %s", (_name, urlWith) => {
-    const url = urlWith(randomBytes(32).toString("hex"));
-    expect(loadConfig({ ...valid, DATABASE_URL: url }).databaseUrl).toBe(url);
+    ["one host", `postgres://mashkif:${random}@db:5432/mashkif`, "accepted"],
+    ["several hosts", `postgres://mashkif:${random}@db1:5432,db2:5432/mashkif`, "accepted"],
+    // postgres.js 3.4.9 itself throws Invalid URL for an empty host, so the
+    // server cannot start with this form either way.
+    [
+      "a Unix socket and an empty host",
+      `postgres://mashkif:${random}@/mashkif?host=/var/run/postgresql`,
+      "unreadable",
+    ],
+    [
+      "a percent-encoded socket host",
+      `postgres://mashkif:${random}@%2Frun%2Fpg/mashkif`,
+      "accepted",
+    ],
+    ["IPv6", `postgresql://mashkif:${random}@[::1]:5432/mashkif`, "accepted"],
+    ["sslmode", `postgres://mashkif:${random}@db:5432/mashkif?sslmode=require`, "accepted"],
+    ["percent-encoded / @ :", `postgres://mashkif:${random}%2F%40%3A@db:5432/mashkif`, "accepted"],
+    [
+      "an unencoded @ after the placeholder",
+      `postgres://mashkif:change-me@${random}@db/mashkif`,
+      "accepted",
+    ],
+    [
+      "an unencoded @ before the placeholder",
+      `postgres://mashkif:${random}@change-me@db/mashkif`,
+      "accepted",
+    ],
+    [
+      "a TAB inside a random password",
+      `postgres://mashkif:${random}\t${random}@db/mashkif`,
+      "accepted",
+    ],
+    ["a TAB inside the placeholder", "postgres://mashkif:change-\tme@db/mashkif", "refused"],
+    ["a newline inside the placeholder", "postgres://mashkif:change-\nme@db/mashkif", "refused"],
+    [
+      "a carriage return inside the placeholder",
+      "postgres://mashkif:chan\rge-me@db/mashkif",
+      "refused",
+    ],
+    ["a leading control character", "\u0001postgres://mashkif:change-me@db/mashkif", "refused"],
+    ["a trailing control character", "postgres://mashkif:change-me@db/mashkif\u001f", "refused"],
+  ])("with %s, matches the driver's own parsing", async (_name, url, expected) => {
+    const config = () => loadConfig({ ...valid, DATABASE_URL: url });
+    if (expected === "unreadable") {
+      expect(() => postgres(url)).toThrow();
+      expect(config).toThrow(/DATABASE_URL is not a URL the PostgreSQL client can read/);
+      return;
+    }
+    const sql = postgres(url, { max: 1, onnotice: () => {} });
+    const driverPassword = (sql.options as unknown as { pass: string }).pass;
+    await sql.end({ timeout: 0 });
+    if (expected === "refused") {
+      expect(driverPassword).toBe(ENV_EXAMPLE_PLACEHOLDER);
+      expect(config).toThrow(ConfigError);
+    } else {
+      expect(driverPassword).not.toBe(ENV_EXAMPLE_PLACEHOLDER);
+      expect(driverPassword.length).toBeGreaterThan(0);
+      expect(config().databaseUrl).toBe(url);
+    }
   });
 
-  it("refuses broken percent-encoding without quoting the password", () => {
+  it("refuses a URL the driver cannot read without quoting the password", () => {
     const password = randomBytes(16).toString("hex");
     try {
       loadConfig({ ...valid, DATABASE_URL: `postgres://mashkif:${password}%zz@db:5432/mashkif` });
       expect.unreachable();
     } catch (error) {
-      expect(String(error)).toMatch(
-        /DATABASE_URL has a password that is not valid percent-encoding/,
-      );
+      expect(String(error)).toMatch(/DATABASE_URL is not a URL the PostgreSQL client can read/);
       expect(String(error)).not.toContain(password);
     }
   });

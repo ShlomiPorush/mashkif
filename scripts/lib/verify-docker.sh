@@ -301,63 +301,105 @@ for word in db.get("entrypoint") or []:
   ((${#_DOCKER_DB_ENTRYPOINT[@]} > 0))
 }
 
-# _docker_db_guard [docker run options...]: runs the db image with
-# _DOCKER_DB_ENTRYPOINT and the command true instead of postgres, so only the
-# password guard and the image entrypoint run. Sets _DOCKER_DB_OUT.
-_docker_db_guard() {
-  _DOCKER_DB_OUT="$(docker run --rm --network none --user 999:999 --cap-drop ALL \
-    --security-opt no-new-privileges:true "$@" --entrypoint "${_DOCKER_DB_ENTRYPOINT[0]}" \
-    "$MASHKIF_DB_IMAGE" "${_DOCKER_DB_ENTRYPOINT[@]:1}" true 2>&1)"
+# _docker_db_start <name> [docker run options...]: starts the db image
+# detached, as in the Compose files, with _DOCKER_DB_ENTRYPOINT and the
+# command postgres, on a tmpfs data directory and without a network.
+_docker_db_start() {
+  local name="$1"
+  shift
+  _DOCKER_CLEANUP+=("$name")
+  docker run -d --name "$name" --network none --user 999:999 --tmpfs /var/lib/postgresql \
+    --shm-size 128m --cap-drop ALL --security-opt no-new-privileges:true \
+    -e POSTGRES_USER=mashkif -e POSTGRES_DB=mashkif "$@" \
+    --entrypoint "${_DOCKER_DB_ENTRYPOINT[0]}" \
+    "$MASHKIF_DB_IMAGE" "${_DOCKER_DB_ENTRYPOINT[@]:1}" postgres >/dev/null
 }
 
-# _docker_db_refused <name> <rc> <placeholder>: the guard exited non-zero with
-# its message and without printing the placeholder.
-_docker_db_refused() {
-  if (($2 != 0)) && [[ "$_DOCKER_DB_OUT" == *"POSTGRES_PASSWORD is empty or the .env.example placeholder"* &&
-    "$_DOCKER_DB_OUT" != *"$3"* ]]; then
-    _docker_pass "$1"
+# _docker_db_refuses <check> <name> <placeholder> [docker run options...]:
+# the db container exits non-zero with the guard's message, without printing
+# the placeholder, before PostgreSQL starts.
+_docker_db_refuses() {
+  local check="$1" name="$2" placeholder="$3" rc="" out
+  shift 3
+  if _docker_db_start "$name" "$@"; then
+    rc="$(timeout 60 docker wait "$name" 2>/dev/null)" || rc=""
+  fi
+  out="$(docker logs "$name" 2>&1 || true)"
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  if [[ -n "$rc" && "$rc" != 0 &&
+    "$out" == *"the database password is empty or the .env.example placeholder"* &&
+    "$out" != *"$placeholder"* && "$out" != *"database system is ready"* ]]; then
+    _docker_pass "$check"
   else
-    _docker_failed "$1" "exit $2: $_DOCKER_DB_OUT"
+    _docker_failed "$check" "exit ${rc:-none (still running after 60s)}: $out"
   fi
 }
 
-# _docker_db_guard_checks <scratch>: the db password guard of both Compose
-# files refuses the .env.example placeholder and an empty password without
-# printing them, and lets a random password and POSTGRES_PASSWORD_FILE through.
+# _docker_db_guard_checks <scratch> <id>: the db password guard. Both Compose
+# files carry the same guard. With the command postgres, it refuses the
+# .env.example placeholder and an empty password, from POSTGRES_PASSWORD and
+# from a real POSTGRES_PASSWORD_FILE, without printing them; a file with a
+# random password starts PostgreSQL with that password.
 _docker_db_guard_checks() {
-  local scratch="$1" kind placeholder random rc
+  local scratch="$1" id="$2" placeholder random secrets prefix production=()
+  prefix="mashkif-verify-docker-$id-guard"
   placeholder="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$MASHKIF_ROOT/.env.example")"
   if [[ -z "$placeholder" ]]; then
     _docker_failed ".env.example has a POSTGRES_PASSWORD placeholder"
     return 0
   fi
+  if ! _docker_db_entrypoint "$scratch/compose/development.json"; then
+    _docker_failed "development db has a password guard entrypoint"
+    return 0
+  fi
+  production=("${_DOCKER_DB_ENTRYPOINT[@]}")
+  if ! _docker_db_entrypoint "$scratch/compose/production.json"; then
+    _docker_failed "production db has a password guard entrypoint"
+    return 0
+  fi
+  if [[ "${production[*]}" == "${_DOCKER_DB_ENTRYPOINT[*]}" ]]; then
+    _docker_pass "both Compose files give db the same password guard"
+  else
+    _docker_failed "both Compose files give db the same password guard"
+  fi
+
   random="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  for kind in production development; do
-    if ! _docker_db_entrypoint "$scratch/compose/$kind.json"; then
-      _docker_failed "$kind db has a password guard entrypoint"
-      continue
-    fi
-    rc=0
-    _docker_db_guard -e POSTGRES_PASSWORD="$placeholder" || rc=$?
-    _docker_db_refused "$kind db refuses the .env.example placeholder password" "$rc" "$placeholder"
-    rc=0
-    _docker_db_guard || rc=$?
-    _docker_db_refused "$kind db refuses an empty password" "$rc" "$placeholder"
-    rc=0
-    _docker_db_guard -e POSTGRES_PASSWORD="$random" || rc=$?
-    if ((rc == 0)); then
-      _docker_pass "$kind db accepts a random password"
-    else
-      _docker_failed "$kind db accepts a random password" "exit $rc"
-    fi
-    rc=0
-    _docker_db_guard -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password || rc=$?
-    if ((rc == 0)); then
-      _docker_pass "$kind db accepts POSTGRES_PASSWORD_FILE"
-    else
-      _docker_failed "$kind db accepts POSTGRES_PASSWORD_FILE" "exit $rc: $_DOCKER_DB_OUT"
-    fi
-  done
+  secrets="$scratch/db-secrets"
+  mkdir -p "$secrets"
+  chmod 755 "$secrets"
+  printf '%s\n' "$placeholder" >"$secrets/placeholder"
+  : >"$secrets/empty"
+  printf '%s\n' "$random" >"$secrets/random"
+  chmod 644 "$secrets/placeholder" "$secrets/empty" "$secrets/random"
+  local file=/run/secrets/postgres-password
+
+  _docker_db_refuses "db refuses the .env.example placeholder in POSTGRES_PASSWORD" \
+    "$prefix-env-placeholder" "$placeholder" -e POSTGRES_PASSWORD="$placeholder"
+  _docker_db_refuses "db refuses an empty POSTGRES_PASSWORD" "$prefix-env-empty" "$placeholder"
+  _docker_db_refuses "db refuses a POSTGRES_PASSWORD_FILE with the placeholder" \
+    "$prefix-file-placeholder" "$placeholder" \
+    -e POSTGRES_PASSWORD_FILE="$file" -v "$secrets/placeholder:$file:ro"
+  _docker_db_refuses "db refuses an empty POSTGRES_PASSWORD_FILE" "$prefix-file-empty" "$placeholder" \
+    -e POSTGRES_PASSWORD_FILE="$file" -v "$secrets/empty:$file:ro"
+
+  # initdb trusts 127.0.0.1 by default; scram-sha-256 makes the password count,
+  # so the two psql calls show that the file's content became the password.
+  # shellcheck disable=SC2016 # Expanded inside the container.
+  if _docker_db_start "$prefix-file-random" -e POSTGRES_PASSWORD_FILE="$file" \
+    -v "$secrets/random:$file:ro" -e POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 \
+    --health-cmd 'pg_isready -q -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    --health-interval 2s --health-retries 30 &&
+    _docker_wait_health "$prefix-file-random" healthy 90 &&
+    docker exec "$prefix-file-random" psql -q -At \
+      "postgresql://mashkif:$random@127.0.0.1/mashkif" -c 'select 1' >/dev/null 2>&1 &&
+    ! docker exec "$prefix-file-random" psql -q -At \
+      "postgresql://mashkif:$placeholder@127.0.0.1/mashkif" -c 'select 1' >/dev/null 2>&1; then
+    _docker_pass "db starts with a random POSTGRES_PASSWORD_FILE and uses it as the password"
+  else
+    _docker_failed "db starts with a random POSTGRES_PASSWORD_FILE and uses it as the password" \
+      "$(docker logs "$prefix-file-random" 2>&1 | tail -5)"
+  fi
+  docker rm -f "$prefix-file-random" >/dev/null 2>&1 || true
 }
 
 _docker_runtime() {
@@ -505,7 +547,7 @@ verify_docker() (
   marker="MASHKIF-CONTEXT-LEAK-$id"
 
   _docker_compose_checks "$_DOCKER_SCRATCH"
-  _docker_db_guard_checks "$_DOCKER_SCRATCH"
+  _docker_db_guard_checks "$_DOCKER_SCRATCH" "$id"
 
   _docker_context "$_DOCKER_SCRATCH" "$marker" || {
     fail "could not prepare the build context copy"

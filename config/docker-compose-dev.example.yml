@@ -55,17 +55,20 @@ services:
     env_file: .env
     # The same password guard as in docker-compose.yml.
     entrypoint:
-      - sh
+      - bash
       - -c
       - |
-        if [ -z "$${POSTGRES_PASSWORD_FILE:-}" ]; then
-          case "$${POSTGRES_PASSWORD:-}" in
-            "" | change-me)
-              echo "db: POSTGRES_PASSWORD is empty or the .env.example placeholder; set a random one in .env (openssl rand -hex 32)" >&2
-              exit 1
-              ;;
-          esac
+        password="$${POSTGRES_PASSWORD:-}"
+        if [ -z "$$password" ] && [ -n "$${POSTGRES_PASSWORD_FILE:-}" ]; then
+          password="$$(< "$$POSTGRES_PASSWORD_FILE")" || exit 1
         fi
+        case "$$password" in
+          "" | change-me)
+            echo "db: the database password is empty or the .env.example placeholder; set POSTGRES_PASSWORD in .env to a random one (openssl rand -hex 32)" >&2
+            exit 1
+            ;;
+        esac
+        unset password
         exec docker-entrypoint.sh "$$@"
       - db-password-guard
     command: ["postgres"]

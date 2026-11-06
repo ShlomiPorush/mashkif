@@ -48,7 +48,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     // Neither the URL nor the password is ever part of the message.
     const password = databasePassword(databaseUrl);
     if (password === undefined) {
-      problems.push("DATABASE_URL has a password that is not valid percent-encoding");
+      problems.push("DATABASE_URL is not a URL the PostgreSQL client can read");
     } else if (password === "" || password === ENV_EXAMPLE_PLACEHOLDER) {
       problems.push(
         "DATABASE_URL needs a database password other than the .env.example placeholder (generate one with: openssl rand -hex 32)",
@@ -86,23 +86,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
 }
 
 /**
- * The decoded password of a connection URL: "" when the URL has none, and
- * undefined when its percent-encoding is broken. Reads only the userinfo, so
- * every URL that postgres.js accepts keeps working, also several hosts and a
- * Unix socket: like postgres.js, it takes the authority up to the first / or ?
- * and the userinfo up to the first @, which an unencoded userinfo cannot
- * contain.
+ * The password that postgres.js sends for a connection URL, "" when the URL
+ * has none, or undefined when postgres.js could not parse it. postgres.js does
+ * not document a way to read its parsed options, so this repeats the steps of
+ * parseUrl in postgres 3.4.9 (src/index.js:537-550): it cuts the hosts out of
+ * the authority, keeps the first one so that several hosts parse, and takes
+ * the password from the WHATWG URL parser, which also strips tabs, newlines,
+ * and leading or trailing control characters. server/test/config.test.ts
+ * compares the result with the driver's own parsing.
  */
 function databasePassword(databaseUrl: string): string | undefined {
-  const authority = databaseUrl.slice(databaseUrl.indexOf("://") + 3).split(/[/?#]/)[0] ?? "";
-  const at = authority.indexOf("@");
-  const userinfo = at < 0 ? "" : authority.slice(0, at);
-  const colon = userinfo.indexOf(":");
-  if (colon < 0) {
-    return "";
-  }
   try {
-    return decodeURIComponent(userinfo.slice(colon + 1));
+    let host = databaseUrl.slice(databaseUrl.indexOf("://") + 3).split(/[?/]/)[0] ?? "";
+    host = decodeURIComponent(host.slice(host.indexOf("@") + 1));
+    const url = new URL(databaseUrl.replace(host, host.split(",")[0] ?? ""));
+    return decodeURIComponent(url.password);
   } catch {
     return undefined;
   }

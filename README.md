@@ -40,6 +40,22 @@ The server reads only a few values from `.env` (template: `.env.example`): the d
 - `POSTGRES_PASSWORD`, repeated in `DATABASE_URL`: the database password. Generate one with `openssl rand -hex 32`. The server and the `db` container both refuse to start with an empty password or the `.env.example` placeholder, so PostgreSQL never initializes with it. `POSTGRES_PASSWORD_FILE` of the official image also works.
 - `BETTER_AUTH_SECRET`: a secret of at least 32 random characters. Generate one with `openssl rand -base64 32` and back it up together with `.env`. A new secret signs the admin out and makes the enrolled TOTP, the backup codes, and the stored SMTP password unusable.
 
+### Upgrading a database that uses the placeholder password
+
+A database that was set up with the `.env.example` placeholder password no longer starts after this check was added: the `db` container and the server both refuse it. Changing `.env` alone does not fix this. PostgreSQL reads `POSTGRES_PASSWORD` only when it creates the data directory, and keeps the role's old password after that. Change the password in both places:
+
+1. Generate a password with `openssl rand -hex 32`. Put it in `.env` as `POSTGRES_PASSWORD` and as the password in `DATABASE_URL`, both at the same time.
+2. Start the database with `docker compose up -d db`. The new value passes the check. PostgreSQL still has the old password, so the app cannot connect yet.
+3. Set the role's password to the new value. The command reads the value from the container's environment, so the password does not appear on the host command line:
+
+   ```sh
+   docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v user="$POSTGRES_USER" -v pw="$POSTGRES_PASSWORD"' <<'SQL'
+   ALTER ROLE :"user" PASSWORD :'pw';
+   SQL
+   ```
+
+4. Run `docker compose up -d`. This recreates the app with the new `DATABASE_URL`.
+
 Every other setting is managed in the admin panel under Settings, with a default: the heartbeat interval, how long raw data is kept, the public URL, other trusted origins, the trusted proxies, the session length, and SMTP for email. An environment variable may override a setting (for example `BETTER_AUTH_URL` for the public URL or `MASHKIF_TRUSTED_PROXIES`; `.env.example` lists them); the panel then shows the field locked. The public URL, the trusted proxies, and the session length apply after a restart.
 
 - Public URL: the origin of the web app, for example `https://mashkif.co.il`. Recommended behind a proxy; while it is empty, Better Auth takes the origin from each request. Use `http://localhost:8180` for local development: browsers refuse passkeys on an IP address such as 127.0.0.1.
