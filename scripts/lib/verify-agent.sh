@@ -21,6 +21,11 @@
 #   for the builds, -acceptEula wix7 on each wix command.
 # - Install tests (tests/Mashkif.Install.Tests, outside the solution) run only
 #   on a GitHub-hosted runner.
+# - Both test steps write a TRX report into <scratch>/test-results/<step>/,
+#   and a test run that completes no test for the hang timeout is dumped
+#   (Microsoft.Testing.Extensions.HangDump, Triage type) and stopped. In CI the
+#   scratch folder stays when a check fails, so the workflow can upload the
+#   reports, dumps, and installer logs.
 
 _AGENT_DIR="$MASHKIF_ROOT/agent"
 _AGENT_SDK_HINT="install the .NET 10 SDK"
@@ -128,8 +133,24 @@ verify_agent() {
 
   local rc=0
   _agent_run_checks "$scratch" || rc=$?
-  rm -rf -- "$scratch"
+  if ((rc != 0)) && [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+    log "  kept $scratch for the diagnostics upload"
+  else
+    rm -rf -- "$scratch"
+  fi
   return "$rc"
+}
+
+# _agent_test_diagnostics <scratch> <step> <hang timeout>: prints the test
+# options for a TRX report and a hang dump into <scratch>/test-results/<step>.
+# A Triage dump holds the stacks without user data such as paths or
+# passwords; the artifact of a public repository is readable by anyone
+# signed in to GitHub.
+_agent_test_diagnostics() {
+  local results="$1/test-results/$2"
+  mkdir -p -- "$results"
+  printf '%s\n' --results-directory "$(_agent_windows_path "$results")" --report-xunit-trx \
+    --hangdump --hangdump-timeout "$3" --hangdump-type Triage
 }
 
 # _agent_check_msi_compile_items: the MSI project must not compile any source
@@ -228,7 +249,10 @@ _agent_run_checks() {
   MASHKIF_TEST_BUNDLE_BA="$(_agent_windows_path "$scratch/bundle-ba")"
   export MASHKIF_TEST_BUNDLE_BA
 
-  _agent_step "test" test --solution Mashkif.Agent.slnx -c Release --no-build || return
+  # The unit tests take seconds; 5 minutes without a finished test is a hang.
+  local diagnostics
+  mapfile -t diagnostics < <(_agent_test_diagnostics "$scratch" unit 5m)
+  _agent_step "test" test --solution Mashkif.Agent.slnx -c Release --no-build "${diagnostics[@]}" || return
   _agent_install_tests "$msi" "$scratch"
 }
 
@@ -280,7 +304,11 @@ _agent_install_tests() {
     MASHKIF_TEST_UPGRADE_BUNDLE_BA="$(_agent_windows_path "$scratch/upgrade-bundle-ba")"
     export MASHKIF_INSTALL_TEST_MSI MASHKIF_INSTALL_TEST_HE_MSI MASHKIF_INSTALL_TEST_UPGRADE_MSI \
       MASHKIF_INSTALL_TEST_EXE MASHKIF_INSTALL_TEST_UPGRADE_EXE MASHKIF_TEST_UPGRADE_BUNDLE_BA
-    _agent_step "install tests" test --project "$_AGENT_INSTALL_TESTS" -c Release --no-build || rc=$?
+    # Longer than one process run (RunTimeout, 10 minutes), so a slow
+    # installer fails with its own message first.
+    local diagnostics
+    mapfile -t diagnostics < <(_agent_test_diagnostics "$scratch" install 15m)
+    _agent_step "install tests" test --project "$_AGENT_INSTALL_TESTS" -c Release --no-build "${diagnostics[@]}" || rc=$?
   fi
   # Sizes the install tests measured (the Package Cache), for the record.
   if [[ -s "$scratch/measurements.txt" ]]; then

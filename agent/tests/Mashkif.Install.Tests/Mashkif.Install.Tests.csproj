@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <PackageReference Include="WixToolset.Dtf.WindowsInstaller" />
+    <!-- Hang dumps (scripts/lib/verify-agent.sh): a dump of a test run that stops making progress. -->
+    <PackageReference Include="Microsoft.Testing.Extensions.HangDump" />
     <PackageReference Include="xunit.v3" />
     <Using Include="Xunit" />
   </ItemGroup>
