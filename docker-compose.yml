@@ -59,8 +59,9 @@ services:
     # The official image's postgres user. The data directory must be owned by it.
     user: "999:999"
     env_file: .env
-    # Refuses an empty or placeholder password before PostgreSQL initializes
-    # with it, then runs the image's own ENTRYPOINT ["docker-entrypoint.sh"]
+    # Refuses an empty or placeholder password, and one with a CR or LF (initdb
+    # --pwfile keeps only the first line, so change-me plus a line break would
+    # become change-me), before PostgreSQL initializes with it, then runs the image's own ENTRYPOINT ["docker-entrypoint.sh"]
     # and CMD ["postgres"]. Setting entrypoint clears the image's CMD, so
     # command repeats it. The password is read the way file_env in
     # docker-entrypoint.sh reads it: POSTGRES_PASSWORD, else the content of
@@ -78,6 +79,10 @@ services:
         case "$$password" in
           "" | change-me)
             echo "db: the database password is empty or the .env.example placeholder; set POSTGRES_PASSWORD in .env to a random one (openssl rand -hex 32)" >&2
+            exit 1
+            ;;
+          *$$'\r'* | *$$'\n'*)
+            echo "db: the database password contains a line break, and initdb would keep only its first line; set POSTGRES_PASSWORD in .env to a random one (openssl rand -hex 32)" >&2
             exit 1
             ;;
         esac

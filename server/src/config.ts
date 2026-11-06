@@ -53,6 +53,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       problems.push(
         "DATABASE_URL needs a database password other than the .env.example placeholder (generate one with: openssl rand -hex 32)",
       );
+    } else if (/[\r\n]/.test(password)) {
+      // The db container refuses the same, because initdb --pwfile keeps only
+      // the first line of a password.
+      problems.push(
+        "DATABASE_URL has a database password with a line break (generate one with: openssl rand -hex 32)",
+      );
     }
   }
 

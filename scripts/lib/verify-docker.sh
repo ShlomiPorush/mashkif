@@ -327,7 +327,7 @@ _docker_db_refuses() {
   out="$(docker logs "$name" 2>&1 || true)"
   docker rm -f "$name" >/dev/null 2>&1 || true
   if [[ -n "$rc" && "$rc" != 0 &&
-    "$out" == *"the database password is empty or the .env.example placeholder"* &&
+    "$out" == *"db: the database password "*"set POSTGRES_PASSWORD in .env to a random one"* &&
     "$out" != *"$placeholder"* && "$out" != *"database system is ready"* ]]; then
     _docker_pass "$check"
   else
@@ -337,9 +337,10 @@ _docker_db_refuses() {
 
 # _docker_db_guard_checks <scratch> <id>: the db password guard. Both Compose
 # files carry the same guard. With the command postgres, it refuses the
-# .env.example placeholder and an empty password, from POSTGRES_PASSWORD and
-# from a real POSTGRES_PASSWORD_FILE, without printing them; a file with a
-# random password starts PostgreSQL with that password.
+# .env.example placeholder, an empty password, and a password with a CR or LF
+# (initdb --pwfile keeps only the first line), from POSTGRES_PASSWORD and from
+# a real POSTGRES_PASSWORD_FILE, without printing them; a file with a random
+# password starts PostgreSQL with that password.
 _docker_db_guard_checks() {
   local scratch="$1" id="$2" placeholder random secrets prefix production=()
   prefix="mashkif-verify-docker-$id-guard"
@@ -370,7 +371,9 @@ _docker_db_guard_checks() {
   printf '%s\n' "$placeholder" >"$secrets/placeholder"
   : >"$secrets/empty"
   printf '%s\n' "$random" >"$secrets/random"
-  chmod 644 "$secrets/placeholder" "$secrets/empty" "$secrets/random"
+  printf '%s\r\n' "$placeholder" >"$secrets/crlf"
+  printf '%s\n%s\n' "$placeholder" "$random" >"$secrets/multiline"
+  chmod 644 "$secrets"/*
   local file=/run/secrets/postgres-password
 
   _docker_db_refuses "db refuses the .env.example placeholder in POSTGRES_PASSWORD" \
@@ -381,6 +384,16 @@ _docker_db_guard_checks() {
     -e POSTGRES_PASSWORD_FILE="$file" -v "$secrets/placeholder:$file:ro"
   _docker_db_refuses "db refuses an empty POSTGRES_PASSWORD_FILE" "$prefix-file-empty" "$placeholder" \
     -e POSTGRES_PASSWORD_FILE="$file" -v "$secrets/empty:$file:ro"
+  _docker_db_refuses "db refuses a POSTGRES_PASSWORD_FILE with the placeholder and CRLF" \
+    "$prefix-file-crlf" "$placeholder" \
+    -e POSTGRES_PASSWORD_FILE="$file" -v "$secrets/crlf:$file:ro"
+  _docker_db_refuses "db refuses a POSTGRES_PASSWORD_FILE with the placeholder and a second line" \
+    "$prefix-file-multiline" "$placeholder" \
+    -e POSTGRES_PASSWORD_FILE="$file" -v "$secrets/multiline:$file:ro"
+  _docker_db_refuses "db refuses a POSTGRES_PASSWORD that ends in CR" "$prefix-env-cr" "$placeholder" \
+    -e POSTGRES_PASSWORD="$placeholder"$'\r'
+  _docker_db_refuses "db refuses a POSTGRES_PASSWORD with a line break" "$prefix-env-lf" "$placeholder" \
+    -e POSTGRES_PASSWORD="$placeholder"$'\n'"$random"
 
   # initdb trusts 127.0.0.1 by default; scram-sha-256 makes the password count,
   # so the two psql calls show that the file's content became the password.

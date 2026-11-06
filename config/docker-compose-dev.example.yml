@@ -67,6 +67,10 @@ services:
             echo "db: the database password is empty or the .env.example placeholder; set POSTGRES_PASSWORD in .env to a random one (openssl rand -hex 32)" >&2
             exit 1
             ;;
+          *$$'\r'* | *$$'\n'*)
+            echo "db: the database password contains a line break, and initdb would keep only its first line; set POSTGRES_PASSWORD in .env to a random one (openssl rand -hex 32)" >&2
+            exit 1
+            ;;
         esac
         unset password
         exec docker-entrypoint.sh "$$@"

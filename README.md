@@ -37,7 +37,7 @@ Run the scripts from WSL, in the repository root:
 
 The server reads only a few values from `.env` (template: `.env.example`): the database settings, the GeoLite2-ASN path, and:
 
-- `POSTGRES_PASSWORD`, repeated in `DATABASE_URL`: the database password. Generate one with `openssl rand -hex 32`. The server and the `db` container both refuse to start with an empty password or the `.env.example` placeholder, so PostgreSQL never initializes with it. `POSTGRES_PASSWORD_FILE` of the official image also works.
+- `POSTGRES_PASSWORD`, repeated in `DATABASE_URL`: the database password. Generate one with `openssl rand -hex 32`. The server and the `db` container both refuse to start with an empty password, the `.env.example` placeholder, or a password with a line break, so PostgreSQL never initializes with such a password. `POSTGRES_PASSWORD_FILE` of the official image also works.
 - `BETTER_AUTH_SECRET`: a secret of at least 32 random characters. Generate one with `openssl rand -base64 32` and back it up together with `.env`. A new secret signs the admin out and makes the enrolled TOTP, the backup codes, and the stored SMTP password unusable.
 
 ### Upgrading a database that uses the placeholder password
@@ -46,13 +46,13 @@ A database that was set up with the `.env.example` placeholder password no longe
 
 1. Generate a password with `openssl rand -hex 32`. Put it in `.env` as `POSTGRES_PASSWORD` and as the password in `DATABASE_URL`, both at the same time.
 2. Start the database with `docker compose up -d db`. The new value passes the check. PostgreSQL still has the old password, so the app cannot connect yet.
-3. Set the role's password to the new value. The command reads the value from the container's environment, so the password does not appear on the host command line:
+3. Set the role's password to the new value. Open psql in the database container. Use the `POSTGRES_USER` and `POSTGRES_DB` values from `.env`; `.env.example` uses `mashkif` for both:
 
    ```sh
-   docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v user="$POSTGRES_USER" -v pw="$POSTGRES_PASSWORD"' <<'SQL'
-   ALTER ROLE :"user" PASSWORD :'pw';
-   SQL
+   docker compose exec db psql -U mashkif -d mashkif
    ```
+
+   At the psql prompt, run `\password mashkif` and paste the new password twice, then run `\q`. psql's `\password` hashes the password before it sends it. The password does not appear in any process arguments or in the shell history, and statement logging would record only the hash. The password is still in `.env`, and `docker inspect` shows the variables from `env_file` to anyone who can run Docker commands on the host. That was already the case. psql connects through the container's local socket, which the official image trusts. If you changed local authentication to require a password, psql first asks for the old password.
 
 4. Run `docker compose up -d`. This recreates the app with the new `DATABASE_URL`.
 

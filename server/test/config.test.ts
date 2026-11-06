@@ -150,6 +150,23 @@ describe("DATABASE_URL password", () => {
     ],
     ["a leading control character", "\u0001postgres://mashkif:change-me@db/mashkif", "refused"],
     ["a trailing control character", "postgres://mashkif:change-me@db/mashkif\u001f", "refused"],
+    // A raw CR or LF is stripped by the URL parser (above); an encoded one
+    // reaches the driver's password.
+    [
+      "an encoded CRLF after the placeholder",
+      "postgres://mashkif:change-me%0D%0A@db/mashkif",
+      "line break",
+    ],
+    [
+      "an encoded LF inside a random password",
+      `postgres://mashkif:${random}%0A${random}@db/mashkif`,
+      "line break",
+    ],
+    [
+      "an encoded CR after a random password",
+      `postgres://mashkif:${random}%0D@db/mashkif`,
+      "line break",
+    ],
   ])("with %s, matches the driver's own parsing", async (_name, url, expected) => {
     const config = () => loadConfig({ ...valid, DATABASE_URL: url });
     if (expected === "unreadable") {
@@ -163,6 +180,14 @@ describe("DATABASE_URL password", () => {
     if (expected === "refused") {
       expect(driverPassword).toBe(ENV_EXAMPLE_PLACEHOLDER);
       expect(config).toThrow(ConfigError);
+    } else if (expected === "line break") {
+      expect(driverPassword).toMatch(/[\r\n]/);
+      expect(config).toThrow(/DATABASE_URL has a database password with a line break/);
+      try {
+        config();
+      } catch (error) {
+        expect(String(error)).not.toContain(random);
+      }
     } else {
       expect(driverPassword).not.toBe(ENV_EXAMPLE_PLACEHOLDER);
       expect(driverPassword.length).toBeGreaterThan(0);
