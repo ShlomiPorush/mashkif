@@ -8,3 +8,13 @@ packages:
 # binary; nothing else may run install scripts.
 allowBuilds:
   esbuild: true
+
+# Security override for GHSA-67mh-4wv8-2f99 (esbuild <= 0.24.2, its serve()
+# development server answers any website). drizzle-kit 0.31.11, the latest
+# stable release, still depends on the deprecated @esbuild-kit/esm-loader,
+# whose @esbuild-kit/core-utils pins esbuild ~0.18.20. drizzle-kit's own code
+# never loads @esbuild-kit, so its esbuild moves to 0.25.12, the version
+# drizzle-kit itself uses. Remove this entry once drizzle-kit no longer depends
+# on @esbuild-kit/esm-loader (its 1.0 release candidates no longer do).
+overrides:
+  '@esbuild-kit/core-utils>esbuild': 0.25.12

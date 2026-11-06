@@ -29,3 +29,7 @@ All notable changes to this component are recorded here. The format follows
 - Agents that registered but never sent a heartbeat are removed after 30 days by default. Revoked agents are kept, so a returning revoked PC is told it was revoked.
 - A request whose agent no longer exists gets 401 `token_invalid`, so the agent registers again; only a revoke by the admin gives `agent_revoked`.
 - Trusted proxies: the reverse proxies whose `X-Forwarded-For` is believed, for the agent API and Better Auth.
+
+### Security
+
+- The container image no longer contains esbuild 0.18.20 (GHSA-67mh-4wv8-2f99), which drizzle-kit pulled in through `@esbuild-kit/core-utils`; a pnpm override moves it to esbuild 0.25.12. The server never ran it.
