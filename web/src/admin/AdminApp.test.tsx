@@ -12,6 +12,25 @@ import { rememberPassword } from "./router";
 
 type Routes = Record<string, unknown>;
 
+// Secret-like values are random per run (Web Crypto), never fixed in the repository.
+const randomHex = (bytes: number) =>
+  Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+const randomCode = () => `${randomHex(3)}-${randomHex(3)}`;
+/** Decimal digits; bytes of 250 and above are skipped, so every digit is equally likely. */
+function randomDigits(count: number): string {
+  let digits = "";
+  while (digits.length < count) {
+    for (const byte of crypto.getRandomValues(new Uint8Array(count))) {
+      if (byte < 250 && digits.length < count) {
+        digits += String(byte % 10);
+      }
+    }
+  }
+  return digits;
+}
+
 const USER = {
   id: "user-1",
   name: "shlomi",
@@ -25,7 +44,7 @@ const USER = {
 };
 const SESSION = {
   id: "session-1",
-  token: "token",
+  token: randomHex(16),
   userId: USER.id,
   expiresAt: "2026-11-01T20:00:00.000Z",
   createdAt: "2026-11-01T08:00:00.000Z",
@@ -36,12 +55,6 @@ const SESSION = {
 const ENROLLMENT = { session: SESSION, user: USER };
 const FULL = { session: SESSION, user: { ...USER, twoFactorEnabled: true } };
 
-// Secret-like values are random per run (Web Crypto), never fixed in the repository.
-const randomHex = (bytes: number) =>
-  Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-const randomCode = () => `${randomHex(3)}-${randomHex(3)}`;
 const PASSWORD = randomHex(16);
 const NEW_PASSWORD = randomHex(16);
 const SMTP_PASSWORD = randomHex(16);
@@ -50,6 +63,8 @@ const BACKUP_ONE = randomCode();
 const BACKUP_TWO = randomCode();
 const FRESH_ONE = randomCode();
 const FRESH_TWO = randomCode();
+const TOTP_CODE = randomDigits(6);
+const LINK_TOKEN = randomHex(16);
 /** 32 base32 characters; 256 is a multiple of 32, so every character is equally likely. */
 const TOTP_SECRET = Array.from(
   crypto.getRandomValues(new Uint8Array(32)),
@@ -133,7 +148,7 @@ const pages = [
   [
     "reset password",
     boot(false, null),
-    "/admin/reset-password?token=abc",
+    `/admin/reset-password?token=${LINK_TOKEN}`,
     "/admin/reset-password",
     en.reset.heading,
   ],
@@ -244,12 +259,14 @@ describe("sign-in", () => {
       "POST /api/auth/sign-in/username": { twoFactorRedirect: true },
       get "POST /api/auth/two-factor/verify-totp"() {
         session = FULL;
-        return { token: "t", user: FULL.user };
+        return { token: randomHex(16), user: FULL.user };
       },
     });
     renderAdmin(createI18n("en"));
     await password(en);
-    fireEvent.change(await screen.findByLabelText(en.signIn.code), { target: { value: "123456" } });
+    fireEvent.change(await screen.findByLabelText(en.signIn.code), {
+      target: { value: TOTP_CODE },
+    });
     fireEvent.click(screen.getByRole("button", { name: en.signIn.verify }));
     await waitFor(() => expect(window.location.pathname).toBe("/admin"));
     expect(
@@ -268,7 +285,7 @@ describe("sign-in", () => {
       "POST /api/auth/sign-in/username": { twoFactorRedirect: true },
       get "POST /api/auth/two-factor/verify-backup-code"() {
         session = FULL;
-        return { token: "t", user: FULL.user };
+        return { token: randomHex(16), user: FULL.user };
       },
     });
     renderAdmin(createI18n("en"));
@@ -389,7 +406,7 @@ describe("setup", () => {
       get "POST /api/auth/sign-up/email"() {
         setupRequired = false;
         session = ENROLLMENT;
-        return { token: "t", user: USER };
+        return { token: randomHex(16), user: USER };
       },
       "POST /api/auth/two-factor/enable": {
         totpURI: TOTP_URI,
@@ -513,7 +530,7 @@ describe("forgot and reset password", () => {
     ["without a session", null],
     ["with a session", FULL],
   ] as const)("sets the new password from the link %s and goes to sign-in", async (_, start) => {
-    window.history.replaceState(null, "", "/admin/reset-password?token=link-token");
+    window.history.replaceState(null, "", `/admin/reset-password?token=${LINK_TOKEN}`);
     let session: unknown = start;
     const calls = serve({
       "/api/admin/status": { setupRequired: false },
@@ -532,7 +549,7 @@ describe("forgot and reset password", () => {
     expect(await screen.findByRole("heading", { level: 1, name: en.signIn.heading })).toBeTruthy();
     await waitFor(() => expect(window.location.pathname).toBe("/admin/sign-in"));
     expect(calls.find((call) => call.path === "/api/auth/reset-password")?.body).toEqual({
-      token: "link-token",
+      token: LINK_TOKEN,
       newPassword: NEW_PASSWORD,
     });
   });

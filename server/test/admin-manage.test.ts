@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import { latLngToCell } from "h3-js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cachedSettings, SETTINGS_CACHE_TTL_MS } from "../src/settings.js";
@@ -425,14 +425,18 @@ describe("settings from the environment", () => {
     // Other settings are trimmed.
     expect(resolved.values.smtpUser).toBe("mailer");
     expect(resolved.locked).toEqual(expect.arrayContaining(["smtpPassword", "smtpUser"]));
-    // Empty is not set; spaces alone are a password.
+    // Empty is not set; whitespace alone is a password.
     expect(
       (await resolveSettings(database.db, { env: { MASHKIF_SMTP_PASSWORD: "" } })).locked,
     ).toEqual([]);
+    // A random mix of spaces and tabs, 1 to 8 long.
+    const blank = Array.from({ length: randomInt(1, 9) }, () =>
+      randomInt(2) === 0 ? " " : "\t",
+    ).join("");
     expect(
-      (await resolveSettings(database.db, { env: { MASHKIF_SMTP_PASSWORD: "   " } })).values
+      (await resolveSettings(database.db, { env: { MASHKIF_SMTP_PASSWORD: blank } })).values
         .smtpPassword,
-    ).toBe("   ");
+    ).toBe(blank);
   });
 
   it("an empty environment variable does not lock its setting", async () => {
