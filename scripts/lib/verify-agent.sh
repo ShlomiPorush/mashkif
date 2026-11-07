@@ -333,24 +333,36 @@ _agent_progress() {
   fi
 }
 
+# _agent_parse_test_listing <namespace>: reads the output of dotnet test
+# --list-tests on stdin and prints the fully qualified name of every test in
+# <namespace>, one per line. Fails unless there is at least one and the
+# number matches the final "Discovered <n> tests." line. Carriage returns and
+# ANSI colors are removed first: in GitHub Actions the test platform colors
+# its output even into a pipe.
+_agent_parse_test_listing() {
+  local namespace="${1//./\\.}" esc=$'\e' listing names count listed=0
+  listing="$(tr -d '\r' | sed "s/${esc}\[[0-9;]*m//g")"
+  names="$(sed -n "s/^[[:space:]]*\(${namespace}\.[A-Za-z0-9_.]*\)[[:space:]]*$/\1/p" <<<"$listing")"
+  count="$(sed -n 's/^Discovered \([0-9][0-9]*\) tests*\.$/\1/p' <<<"$listing" | tail -n 1)"
+  [[ -n "$names" ]] && listed="$(grep -c '' <<<"$names")"
+  if ((listed == 0)) || [[ "$count" != "$listed" ]]; then
+    printf '%s\n' "$listing" >&2
+    fail "the test listing names $listed tests in $1, but discovery reports ${count:-no number}"
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+  printf '%s\n' "$names"
+}
+
 # _agent_install_test_names: prints the fully qualified name of every install
 # test, one per line. Discovery (--list-tests) runs no test and no fixture.
 _agent_install_test_names() {
-  local listing names count
+  local listing
   if ! listing="$(_agent_dotnet test --project "$_AGENT_INSTALL_TESTS" -c Release --no-build --list-tests 2>&1)"; then
     printf '%s\n' "$listing" >&2
     fail "cannot list the install tests"
     return "$MASHKIF_EXIT_FAILED"
   fi
-  listing="${listing//$'\r'/}"
-  names="$(sed -n 's/^[[:space:]]*\(Mashkif\.Install\.Tests\.[A-Za-z0-9_.]*\)[[:space:]]*$/\1/p' <<<"$listing")"
-  count="$(sed -n 's/^Discovered \([0-9][0-9]*\) tests*\.$/\1/p' <<<"$listing" | tail -n 1)"
-  if [[ -z "$names" || "$count" != "$(grep -c '' <<<"$names")" ]]; then
-    printf '%s\n' "$listing" >&2
-    fail "the install test listing names ${names:+$(grep -c '' <<<"$names")}${names:-no} tests, but discovery reports ${count:-none}"
-    return "$MASHKIF_EXIT_FAILED"
-  fi
-  printf '%s\n' "$names"
+  _agent_parse_test_listing Mashkif.Install.Tests <<<"$listing"
 }
 
 # _agent_run_install_tests <scratch>: runs every install test in its own

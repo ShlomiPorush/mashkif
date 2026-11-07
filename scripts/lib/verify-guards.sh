@@ -214,6 +214,12 @@ guard_selection_tests() {
   bash "$MASHKIF_ROOT/scripts/tests/test-select-areas.sh"
 }
 
+# The parts of scripts/lib/verify-agent.sh that need no .NET SDK, such as the
+# parsing of the install test listing.
+guard_agent_script_tests() {
+  bash "$MASHKIF_ROOT/scripts/tests/test-verify-agent.sh"
+}
+
 # scripts/release.sh against a local bare repository standing in for origin,
 # with docker and gh replaced by shims. No network, no real release.
 guard_release_tests() {
@@ -352,7 +358,7 @@ urllib3==2.8.0"
 
 verify_guards() {
   local name rc failed=0 env=0
-  for name in hebrew compose_build shell line_endings env_example selection_tests release_tests ci_config; do
+  for name in hebrew compose_build shell line_endings env_example selection_tests agent_script_tests release_tests ci_config; do
     set +e
     "guard_$name"
     rc=$?
