@@ -1,12 +1,16 @@
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import postgres from "postgres";
 import { describe, expect, it } from "vitest";
-import { ConfigError, DEFAULT_PORT, loadConfig } from "../src/config.js";
+import { ConfigError, DEFAULT_PORT, ENV_EXAMPLE_PLACEHOLDER, loadConfig } from "../src/config.js";
 import { parsePublicUrl } from "../src/settings.js";
 
 const secret = randomBytes(32).toString("base64");
+// Hex, so the password needs no percent-encoding in the URL.
+const databasePassword = randomBytes(16).toString("hex");
 
 const valid = {
-  DATABASE_URL: "postgres://mashkif:example@db:5432/mashkif",
+  DATABASE_URL: `postgres://mashkif:${databasePassword}@db:5432/mashkif`,
   MASHKIF_GEOIP_ASN_PATH: "/geoip/GeoLite2-ASN.mmdb",
   BETTER_AUTH_SECRET: secret,
 };
@@ -46,12 +50,12 @@ describe("loadConfig", () => {
   });
 
   it("never puts the database URL in the error message", () => {
-    const leaked = "postgres://mashkif:s3cret@db/mashkif";
+    const leaked = `postgres://mashkif:${databasePassword}@db/mashkif`;
     try {
       loadConfig({ DATABASE_URL: leaked, PORT: "x" });
       expect.unreachable();
     } catch (error) {
-      expect(String(error)).not.toContain("s3cret");
+      expect(String(error)).not.toContain(databasePassword);
     }
   });
 });
@@ -71,6 +75,146 @@ describe("BETTER_AUTH_SECRET", () => {
 
   it("is passed on as is, without derivation", () => {
     expect(loadConfig({ ...valid, BETTER_AUTH_SECRET: ` ${secret} ` }).authSecret).toBe(secret);
+  });
+});
+
+describe("DATABASE_URL password", () => {
+  const refused =
+    /DATABASE_URL needs a database password other than the \.env\.example placeholder/;
+
+  it.each([
+    [
+      "the .env.example placeholder",
+      `postgres://mashkif:${ENV_EXAMPLE_PLACEHOLDER}@db:5432/mashkif`,
+    ],
+    ["the encoded placeholder", "postgres://mashkif:change%2Dme@db:5432/mashkif"],
+    [
+      "the placeholder with several hosts",
+      "postgres://mashkif:change-me@db1:5432,db2:5432/mashkif",
+    ],
+    ["an empty password", "postgres://mashkif:@db:5432/mashkif"],
+    ["no password", "postgres://mashkif@db:5432/mashkif"],
+    ["no userinfo", "postgres://db:5432/mashkif?application_name=a:b@c"],
+  ])("refuses %s without quoting the URL", (_name, url) => {
+    try {
+      loadConfig({ ...valid, DATABASE_URL: url });
+      expect.unreachable();
+    } catch (error) {
+      expect(String(error)).toMatch(refused);
+      expect(String(error)).not.toContain("postgres://");
+      expect(String(error)).not.toContain("mashkif:");
+    }
+  });
+
+  // The check must see the password that postgres.js sends. Each URL is also
+  // given to the driver itself, which parses it without connecting, so a
+  // change in the driver's parsing fails here.
+  const random = randomBytes(32).toString("hex");
+  it.each([
+    ["one host", `postgres://mashkif:${random}@db:5432/mashkif`, "accepted"],
+    ["several hosts", `postgres://mashkif:${random}@db1:5432,db2:5432/mashkif`, "accepted"],
+    // postgres.js 3.4.9 itself throws Invalid URL for an empty host, so the
+    // server cannot start with this form either way.
+    [
+      "a Unix socket and an empty host",
+      `postgres://mashkif:${random}@/mashkif?host=/var/run/postgresql`,
+      "unreadable",
+    ],
+    [
+      "a percent-encoded socket host",
+      `postgres://mashkif:${random}@%2Frun%2Fpg/mashkif`,
+      "accepted",
+    ],
+    ["IPv6", `postgresql://mashkif:${random}@[::1]:5432/mashkif`, "accepted"],
+    ["sslmode", `postgres://mashkif:${random}@db:5432/mashkif?sslmode=require`, "accepted"],
+    ["percent-encoded / @ :", `postgres://mashkif:${random}%2F%40%3A@db:5432/mashkif`, "accepted"],
+    [
+      "an unencoded @ after the placeholder",
+      `postgres://mashkif:change-me@${random}@db/mashkif`,
+      "accepted",
+    ],
+    [
+      "an unencoded @ before the placeholder",
+      `postgres://mashkif:${random}@change-me@db/mashkif`,
+      "accepted",
+    ],
+    [
+      "a TAB inside a random password",
+      `postgres://mashkif:${random}\t${random}@db/mashkif`,
+      "accepted",
+    ],
+    ["a TAB inside the placeholder", "postgres://mashkif:change-\tme@db/mashkif", "refused"],
+    ["a newline inside the placeholder", "postgres://mashkif:change-\nme@db/mashkif", "refused"],
+    [
+      "a carriage return inside the placeholder",
+      "postgres://mashkif:chan\rge-me@db/mashkif",
+      "refused",
+    ],
+    ["a leading control character", "\u0001postgres://mashkif:change-me@db/mashkif", "refused"],
+    ["a trailing control character", "postgres://mashkif:change-me@db/mashkif\u001f", "refused"],
+    // A raw CR or LF is stripped by the URL parser (above); an encoded one
+    // reaches the driver's password.
+    [
+      "an encoded CRLF after the placeholder",
+      "postgres://mashkif:change-me%0D%0A@db/mashkif",
+      "line break",
+    ],
+    [
+      "an encoded LF inside a random password",
+      `postgres://mashkif:${random}%0A${random}@db/mashkif`,
+      "line break",
+    ],
+    [
+      "an encoded CR after a random password",
+      `postgres://mashkif:${random}%0D@db/mashkif`,
+      "line break",
+    ],
+  ])("with %s, matches the driver's own parsing", async (_name, url, expected) => {
+    const config = () => loadConfig({ ...valid, DATABASE_URL: url });
+    if (expected === "unreadable") {
+      expect(() => postgres(url)).toThrow();
+      expect(config).toThrow(/DATABASE_URL is not a URL the PostgreSQL client can read/);
+      return;
+    }
+    const sql = postgres(url, { max: 1, onnotice: () => {} });
+    const driverPassword = (sql.options as unknown as { pass: string }).pass;
+    await sql.end({ timeout: 0 });
+    if (expected === "refused") {
+      expect(driverPassword).toBe(ENV_EXAMPLE_PLACEHOLDER);
+      expect(config).toThrow(ConfigError);
+    } else if (expected === "line break") {
+      expect(driverPassword).toMatch(/[\r\n]/);
+      expect(config).toThrow(/DATABASE_URL has a database password with a line break/);
+      try {
+        config();
+      } catch (error) {
+        expect(String(error)).not.toContain(random);
+      }
+    } else {
+      expect(driverPassword).not.toBe(ENV_EXAMPLE_PLACEHOLDER);
+      expect(driverPassword.length).toBeGreaterThan(0);
+      expect(config().databaseUrl).toBe(url);
+    }
+  });
+
+  it("refuses a URL the driver cannot read without quoting the password", () => {
+    const password = randomBytes(16).toString("hex");
+    try {
+      loadConfig({ ...valid, DATABASE_URL: `postgres://mashkif:${password}%zz@db:5432/mashkif` });
+      expect.unreachable();
+    } catch (error) {
+      expect(String(error)).toMatch(/DATABASE_URL is not a URL the PostgreSQL client can read/);
+      expect(String(error)).not.toContain(password);
+    }
+  });
+
+  it("matches the placeholder of every secret in .env.example", () => {
+    const text = readFileSync(new URL("../../.env.example", import.meta.url), "utf8");
+    const value = (name: string) => text.match(new RegExp(`^${name}=(.*)$`, "m"))?.[1];
+    expect(value("POSTGRES_PASSWORD")).toBe(ENV_EXAMPLE_PLACEHOLDER);
+    expect(new URL(value("DATABASE_URL") ?? "").password).toBe(ENV_EXAMPLE_PLACEHOLDER);
+    expect(value("BETTER_AUTH_SECRET")).toBe(ENV_EXAMPLE_PLACEHOLDER);
+    expect(() => loadConfig({ ...valid, DATABASE_URL: value("DATABASE_URL") })).toThrow(refused);
   });
 });
 
