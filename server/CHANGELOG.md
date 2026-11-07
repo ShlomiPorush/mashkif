@@ -34,3 +34,7 @@ All notable changes to this component are recorded here. The format follows
 ### Fixed
 
 - Admin panel: a click on "Forgot your password?" right after the sign-in page appeared could be undone, leaving the admin on the sign-in page.
+
+### Security
+
+- The container image no longer contains esbuild 0.18.20 (GHSA-67mh-4wv8-2f99), which drizzle-kit pulled in through `@esbuild-kit/core-utils`; a pnpm override moves it to esbuild 0.25.12. The server never ran it.
