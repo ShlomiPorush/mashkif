@@ -288,7 +288,8 @@ _docker_runtime() {
   net="mashkif-verify-docker-$id"
   db="$net-db"
   app="$net-app"
-  password="verify-$id"
+  # Random, not derived from the run ID, which is public in the container names.
+  password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   url="postgres://mashkif:$password@$db:5432/mashkif"
   _DOCKER_CLEANUP+=("$app" "$db")
   _DOCKER_NETWORK="$net"
