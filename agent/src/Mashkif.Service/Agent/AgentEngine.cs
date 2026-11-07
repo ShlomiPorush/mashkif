@@ -38,6 +38,9 @@ internal sealed record AgentEngineOptions
 
     /// <summary>Measures the DNS time of a host in milliseconds, or null.</summary>
     public Func<string, CancellationToken, Task<int?>>? MeasureDns { get; init; }
+
+    /// <summary>The offline queue; null runs the engine without events, the probe, and the sender.</summary>
+    public Events.EventQueue? Queue { get; init; }
 }
 
 /// <summary>
@@ -151,6 +154,8 @@ internal sealed partial class AgentEngine : IDisposable
             {
                 LogServerChanged(_logger);
             }
+
+            InitializeEvents();
         }
     }
 
@@ -191,12 +196,20 @@ internal sealed partial class AgentEngine : IDisposable
                 IdentityState = IdentityStates.None,
                 Pending = new PendingRegistration { ServerOrigin = _origin!, Token = credentials.Token },
                 LastRegisterAttemptUtc = null,
+                LastSync = null,
+                DeferredUntilUtc = null,
+                DeferredSeconds = null,
+                QueueRejected = null,
             };
             if (!TrySave(rejoined))
             {
                 return PipeResponse.Failure(PipeErrors.NotAvailable, BuildStatus());
             }
 
+            // The new install ID is saved first, so the old records are ignored even after a crash here.
+            var binding = BindingLocked();
+            _ = _writer?.Post(queue => queue.Rebind(binding));
+            ResetIdentityTimingLocked();
             ResetAttempt();
             _lastContact = null;
             _lastRoundTripMs = null;
@@ -206,17 +219,30 @@ internal sealed partial class AgentEngine : IDisposable
         }
     }
 
-    /// <summary>The network loop: registration, heartbeats, the 401 cycle, and waiting for commands.</summary>
-    public async Task RunAsync(CancellationToken stoppingToken)
+    /// <summary>
+    /// The network loop (registration, heartbeats, the 401 cycle, and waiting
+    /// for commands) and, with a queue, the queue writer, the probe, and the sender.
+    /// </summary>
+    public Task RunAsync(CancellationToken stoppingToken) =>
+        Task.WhenAll([MainLoopAsync(stoppingToken), .. EventLoops(stoppingToken)]);
+
+    private async Task MainLoopAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
             Phase phase;
             int epoch;
             CancellationToken wake;
+            TimeSpan quiet = TimeSpan.Zero;
             lock (_gate)
             {
                 phase = CurrentPhase();
+                if ((phase is Phase.Heartbeat or Phase.TokenCycle) && IsQuiescingLocked())
+                {
+                    phase = Phase.Quiescing;
+                    quiet = QuiescingLeftLocked();
+                }
+
                 epoch = _epoch;
                 wake = _wake.Token;
             }
@@ -226,6 +252,10 @@ internal sealed partial class AgentEngine : IDisposable
             {
                 switch (phase)
                 {
+                    case Phase.Quiescing:
+                        // A sleep or a shutdown pauses heartbeats; a sleep pause ends by itself.
+                        await Task.Delay(quiet, _time, linked.Token).ConfigureAwait(false);
+                        break;
                     case Phase.CreateIdentity:
                         if (!CreatePending(epoch))
                         {
@@ -266,7 +296,10 @@ internal sealed partial class AgentEngine : IDisposable
         lock (_gate)
         {
             _wake.Dispose();
+            _senderWake.Dispose();
         }
+
+        _senderSignal.Dispose();
     }
 
     private enum Phase
@@ -276,6 +309,7 @@ internal sealed partial class AgentEngine : IDisposable
         Register,
         Heartbeat,
         TokenCycle,
+        Quiescing,
     }
 
     private Phase CurrentPhase()
@@ -312,6 +346,7 @@ internal sealed partial class AgentEngine : IDisposable
             }
 
             var credentials = _options.NewCredentials();
+            var hadInstallId = _state.InstallId is not null;
             var created = _state with
             {
                 InstallId = _state.InstallId ?? credentials.InstallId,
@@ -320,6 +355,13 @@ internal sealed partial class AgentEngine : IDisposable
             if (!TrySave(created))
             {
                 return false;
+            }
+
+            if (!hadInstallId)
+            {
+                // The first install ID gives the queue its binding.
+                var binding = BindingLocked();
+                _ = _writer?.Post(queue => queue.Rebind(binding));
             }
 
             LogRegistrationStarted(_logger);
@@ -382,7 +424,8 @@ internal sealed partial class AgentEngine : IDisposable
                 Token = pending.Token,
                 AgentId = result.Value.AgentId,
             };
-            if (!TrySave(_state with { Identity = identity, IdentityState = IdentityStates.Active, Pending = null, IntervalSeconds = interval }))
+            // An identity switch: the sync and the deferral of the old identity do not carry over (P17).
+            if (!TrySave(_state with { Identity = identity, IdentityState = IdentityStates.Active, Pending = null, IntervalSeconds = interval, LastSync = null, DeferredUntilUtc = null, DeferredSeconds = null }))
             {
                 // The server answers the same registration with 200 again.
                 if (!cycle)
@@ -393,6 +436,7 @@ internal sealed partial class AgentEngine : IDisposable
                 return cycle ? Step.Stop : Step.Retry;
             }
 
+            ResetIdentityTimingLocked();
             _lastContact = _time.GetUtcNow();
             _lastRoundTripMs = null;
             SetAttempt(AgentStates.Connected, null);
@@ -478,10 +522,23 @@ internal sealed partial class AgentEngine : IDisposable
                     return Step.Retry;
                 }
 
-                var result = await _api!.HeartbeatAsync(body, identity.Token, token).ConfigureAwait(false);
-                lock (_gate)
+                var inFlight = BeginHeartbeat();
+                if (inFlight is null)
                 {
-                    return _epoch != epoch || !ReferenceEquals(_state.Identity, identity) ? Step.Stop : ApplyHeartbeat(result);
+                    return Step.Stop;
+                }
+
+                try
+                {
+                    var result = await _api!.HeartbeatAsync(body, identity.Token, token).ConfigureAwait(false);
+                    lock (_gate)
+                    {
+                        return _epoch != epoch || !ReferenceEquals(_state.Identity, identity) ? Step.Stop : ApplyHeartbeat(result);
+                    }
+                }
+                finally
+                {
+                    inFlight.TrySetResult();
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -539,27 +596,42 @@ internal sealed partial class AgentEngine : IDisposable
             return;
         }
 
-        var result = await _api!.HeartbeatAsync(body, identity.Token, cancellationToken).ConfigureAwait(false);
-        lock (_gate)
+        var inFlight = BeginHeartbeat();
+        if (inFlight is null)
         {
-            if (_epoch != epoch || !ReferenceEquals(_state.Identity, identity))
-            {
-                return;
-            }
+            return;
+        }
 
-            if (result.Outcome == ApiOutcome.Success || Classify(result) != Refusal.TokenInvalid)
+        ApiResult<HeartbeatResponse> result;
+        try
+        {
+            result = await _api!.HeartbeatAsync(body, identity.Token, cancellationToken).ConfigureAwait(false);
+            lock (_gate)
             {
-                if (ApplyHeartbeat(result).Kind != StepKind.Done)
+                if (_epoch != epoch || !ReferenceEquals(_state.Identity, identity))
                 {
                     return;
                 }
+
+                if (result.Outcome == ApiOutcome.Success || Classify(result) != Refusal.TokenInvalid)
+                {
+                    if (ApplyHeartbeat(result).Kind != StepKind.Done)
+                    {
+                        return;
+                    }
+                }
+                else if (!CycleRegisterAllowed(_state.LastRegisterAttemptUtc, _time.GetUtcNow()))
+                {
+                    // Wait until the hour since the last register request is over.
+                    _cycleDelay = _state.LastRegisterAttemptUtc!.Value + CycleRegisterSpacing - _time.GetUtcNow();
+                    return;
+                }
             }
-            else if (!CycleRegisterAllowed(_state.LastRegisterAttemptUtc, _time.GetUtcNow()))
-            {
-                // Wait until the hour since the last register request is over.
-                _cycleDelay = _state.LastRegisterAttemptUtc!.Value + CycleRegisterSpacing - _time.GetUtcNow();
-                return;
-            }
+        }
+        finally
+        {
+            // The answer, and its sync, is applied before a shutdown event is timed.
+            inFlight.TrySetResult();
         }
 
         if (result.Outcome == ApiOutcome.Success)
@@ -625,7 +697,10 @@ internal sealed partial class AgentEngine : IDisposable
             var interval = ClampInterval(result.Value!.NextIntervalSeconds);
 
             // A 200 for the old token ends the 401 cycle: the pending token is dropped.
-            var updated = _state with { IntervalSeconds = interval, IdentityState = IdentityStates.Active, Pending = null };
+            // The sync of the answer is what events measure their elapsed time from.
+            var answered = ObserveLocked();
+            var sync = new SyncPoint { BootId = _options.BootId, SyncId = result.Value.SyncId!, Timestamp = answered.Timestamp, Frequency = _time.TimestampFrequency };
+            var updated = _state with { IntervalSeconds = interval, IdentityState = IdentityStates.Active, Pending = null, LastSync = _writer is null ? _state.LastSync : sync };
             if (updated != _state && !TrySave(updated))
             {
                 // Keep using the answer; the next save writes it.
@@ -635,6 +710,13 @@ internal sealed partial class AgentEngine : IDisposable
             _lastRoundTripMs = (int)Math.Min(result.Elapsed.TotalMilliseconds, ProtocolConstants.MaxLatencyMs);
             _lastContact = _time.GetUtcNow();
             SetAttempt(AgentStates.Connected, null);
+            if (_writer is not null)
+            {
+                // A heartbeat answer counts as a successful connectivity check.
+                ObserveConnectivityLocked(online: true, answered with { Sync = sync });
+                _senderSignal.Release();
+            }
+
             return Step.Done;
         }
 

@@ -12,7 +12,7 @@ public sealed class EngineTests : IDisposable
 {
     private const string AgentId = "0b5f3c1a-9d2e-4f6a-8b7c-1d2e3f4a5b6c";
     private const string OldOrigin = "https://old.test";
-    private static readonly string PendingToken = new('P', 43);
+    private static readonly string PendingToken = System.Buffers.Text.Base64Url.EncodeToString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
 
     private readonly EngineFixture _f = new();
 

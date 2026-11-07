@@ -19,6 +19,9 @@ public sealed class ProtocolTests
 {
     private static readonly string ExamplesRoot = Path.Combine(AppContext.BaseDirectory, "ContractExamples");
 
+    /// <summary>A token made for this run; no fixed token is ever sent, also not to a fake server.</summary>
+    private static readonly string TestToken = System.Buffers.Text.Base64Url.EncodeToString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+
     private static JsonNode Example(params string[] path) =>
         JsonNode.Parse(File.ReadAllText(Path.Combine([ExamplesRoot, .. path])))!["value"]!;
 
@@ -29,6 +32,67 @@ public sealed class ProtocolTests
     {
         Assert.True(File.Exists(Path.Combine(ExamplesRoot, VersionFolder, "register-request.json")), $"contracts/examples/{VersionFolder}/register-request.json is missing");
         Assert.True(File.Exists(Path.Combine(ExamplesRoot, VersionFolder, "heartbeat-request.json")), $"contracts/examples/{VersionFolder}/heartbeat-request.json is missing");
+        Assert.True(File.Exists(Path.Combine(ExamplesRoot, VersionFolder, "events-request.json")), $"contracts/examples/{VersionFolder}/events-request.json is missing");
+    }
+
+    [Fact]
+    public void The_events_request_equals_the_contract_example_and_carries_no_wall_clock_time()
+    {
+        var example = Example(VersionFolder, "events-request.json");
+        var request = new EventsRequest
+        {
+            Events =
+            [
+                .. example["events"]!.AsArray().Select(e => new AgentEvent
+                {
+                    Id = Guid.Parse(e!["id"]!.GetValue<string>()),
+                    Kind = e["kind"]!.GetValue<string>(),
+                    BootId = Guid.Parse(e["bootId"]!.GetValue<string>()),
+                    SyncId = e["syncId"]?.GetValue<string>(),
+                    ElapsedMs = e["elapsedMs"]?.GetValue<long>(),
+                }),
+            ],
+            DroppedEvents = new DroppedEvents
+            {
+                BootId = Guid.Parse(example["droppedEvents"]!["bootId"]!.GetValue<string>()),
+                Count = example["droppedEvents"]!["count"]!.GetValue<long>(),
+            },
+        };
+        var json = JsonNode.Parse(JsonSerializer.Serialize(request, ProtocolJsonContext.Default.EventsRequest));
+        Assert.True(JsonNode.DeepEquals(example, json), json!.ToJsonString());
+
+        // An event without a sync sends both as null, never leaves them out.
+        var resume = json!["events"]!.AsArray()[2]!.AsObject();
+        Assert.True(resume.ContainsKey("syncId"));
+        Assert.True(resume.ContainsKey("elapsedMs"));
+    }
+
+    [Fact]
+    public async Task The_client_reads_the_events_response_example_with_its_deferred_wait()
+    {
+        var events = await Answer<EventsResponse>(
+            HttpStatusCode.OK,
+            "events-200.json",
+            (api, ct) => api.EventsAsync(new EventsRequest { Events = [] }, TestToken, ct));
+        Assert.Equal(ApiOutcome.Success, events.Outcome);
+        Assert.Equal(["accepted", "duplicate", "deferred"], events.Value!.Results!.Select(r => r.Status));
+        Assert.Equal(1520, events.Value.RetryAfterSeconds);
+    }
+
+    [Fact]
+    public async Task The_connectivity_check_is_a_GET_without_a_token()
+    {
+        using var handler = new ScriptedHandler();
+        handler.Enqueue(HttpStatusCode.OK, """{"status":"ok","protocolVersion":1}""");
+        using var http = new HttpClient(handler);
+        var api = new AgentApiClient(http, new Uri("https://mashkif.test/"), TimeProvider.System);
+        var result = await api.HealthAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(ApiOutcome.Success, result.Outcome);
+        var request = handler.Requests.Single();
+        Assert.Equal(HttpMethod.Get.Method, request.Method);
+        Assert.Equal("https://mashkif.test/api/agent/health", request.Uri.ToString());
+        Assert.Null(request.Authorization);
+        Assert.Equal("1", request.ProtocolVersion);
     }
 
     [Fact]
@@ -126,10 +190,10 @@ public sealed class ProtocolTests
         handler.Enqueue(HttpStatusCode.OK, Example("responses", "heartbeat-200.json").ToJsonString());
         using var http = new HttpClient(handler);
         var api = new AgentApiClient(http, new Uri("https://mashkif.test/"), TimeProvider.System);
-        await api.HeartbeatAsync(SampleHeartbeat(), "the-token", TestContext.Current.CancellationToken);
+        await api.HeartbeatAsync(SampleHeartbeat(), TestToken, TestContext.Current.CancellationToken);
         var request = handler.Requests.Single();
         Assert.Equal("1", request.ProtocolVersion);
-        Assert.Equal("Bearer the-token", request.Authorization);
+        Assert.Equal($"Bearer {TestToken}", request.Authorization);
         Assert.Equal(HttpMethod.Post.Method, request.Method);
     }
 
@@ -215,7 +279,7 @@ public sealed class ProtocolTests
     private static RegisterRequest SampleRegister() => new()
     {
         InstallId = Guid.NewGuid(),
-        Token = new string('A', 43),
+        Token = TestToken,
         AgentVersion = "0.1.0",
     };
 

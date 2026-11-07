@@ -31,6 +31,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
 
     private static readonly string StateDirectory = Path.Combine(InstallSafetyGate.ProductDirectory, "state");
     private static readonly string StateFile = Path.Combine(StateDirectory, "state.json");
+    private static readonly string QueueFile = Path.Combine(StateDirectory, "queue.jsonl");
     private static readonly string ServiceLog = Path.Combine(InstallSafetyGate.ProductDirectory, "logs", "service.log");
 
     [Fact]
@@ -51,9 +52,11 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
             var installLog = Path.Combine(logs, "install.log");
             Msiexec("/i", msi, $"SERVER_URL={api.Origin}", "/qn", "/l*v", installLog);
 
-            // 2. Service SID type and ACLs.
+            // 2. Service SID type, the controls it accepts (power events and
+            //    shutdown, step 2c), and ACLs.
             Assert.Contains("UNRESTRICTED", Run("sc.exe", "qsidtype", "Mashkif"), StringComparison.Ordinal);
             await WaitForStatusAsync(AgentStates.Connected);
+            AssertControlsAccepted();
             AssertAcls();
 
             // 3. One registration with the saved install ID and token, and the
@@ -77,6 +80,7 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
                 Assert.Throws<UnauthorizedAccessException>(() => new NamedPipeServerStream(PipeProtocol.PipeName, PipeDirection.InOut, 4).Dispose());
                 Assert.Throws<UnauthorizedAccessException>(() => Directory.GetFiles(StateDirectory));
                 Assert.Throws<UnauthorizedAccessException>(() => File.ReadAllBytes(StateFile));
+                Assert.Throws<UnauthorizedAccessException>(() => File.ReadAllBytes(QueueFile));
             });
             AsUser(LogonNetwork, password, () =>
                 Assert.Throws<UnauthorizedAccessException>(() => ConnectWithClientRights().Dispose()));
@@ -131,15 +135,76 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
 
         Assert.Null(machine.OpenSubKey(@"SOFTWARE\Mashkif\Agent\Enrollment"));
 
-        // state.json: written by the service with its explicit protected DACL.
-        var file = new FileInfo(StateFile).GetAccessControl();
-        Assert.True(file.AreAccessRulesProtected);
-        var rules = Aces(new RawSecurityDescriptor(file.GetSecurityDescriptorSddlForm(AccessControlSections.Access)));
-        Assert.Equal(4, rules.Count);
-        Assert.Contains(rules, r => r.Sid == ServiceSid);
-        Assert.Contains(rules, r => r.Sid == "S-1-3-4" && (r.Mask & ~0x00120000) == 0);
-        Assert.All(rules, r => Assert.Contains(r.Sid, new[] { "S-1-5-18", "S-1-5-32-544", ServiceSid, "S-1-3-4" }));
+        // state.json and queue.jsonl (the offline queue, which the service
+        // creates and replaces in a compaction): written by the service with
+        // the explicit protected DACL.
+        Assert.True(File.Exists(QueueFile));
+        foreach (var path in new[] { StateFile, QueueFile })
+        {
+            var file = new FileInfo(path).GetAccessControl();
+            Assert.True(file.AreAccessRulesProtected);
+            var rules = Aces(new RawSecurityDescriptor(file.GetSecurityDescriptorSddlForm(AccessControlSections.Access)));
+            Assert.Equal(4, rules.Count);
+            Assert.Contains(rules, r => r.Sid == ServiceSid);
+            Assert.Contains(rules, r => r.Sid == "S-1-3-4" && (r.Mask & ~0x00120000) == 0);
+            Assert.All(rules, r => Assert.Contains(r.Sid, new[] { "S-1-5-18", "S-1-5-32-544", ServiceSid, "S-1-3-4" }));
+        }
     }
+
+    private const int ServiceAcceptStop = 0x1;
+    private const int ServiceAcceptShutdown = 0x4;
+    private const int ServiceAcceptPowerEvent = 0x40;
+
+    /// <summary>The running service accepts stop, shutdown, and power events (QueryServiceStatus).</summary>
+    private static void AssertControlsAccepted()
+    {
+        var manager = OpenSCManagerW(null, null, 0x0001); // SC_MANAGER_CONNECT
+        Assert.NotEqual(IntPtr.Zero, manager);
+        try
+        {
+            var service = OpenServiceW(manager, "Mashkif", 0x0004); // SERVICE_QUERY_STATUS
+            Assert.NotEqual(IntPtr.Zero, service);
+            try
+            {
+                Assert.True(QueryServiceStatus(service, out var status));
+                Assert.Equal(ServiceAcceptStop | ServiceAcceptShutdown | ServiceAcceptPowerEvent, status.ControlsAccepted & (ServiceAcceptStop | ServiceAcceptShutdown | ServiceAcceptPowerEvent));
+            }
+            finally
+            {
+                CloseServiceHandle(service);
+            }
+        }
+        finally
+        {
+            CloseServiceHandle(manager);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ServiceStatus
+    {
+        public int ServiceType;
+        public int CurrentState;
+        public int ControlsAccepted;
+        public int Win32ExitCode;
+        public int ServiceSpecificExitCode;
+        public int CheckPoint;
+        public int WaitHint;
+    }
+
+    [LibraryImport("advapi32.dll", EntryPoint = "OpenSCManagerW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    private static partial IntPtr OpenSCManagerW(string? machineName, string? databaseName, int desiredAccess);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "OpenServiceW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    private static partial IntPtr OpenServiceW(IntPtr manager, string serviceName, int desiredAccess);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool QueryServiceStatus(IntPtr service, out ServiceStatus status);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseServiceHandle(IntPtr handle);
 
     private static void AssertSddl(string expected, ObjectSecurity actual)
     {
@@ -339,9 +404,23 @@ public sealed partial class InstallTests(InstallSafetyGate gate)
                 }
 
                 using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
-                var body = JsonNode.Parse(await reader.ReadToEndAsync());
+                var text = await reader.ReadToEndAsync();
+                var body = text.Length == 0 ? null : JsonNode.Parse(text);
+                var path = context.Request.Url!.AbsolutePath;
                 string json;
-                if (context.Request.Url!.AbsolutePath == "/api/agent/register")
+                if (path == "/api/agent/health")
+                {
+                    // The connectivity check of step 2c: a GET without a body.
+                    context.Response.StatusCode = 200;
+                    json = """{"status":"ok","protocolVersion":1}""";
+                }
+                else if (path == "/api/agent/events")
+                {
+                    context.Response.StatusCode = 200;
+                    var results = new JsonArray([.. body!["events"]!.AsArray().Select(e => (JsonNode)new JsonObject { ["id"] = e!["id"]!.GetValue<string>(), ["status"] = "accepted" })]);
+                    json = new JsonObject { ["results"] = results }.ToJsonString();
+                }
+                else if (path == "/api/agent/register")
                 {
                     lock (_registrations)
                     {
