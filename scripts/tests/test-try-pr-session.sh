@@ -97,7 +97,8 @@ main="$scratch/main"
 g clone -q "$origin" "$main"
 cp -R "$MASHKIF_ROOT/scripts" "$main/scripts"
 echo "name: mashkif-dev" >"$main/docker-compose-dev.yml"
-printf 'MASHKIF_DATA_DIR=%s/data\nPOSTGRES_PASSWORD=test-password\n' "$scratch" >"$main/.env"
+printf 'MASHKIF_DATA_DIR=%s/data\nPOSTGRES_PASSWORD=%s\n' "$scratch" \
+  "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" >"$main/.env"
 TRY="$main/scripts/try-pr.sh"
 
 # --- Fake GitHub API -----------------------------------------------------
