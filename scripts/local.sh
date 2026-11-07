@@ -48,7 +48,7 @@ preflight() {
 # check_settings: validates .env values that local.sh relies on and exports
 # the normalized paths so Compose sees the same values.
 check_settings() {
-  local geoip password url
+  local geoip password url placeholder
   mashkif_data_dir || return
   DATA_DIR="$MASHKIF_DATA_DIR"
   geoip="$(mashkif_env_value MASHKIF_GEOIP_DIR || true)"
@@ -64,7 +64,14 @@ check_settings() {
   export MASHKIF_GEOIP_DIR="$geoip"
   password="$(mashkif_env_value POSTGRES_PASSWORD || true)"
   url="$(mashkif_env_value DATABASE_URL || true)"
-  if [[ -z "$password" || "$password" == change-me || "$url" == *change-me* ]]; then
+  # The same placeholder as ENV_EXAMPLE_PLACEHOLDER in server/src/config.ts;
+  # a server test checks that .env.example uses it.
+  placeholder="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$MASHKIF_ROOT/.env.example")"
+  if [[ -z "$placeholder" ]]; then
+    fail "$MASHKIF_ROOT/.env.example has no POSTGRES_PASSWORD placeholder"
+    return "$MASHKIF_EXIT_ENV"
+  fi
+  if [[ -z "$password" || "$password" == "$placeholder" || "$url" == *"$placeholder"* ]]; then
     fail "$MASHKIF_DEV_ENV_FILE still has the placeholder database password; set POSTGRES_PASSWORD and the same password in DATABASE_URL"
     return "$MASHKIF_EXIT_ENV"
   fi
