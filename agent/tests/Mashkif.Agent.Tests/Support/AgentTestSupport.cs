@@ -289,21 +289,27 @@ internal sealed class EngineFixture : IDisposable
     public static AgentState Registered(string origin = Origin) =>
         AgentState.Empty with { InstallId = InstallId, Identity = Identity(origin), IdentityState = IdentityStates.Active };
 
-    public static AgentIdentity Identity(string origin = Origin, string token = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8") => new()
+    /// <summary>The token of a seeded identity: random for each test run, never a fixed value.</summary>
+    public static readonly string SeededToken = NewToken();
+
+    public static AgentIdentity Identity(string origin = Origin, string? token = null) => new()
     {
         ServerOrigin = origin,
-        Token = token,
+        Token = token ?? SeededToken,
         AgentId = Guid.Parse("22222222-2222-4222-8222-222222222222"),
     };
 
+    /// <summary>32 random bytes in base64url, like a real token.</summary>
+    public static string NewToken() =>
+        System.Buffers.Text.Base64Url.EncodeToString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+
     private Credentials NextCredentials()
     {
+        // The install IDs stay readable (an install ID is not a secret); the tokens are random.
         var n = Interlocked.Increment(ref _credentials);
-        var bytes = new byte[32];
-        bytes[0] = (byte)n;
         var credentials = new Credentials(
             Guid.Parse($"aaaaaaaa-aaaa-4aaa-8aaa-{n:D12}"),
-            System.Buffers.Text.Base64Url.EncodeToString(bytes));
+            NewToken());
         IssuedCredentials.Add(credentials);
         return credentials;
     }

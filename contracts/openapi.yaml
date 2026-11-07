@@ -248,6 +248,9 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/EventsRequest"
+            examples:
+              agent-0.1.0:
+                $ref: "examples/agent-0.1.0/events-request.json"
       responses:
         "200":
           description: Every event has a result.

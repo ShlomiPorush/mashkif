@@ -45,12 +45,32 @@ internal sealed record PendingRegistration
 }
 
 /// <summary>
-/// The content of <c>state.json</c>, schema version 1. The tokens live only
-/// here and in requests to the server they are bound to.
+/// The last heartbeat answer of a boot: its sync ID and the monotonic
+/// reading (<see cref="TimeProvider.GetTimestamp"/>, which counts through
+/// sleep) when the answer arrived. Events measure their elapsed time from it.
+/// </summary>
+internal sealed record SyncPoint
+{
+    public required Guid BootId { get; init; }
+
+    public required string SyncId { get; init; }
+
+    public required long Timestamp { get; init; }
+
+    public required long Frequency { get; init; }
+}
+
+/// <summary>
+/// The content of <c>state.json</c>, schema version 2 (version 1 is read and
+/// migrated). The tokens live only here and in requests to the server they
+/// are bound to.
 /// </summary>
 internal sealed partial record AgentState
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
+
+    /// <summary>The schema version of the 0.1.0 builds before step 2c; read and migrated.</summary>
+    public const int PreviousSchemaVersion = 1;
 
     public int SchemaVersion { get; init; } = CurrentSchemaVersion;
 
@@ -70,6 +90,24 @@ internal sealed partial record AgentState
 
     public long NextSequence { get; init; }
 
+    /// <summary>The last heartbeat answer; cleared by every identity switch.</summary>
+    public SyncPoint? LastSync { get; init; }
+
+    /// <summary>
+    /// The end of the last <c>deferred</c> wait of the event budget, with its
+    /// length, so a restart still honors it. Cleared by every identity switch.
+    /// </summary>
+    public DateTimeOffset? DeferredUntilUtc { get; init; }
+
+    public int? DeferredSeconds { get; init; }
+
+    /// <summary>
+    /// Events dropped because the queue file was at its size bound, as a
+    /// cumulative count per boot (at most 10 boots). They live here, a separate
+    /// file, because the queue file could not take them; cleared by Join again.
+    /// </summary>
+    public IReadOnlyList<DroppedEvents>? QueueRejected { get; init; }
+
     /// <summary>A state with nothing in it, for a PC that never registered.</summary>
     public static AgentState Empty { get; } = new();
 
@@ -79,6 +117,23 @@ internal sealed partial record AgentState
         if (SchemaVersion != CurrentSchemaVersion
             || IntervalSeconds is < ProtocolConstants.MinIntervalSeconds or > ProtocolConstants.MaxIntervalSeconds
             || NextSequence is < 0 or > 9007199254740991)
+        {
+            return false;
+        }
+
+        if (LastSync is { } sync
+            && (sync.BootId == Guid.Empty || !SyncIdPattern().IsMatch(sync.SyncId ?? string.Empty) || sync.Timestamp < 0 || sync.Frequency <= 0))
+        {
+            return false;
+        }
+
+        if ((DeferredUntilUtc is null) != (DeferredSeconds is null) || DeferredSeconds is < 1)
+        {
+            return false;
+        }
+
+        if (QueueRejected is { } rejected
+            && (rejected.Count > 10 || rejected.Any(r => r is null || r.BootId == Guid.Empty || r.Count < 1) || rejected.Select(r => r.BootId).Distinct().Count() != rejected.Count))
         {
             return false;
         }
@@ -119,6 +174,9 @@ internal sealed partial record AgentState
 
     [GeneratedRegex("^[A-Za-z0-9_-]{43}$", RegexOptions.CultureInvariant)]
     private static partial Regex TokenPattern();
+
+    [GeneratedRegex("^[A-Za-z0-9_-]{1,64}$", RegexOptions.CultureInvariant)]
+    private static partial Regex SyncIdPattern();
 }
 
 /// <summary>Source-generated JSON for <c>state.json</c>. Unknown members make the file invalid.</summary>

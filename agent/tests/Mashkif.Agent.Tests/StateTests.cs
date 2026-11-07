@@ -78,18 +78,18 @@ public sealed class StateTests : IDisposable
 
     [Theory]
     [InlineData("{ not json")]
-    [InlineData("""{"schemaVersion":2,"identityState":"none","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":3,"identityState":"none","intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"identityState":"active","intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"identityState":"none","intervalSeconds":5,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"identityState":"none","intervalSeconds":60,"nextSequence":0,"surprise":true}""")]
     [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"short","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"none","pending":{"serverOrigin":"https://mashkif.test/path","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"none","intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"revoked","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","pending":{"serverOrigin":"https://other.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"none","pending":{"serverOrigin":"https://mashkif.test/path","token":"example-token-not-a-credential-placeholder0"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"identity":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"none","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"active","pending":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"revoked","pending":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","pending":{"serverOrigin":"https://other.test","token":"example-token-not-a-credential-placeholder0"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"suspended","intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"installId":"00000000-0000-0000-0000-000000000000","identityState":"none","intervalSeconds":60,"nextSequence":0}""")]
     public void An_unreadable_or_inconsistent_state_is_a_problem_and_stays_untouched(string content)
@@ -102,8 +102,8 @@ public sealed class StateTests : IDisposable
     }
 
     [Theory]
-    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"none","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"intervalSeconds":60,"nextSequence":0}""")]
-    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","pending":{"serverOrigin":"https://mashkif.test","token":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},"lastRegisterAttemptUtc":"2026-11-02T09:00:00+00:00","intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"none","pending":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0"},"intervalSeconds":60,"nextSequence":0}""")]
+    [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identity":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0","agentId":"22222222-2222-4222-8222-222222222222"},"identityState":"token_rejected","pending":{"serverOrigin":"https://mashkif.test","token":"example-token-not-a-credential-placeholder0"},"lastRegisterAttemptUtc":"2026-11-02T09:00:00+00:00","intervalSeconds":60,"nextSequence":0}""")]
     [InlineData("""{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"revoked","intervalSeconds":60,"nextSequence":0}""")]
     public void The_states_of_registration_the_401_cycle_and_a_revoke_are_valid(string content)
     {
@@ -233,6 +233,51 @@ public sealed class StateTests : IDisposable
 
         written.Refresh();
         Assert.Equal((length, time), (written.Length, written.LastWriteTimeUtc));
+    }
+
+    [Fact]
+    public void A_version_1_state_of_an_earlier_0_1_0_build_loads_as_version_2_and_is_saved_as_version_2()
+    {
+        File.WriteAllText(_f.StateFile, """{"schemaVersion":1,"installId":"11111111-1111-4111-8111-111111111111","identityState":"none","intervalSeconds":120,"nextSequence":7}""");
+        var store = _f.CreateStore();
+        var load = store.Load();
+        Assert.Null(load.Problem);
+        Assert.Equal(AgentState.CurrentSchemaVersion, load.State!.SchemaVersion);
+        Assert.Equal(EngineFixture.InstallId, load.State.InstallId);
+        Assert.Equal(120, load.State.IntervalSeconds);
+        Assert.Null(load.State.LastSync);
+
+        store.Save(load.State);
+        Assert.Contains("\"schemaVersion\": 2", File.ReadAllText(_f.StateFile), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{"schemaVersion":1,"identityState":"none","intervalSeconds":60,"nextSequence":0,"deferredSeconds":5,"deferredUntilUtc":"2026-11-05T08:00:00+00:00"}""")]
+    [InlineData("""{"schemaVersion":2,"identityState":"none","intervalSeconds":60,"nextSequence":0,"deferredSeconds":5}""")]
+    [InlineData("""{"schemaVersion":2,"identityState":"none","intervalSeconds":60,"nextSequence":0,"deferredSeconds":0,"deferredUntilUtc":"2026-11-05T08:00:00+00:00"}""")]
+    [InlineData("""{"schemaVersion":2,"identityState":"none","intervalSeconds":60,"nextSequence":0,"lastSync":{"bootId":"7c9e6679-7425-40de-944b-e07fc1f90ae7","syncId":"bad sync","timestamp":1,"frequency":10000000}}""")]
+    [InlineData("""{"schemaVersion":2,"identityState":"none","intervalSeconds":60,"nextSequence":0,"lastSync":{"bootId":"7c9e6679-7425-40de-944b-e07fc1f90ae7","syncId":"sync-1","timestamp":1,"frequency":0}}""")]
+    [InlineData("""{"schemaVersion":2,"identityState":"none","intervalSeconds":60,"nextSequence":0,"surprise":true}""")]
+    public void Version_2_fields_are_checked_and_a_version_1_file_may_not_hold_them(string content)
+    {
+        File.WriteAllText(_f.StateFile, content);
+        var load = _f.CreateStore().Load();
+        Assert.NotNull(load.Problem);
+        Assert.Equal(content, File.ReadAllText(_f.StateFile));
+    }
+
+    [Fact]
+    public void A_version_2_state_with_a_sync_and_a_deferral_reads_back_unchanged()
+    {
+        var state = Sample() with
+        {
+            LastSync = new SyncPoint { BootId = Guid.NewGuid(), SyncId = "sync-1", Timestamp = 42, Frequency = 10_000_000 },
+            DeferredUntilUtc = new DateTimeOffset(2026, 11, 5, 10, 30, 0, TimeSpan.Zero),
+            DeferredSeconds = 9000,
+        };
+        var store = _f.CreateStore();
+        store.Save(state);
+        Assert.Equal(state, store.Load().State);
     }
 
     [Fact]

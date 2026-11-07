@@ -8,7 +8,7 @@ using Mashkif.Service.State;
 namespace Mashkif.Service;
 
 /// <summary>The installed agent: production paths, registry, HTTP, and pipe.</summary>
-internal sealed partial class AgentRuntime(ILoggerFactory loggers) : IAgentRunner
+internal sealed partial class AgentRuntime(ILoggerFactory loggers, LifecycleRecorder recorder) : IAgentRunner
 {
     public async Task RunAsync(CancellationToken stoppingToken)
     {
@@ -30,18 +30,21 @@ internal sealed partial class AgentRuntime(ILoggerFactory loggers) : IAgentRunne
         }
 
         using var http = new HttpClient(AgentApiClient.CreateHandler()) { Timeout = Timeout.InfiniteTimeSpan };
+        var store = StateStore.Production();
         using var engine = new AgentEngine(
             new AgentEngineOptions
             {
-                Store = StateStore.Production(),
+                Store = store,
                 Origin = origin,
                 Http = http,
                 BootId = bootId,
                 AgentVersion = AgentService.Version,
                 OsVersion = OsVersion(),
+                Queue = new Events.EventQueue(store.StateDirectory, store.Policy),
             },
             loggers.CreateLogger<AgentEngine>());
         engine.Initialize();
+        recorder.Attach(engine);
 
         var pipe = new PipeServer(
             engine,
@@ -50,7 +53,14 @@ internal sealed partial class AgentRuntime(ILoggerFactory loggers) : IAgentRunne
             loggers.CreateLogger<PipeServer>(),
             TimeProvider.System);
 
-        await Task.WhenAll(engine.RunAsync(stoppingToken), pipe.RunAsync(stoppingToken)).ConfigureAwait(false);
+        try
+        {
+            await Task.WhenAll(engine.RunAsync(stoppingToken), pipe.RunAsync(stoppingToken)).ConfigureAwait(false);
+        }
+        finally
+        {
+            recorder.Detach();
+        }
     }
 
     /// <summary>Windows version, for example 10.0.26100.</summary>
