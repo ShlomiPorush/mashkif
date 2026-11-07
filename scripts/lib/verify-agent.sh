@@ -323,9 +323,11 @@ _agent_install_tests() {
 # _agent_progress <message>: logs a progress line and, in GitHub Actions, also
 # writes it as a notice annotation with the UTC time. When the runner is lost
 # during the agent job, GitHub keeps no step log and no artifact of it (the
-# step stays in progress until the job timeout), but it keeps the annotations
-# the step wrote before, so the last notice names the install test that was
-# running and when it started. GitHub keeps at most 10 notices per step.
+# step stays in progress until the job timeout). The runner sends annotations
+# to the job's timeline on GitHub, not to a file on the VM, so the last notice
+# may name the install test that was running and when it started; whether a
+# lost job keeps them is not proven yet (a check run lists them only after the
+# step ends). GitHub keeps at most 10 notices per step.
 _agent_progress() {
   log "  progress: $1"
   if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
