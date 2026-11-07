@@ -20,13 +20,14 @@
 # - WiX 7 needs its OSMF EULA accepted: AcceptEula=wix7 (Directory.Build.props)
 #   for the builds, -acceptEula wix7 on each wix command.
 # - Install tests (tests/Mashkif.Install.Tests, outside the solution) run only
-#   on a GitHub-hosted runner.
-# - Both test steps write a TRX report into <scratch>/test-results/<step>/
-#   when the test run ends by itself. A run that completes no test for the
-#   hang timeout is dumped (Microsoft.Testing.Extensions.HangDump, Triage type)
-#   and killed; it then writes no TRX, but HangDump prints the tests that were
-#   still running to the step log and writes them into a .log file next to
-#   the dump. In CI the scratch folder stays when a check fails, so the
+#   on a GitHub-hosted runner, one test per dotnet test run, each announced
+#   by a notice annotation first (_agent_progress).
+# - Every test run writes a TRX report into <scratch>/test-results/<step>/
+#   (unit, or install/<n>) when it ends by itself. A run that completes no
+#   test for the hang timeout is dumped (Microsoft.Testing.Extensions.HangDump,
+#   Triage type) and killed; it then writes no TRX, but HangDump prints the
+#   tests that were still running to the step log and writes them into a .log
+#   file next to the dump. In CI the scratch folder stays when a check fails, so the
 #   workflow can upload the reports, dumps, and installer logs.
 
 _AGENT_DIR="$MASHKIF_ROOT/agent"
@@ -306,11 +307,7 @@ _agent_install_tests() {
     MASHKIF_TEST_UPGRADE_BUNDLE_BA="$(_agent_windows_path "$scratch/upgrade-bundle-ba")"
     export MASHKIF_INSTALL_TEST_MSI MASHKIF_INSTALL_TEST_HE_MSI MASHKIF_INSTALL_TEST_UPGRADE_MSI \
       MASHKIF_INSTALL_TEST_EXE MASHKIF_INSTALL_TEST_UPGRADE_EXE MASHKIF_TEST_UPGRADE_BUNDLE_BA
-    # Longer than one process run (RunTimeout, 10 minutes), so a slow
-    # installer fails with its own message first.
-    local diagnostics
-    mapfile -t diagnostics < <(_agent_test_diagnostics "$scratch" install 15m)
-    _agent_step "install tests" test --project "$_AGENT_INSTALL_TESTS" -c Release --no-build "${diagnostics[@]}" || rc=$?
+    _agent_run_install_tests "$scratch" || rc=$?
   fi
   # Sizes the install tests measured (the Package Cache), for the record.
   if [[ -s "$scratch/measurements.txt" ]]; then
@@ -320,5 +317,73 @@ _agent_install_tests() {
     done < <(tr -d '\r' <"$scratch/measurements.txt")
   fi
   rm -rf -- "$upgrade_root"
+  return "$rc"
+}
+
+# _agent_progress <message>: logs a progress line and, in GitHub Actions, also
+# writes it as a notice annotation with the UTC time. When the runner is lost
+# during the agent job, GitHub keeps no step log and no artifact of it (the
+# step stays in progress until the job timeout). The runner sends annotations
+# to the job's timeline on GitHub, not to a file on the VM, so the last notice
+# may name the install test that was running and when it started; whether a
+# lost job keeps them is not proven yet (a check run lists them only after the
+# step ends). GitHub keeps at most 10 notices per step.
+_agent_progress() {
+  log "  progress: $1"
+  if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+    printf '::notice title=agent progress::%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1"
+  fi
+}
+
+# _agent_parse_test_listing <namespace>: reads the output of dotnet test
+# --list-tests on stdin and prints the fully qualified name of every test in
+# <namespace>, one per line. Fails unless there is at least one and the
+# number matches the final "Discovered <n> tests." line. Carriage returns and
+# ANSI colors are removed first: in GitHub Actions the test platform colors
+# its output even into a pipe.
+_agent_parse_test_listing() {
+  local namespace="${1//./\\.}" esc=$'\e' listing names count listed=0
+  listing="$(tr -d '\r' | sed "s/${esc}\[[0-9;]*m//g")"
+  names="$(sed -n "s/^[[:space:]]*\(${namespace}\.[A-Za-z0-9_.]*\)[[:space:]]*$/\1/p" <<<"$listing")"
+  count="$(sed -n 's/^Discovered \([0-9][0-9]*\) tests*\.$/\1/p' <<<"$listing" | tail -n 1)"
+  [[ -n "$names" ]] && listed="$(grep -c '' <<<"$names")"
+  if ((listed == 0)) || [[ "$count" != "$listed" ]]; then
+    printf '%s\n' "$listing" >&2
+    fail "the test listing names $listed tests in $1, but discovery reports ${count:-no number}"
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+  printf '%s\n' "$names"
+}
+
+# _agent_install_test_names: prints the fully qualified name of every install
+# test, one per line. Discovery (--list-tests) runs no test and no fixture.
+_agent_install_test_names() {
+  local listing
+  if ! listing="$(_agent_dotnet test --project "$_AGENT_INSTALL_TESTS" -c Release --no-build --list-tests 2>&1)"; then
+    printf '%s\n' "$listing" >&2
+    fail "cannot list the install tests"
+    return "$MASHKIF_EXIT_FAILED"
+  fi
+  _agent_parse_test_listing Mashkif.Install.Tests <<<"$listing"
+}
+
+# _agent_run_install_tests <scratch>: runs every install test in its own
+# dotnet test run, in discovery order, after a progress notice that names it.
+# A failed test does not stop the others, as in a single run.
+# --minimum-expected-tests 1 fails a filter that matches no test.
+_agent_run_install_tests() {
+  local scratch="$1" names rc=0 i=0 test
+  local -a tests diagnostics
+  names="$(_agent_install_test_names)" || return
+  mapfile -t tests <<<"$names"
+  for test in "${tests[@]}"; do
+    i=$((i + 1))
+    _agent_progress "install test $i/${#tests[@]} started: ${test##*.}"
+    # Longer than one process run (RunTimeout, 10 minutes), so a slow
+    # installer fails with its own message first.
+    mapfile -t diagnostics < <(_agent_test_diagnostics "$scratch" "install/$i" 15m)
+    _agent_step "install test $i/${#tests[@]}" test --project "$_AGENT_INSTALL_TESTS" -c Release --no-build \
+      --filter-method "$test" --minimum-expected-tests 1 "${diagnostics[@]}" || rc=$?
+  done
   return "$rc"
 }

@@ -158,7 +158,9 @@ jobs:
         with:
           global-json-file: agent/global.json
       # Normally about 9 minutes. The step timeout is below the job timeout,
-      # so a hang ends this step and the diagnostics upload still runs.
+      # so a hang inside the step ends it and the diagnostics upload still
+      # runs. A lost runner ends nothing: the step stays in progress until
+      # the job timeout, with no log and no artifact.
       - name: Verify agent
         timeout-minutes: 35
         run: bash scripts/verify.sh --area agent
