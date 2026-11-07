@@ -7,6 +7,8 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.14" />
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.11.0" />
+    <!-- Matches Microsoft.Testing.Platform, which xunit.v3 brings. -->
+    <PackageVersion Include="Microsoft.Testing.Extensions.HangDump" Version="2.5.1" />
     <PackageVersion Include="Polly.Core" Version="8.8.0" />
     <PackageVersion Include="WixToolset.BootstrapperApplications.wixext" Version="7.0.1" />
     <PackageVersion Include="WixToolset.Dtf.WindowsInstaller" Version="7.0.1" />

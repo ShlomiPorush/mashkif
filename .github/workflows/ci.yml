@@ -157,8 +157,27 @@ jobs:
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: agent/global.json
+      # Normally about 9 minutes. The step timeout is below the job timeout,
+      # so a hang ends this step and the diagnostics upload still runs.
       - name: Verify agent
+        timeout-minutes: 35
         run: bash scripts/verify.sh --area agent
+      # Only after a failure: the TRX reports, hang dumps with their lists of
+      # running tests, and the installer and test logs that
+      # scripts/lib/verify-agent.sh keeps in its scratch folder. Its own
+      # timeout leaves the job time to close within the job timeout.
+      - name: Upload the agent test diagnostics
+        if: failure()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-test-diagnostics
+          path: |
+            ${{ runner.temp }}/mashkif/agent-tests.*/test-results/
+            ${{ runner.temp }}/mashkif/agent-tests.*/**/*.log
+            ${{ runner.temp }}/mashkif/agent-tests.*/measurements.txt
+          if-no-files-found: warn
+          retention-days: 3
       # Unsigned test builds of the pull request, kept for a week so a change
       # can be tried without a local build. Not a release.
       - name: Upload the unsigned MSI and EXE

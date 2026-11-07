@@ -16,6 +16,9 @@ public sealed partial class InstallTests
 {
     private static readonly TimeSpan RunTimeout = TimeSpan.FromMinutes(10);
 
+    /// <summary>How long a run's output may stay open after the process exited.</summary>
+    private static readonly TimeSpan OutputTimeout = TimeSpan.FromMinutes(1);
+
     /// <summary>
     /// Set when a run timed out in the current test. The install state may not
     /// have settled then, so cleanup deletes no data. The tests never run in
@@ -68,7 +71,14 @@ public sealed partial class InstallTests
                 return new RunResult(-1, $"timed out after {RunTimeout.TotalMinutes} minutes", TimedOut: true);
             }
 
-            process.WaitForExit();
+            // A child process that inherited the output handles keeps them
+            // open after this process exited; never wait for it without a bound.
+            if (!Task.WaitAll([output, error], OutputTimeout))
+            {
+                s_timedOut = true;
+                return new RunResult(-1, $"exited with {process.ExitCode}, but a child process kept its output open for {OutputTimeout.TotalMinutes} minute", TimedOut: true);
+            }
+
             return new RunResult(process.ExitCode, output.Result + error.Result, TimedOut: false);
         }
     }
@@ -80,8 +90,10 @@ public sealed partial class InstallTests
         return result.Output;
     }
 
+    /// <summary>Runs msiexec with /norestart (CleanupLogic.MsiexecArguments) and asserts success.</summary>
     private static void Msiexec(params string[] arguments)
     {
+        arguments = CleanupLogic.MsiexecArguments(arguments);
         var result = TryRun("msiexec.exe", arguments);
         Assert.True(result.Succeeded, $"msiexec {string.Join(' ', arguments)} exited with {result.ExitCode}: {result.Output}");
     }

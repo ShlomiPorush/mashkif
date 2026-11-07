@@ -136,6 +136,13 @@ public sealed class InstallCleanupTests
         Assert.Null(QuietUninstallCommand(" "));
     }
 
+    [Fact]
+    public void Every_msiexec_run_gets_norestart_once()
+    {
+        Assert.Equal(["/i", "a.msi", "/qn", "/norestart"], MsiexecArguments(["/i", "a.msi", "/qn"]));
+        Assert.Equal(["/x", "{P1}", "/qn", "/NoRestart"], MsiexecArguments(["/x", "{P1}", "/qn", "/NoRestart"]));
+    }
+
     /// <summary>
     /// A machine in memory: uninstalls remove the entry, msiexec /x removes the
     /// product, and an entry without an uninstall string stays registered.
