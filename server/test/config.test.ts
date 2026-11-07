@@ -6,9 +6,11 @@ import { ConfigError, DEFAULT_PORT, ENV_EXAMPLE_PLACEHOLDER, loadConfig } from "
 import { parsePublicUrl } from "../src/settings.js";
 
 const secret = randomBytes(32).toString("base64");
+// Hex, so the password needs no percent-encoding in the URL.
+const databasePassword = randomBytes(16).toString("hex");
 
 const valid = {
-  DATABASE_URL: "postgres://mashkif:example@db:5432/mashkif",
+  DATABASE_URL: `postgres://mashkif:${databasePassword}@db:5432/mashkif`,
   MASHKIF_GEOIP_ASN_PATH: "/geoip/GeoLite2-ASN.mmdb",
   BETTER_AUTH_SECRET: secret,
 };
@@ -48,12 +50,12 @@ describe("loadConfig", () => {
   });
 
   it("never puts the database URL in the error message", () => {
-    const leaked = "postgres://mashkif:s3cret@db/mashkif";
+    const leaked = `postgres://mashkif:${databasePassword}@db/mashkif`;
     try {
       loadConfig({ DATABASE_URL: leaked, PORT: "x" });
       expect.unreachable();
     } catch (error) {
-      expect(String(error)).not.toContain("s3cret");
+      expect(String(error)).not.toContain(databasePassword);
     }
   });
 });

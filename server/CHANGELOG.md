@@ -30,3 +30,7 @@ All notable changes to this component are recorded here. The format follows
 - Agents that registered but never sent a heartbeat are removed after 30 days by default. Revoked agents are kept, so a returning revoked PC is told it was revoked.
 - A request whose agent no longer exists gets 401 `token_invalid`, so the agent registers again; only a revoke by the admin gives `agent_revoked`.
 - Trusted proxies: the reverse proxies whose `X-Forwarded-For` is believed, for the agent API and Better Auth.
+
+### Fixed
+
+- Admin panel: a click on "Forgot your password?" right after the sign-in page appeared could be undone, leaving the admin on the sign-in page.
