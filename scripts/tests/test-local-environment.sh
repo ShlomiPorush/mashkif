@@ -30,6 +30,8 @@ unset MASHKIF_DATA_DIR MASHKIF_GEOIP_DIR POSTGRES_PASSWORD DATABASE_URL
 mkdir -p "$HOME" "$scratch/main" "$scratch/geoip"
 head -c 64 /dev/urandom >"$scratch/geoip/GeoLite2-ASN.mmdb"
 DATA="$scratch/data"
+# A database password for this run only; never a fixed value in the repository.
+TEST_PASSWORD="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 
 write_env() {
   cat >"$scratch/main/.env" <<EOF
@@ -37,8 +39,8 @@ MASHKIF_DATA_DIR=$1
 MASHKIF_GEOIP_DIR=$scratch/geoip
 POSTGRES_USER=mashkif
 POSTGRES_DB=mashkif
-POSTGRES_PASSWORD=${2:-test-password}
-DATABASE_URL=postgres://mashkif:${2:-test-password}@db:5432/mashkif
+POSTGRES_PASSWORD=${2:-$TEST_PASSWORD}
+DATABASE_URL=postgres://mashkif:${2:-$TEST_PASSWORD}@db:5432/mashkif
 EOF
 }
 
@@ -96,7 +98,7 @@ t_check "postgres/ was given to the db user" grep -qxF "$DATA/postgres" "$S/chow
 t_run "$LOCAL" status
 t_expect "status reports the environment" 0 "Project:        mashkif-dev" "try-pr session: none" \
   "matches mashkif-app:dev" "postgres_prepared=true"
-t_check "status never prints secrets" test "${T_OUT//test-password/}" = "$T_OUT"
+t_check "status never prints secrets" test "${T_OUT//"$TEST_PASSWORD"/}" = "$T_OUT"
 t_run "$LOCAL" down
 t_expect "down succeeds and keeps data" 0 "the data directory is kept"
 t_check "data directory survives down" test -f "$DATA/.mashkif-data"

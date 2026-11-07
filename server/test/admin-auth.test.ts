@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDatabase, type TestDatabase, truncateAll } from "./support/database.js";
 import {
@@ -20,7 +20,7 @@ import { totpCode } from "./support/totp.js";
 // routes through the app and check the few things Mashkif adds: the first
 // admin only, the admin API middleware, the configuration, and the audit log.
 
-const NEW_PASSWORD = "a brand new passphrase";
+const NEW_PASSWORD = randomBytes(24).toString("base64url");
 
 let database: TestDatabase;
 let harness: Harness;
@@ -96,7 +96,7 @@ describe("first admin", () => {
       name: "intruder",
       username: "intruder",
       email: "intruder@example.test",
-      password: "another long password",
+      password: randomBytes(24).toString("base64url"),
     });
     expect(reply.status).toBe(400);
     expect(reply.body.code).toBe("FAILED_TO_CREATE_USER");
@@ -396,7 +396,7 @@ describe("password reset by email", () => {
     // The link works once.
     const again = await visitor.post("/api/auth/reset-password", {
       token,
-      newPassword: "yet another passphrase",
+      newPassword: randomBytes(24).toString("base64url"),
     });
     expect(again.body.code).toBe("INVALID_TOKEN");
     expect(await actions()).toEqual(

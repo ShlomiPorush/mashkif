@@ -17,6 +17,7 @@ All notable changes to this component are recorded here. The format follows
 - Settings in the admin panel, each with a default: heartbeat interval, retention, public URL, other trusted origins, trusted proxies, session length, and SMTP (host, port, user, password stored encrypted and never shown, sender). An environment variable may override a setting (`BETTER_AUTH_URL`, `BETTER_AUTH_TRUSTED_ORIGINS`, `MASHKIF_TRUSTED_PROXIES`, `MASHKIF_SESSION_HOURS`, `MASHKIF_SMTP_*`); the panel then shows it locked.
 - Email through SMTP with TLS. Without SMTP the server works; password reset and email change requests then send nothing, and the server log says why.
 - New required setting `BETTER_AUTH_SECRET` (at least 32 random characters). The server refuses to start without it.
+- The server refuses to start when the database password in `DATABASE_URL` is empty, still the `.env.example` placeholder, or contains a line break, and the `db` container refuses such a password, from `POSTGRES_PASSWORD` or `POSTGRES_PASSWORD_FILE`, before PostgreSQL initializes with it. A database already set up with the placeholder must change its password first; the README lists the steps.
 - Agent protocol version 1: `POST /api/agent/register` registers an agent identity without a key (open registration), `POST /api/agent/heartbeat` records heartbeats, and `POST /api/agent/events` stores events, also those recorded offline, with one result per event. Bodies are limited to 64 KB and 500 events; requests are rate limited and get 429 with `Retry-After`.
 - Event times come from the server time of the last heartbeat response plus the agent's monotonic clock; events without a usable sync, later than their receipt, or older than 7 days are marked time uncertain.
 - Sites: an IPv4 address or an IPv6 /64. The full address of each agent is stored and shown only in the admin panel.
@@ -29,6 +30,10 @@ All notable changes to this component are recorded here. The format follows
 - Agents that registered but never sent a heartbeat are removed after 30 days by default. Revoked agents are kept, so a returning revoked PC is told it was revoked.
 - A request whose agent no longer exists gets 401 `token_invalid`, so the agent registers again; only a revoke by the admin gives `agent_revoked`.
 - Trusted proxies: the reverse proxies whose `X-Forwarded-For` is believed, for the agent API and Better Auth.
+
+### Fixed
+
+- Admin panel: a click on "Forgot your password?" right after the sign-in page appeared could be undone, leaving the admin on the sign-in page.
 
 ### Security
 

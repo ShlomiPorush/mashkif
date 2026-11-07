@@ -91,7 +91,11 @@ export function AdminApp() {
 
   const target = boot === undefined ? undefined : targetPath(boot, path);
   useEffect(() => {
-    if (target !== undefined && path !== target) {
+    // Redirect only from the path this render saw. A navigation that came
+    // before this effect ran (a click right after the page appeared) renders
+    // again with the new path, which decides again; redirecting here would
+    // undo it.
+    if (target !== undefined && path !== target && window.location.pathname === path) {
       navigate(target, true);
     }
   }, [path, target]);
