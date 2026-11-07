@@ -373,6 +373,28 @@ describe("sign-in", () => {
     expect(await screen.findByRole("heading", { level: 1, name: en.forgot.heading })).toBeTruthy();
     expect(window.location.pathname).toBe("/admin/forgot-password");
   });
+
+  it("keeps a click on the forgot link that lands before the redirect to /admin/sign-in", async () => {
+    serve(boot(false, null));
+    // Click the link as soon as React puts it in the page, like a very fast
+    // user. React does not promise when its effects run, so record where the
+    // click came from: the test only means something if it came from /admin.
+    let clickedFrom: string | undefined;
+    const observer = new MutationObserver(() => {
+      const link = screen.queryByRole("link", { name: en.signIn.forgotLink });
+      if (link !== null) {
+        observer.disconnect();
+        clickedFrom = window.location.pathname;
+        link.click();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    renderAdmin(createI18n("en"));
+    expect(await screen.findByRole("heading", { level: 1, name: en.forgot.heading })).toBeTruthy();
+    expect(clickedFrom).toBe("/admin");
+    expect(window.location.pathname).toBe("/admin/forgot-password");
+    observer.disconnect();
+  });
 });
 
 describe("setup", () => {
