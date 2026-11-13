@@ -188,7 +188,7 @@ importers:
         version: 1.7.12(@better-auth/core@1.7.12(@better-auth/utils@0.5.0)(@better-fetch/fetch@1.3.2)(better-call@1.4.4(zod@4.6.7))(jose@6.2.14)(kysely@0.29.7)(nanostores@1.5.5))(@better-auth/utils@0.5.0)(@better-fetch/fetch@1.3.2)(better-auth@1.7.12(drizzle-kit@0.31.11)(drizzle-orm@0.45.4(kysely@0.29.7)(postgres@3.4.9))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(vitest@5.0.5(@types/node@24.19.2)(jsdom@30.1.3(@noble/hashes@2.4.0))(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15))))(better-call@1.4.4(zod@4.6.7))(nanostores@1.5.5)
       '@hono/node-server':
         specifier: ^2.1.5
-        version: 2.1.5(hono@4.13.14)
+        version: 2.1.5(hono@4.13.16)
       better-auth:
         specifier: 1.7.12
         version: 1.7.12(drizzle-kit@0.31.11)(drizzle-orm@0.45.4(kysely@0.29.7)(postgres@3.4.9))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(vitest@5.0.5(@types/node@24.19.2)(jsdom@30.1.3(@noble/hashes@2.4.0))(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15)))
@@ -199,8 +199,8 @@ importers:
         specifier: 4.5.0
         version: 4.5.0
       hono:
-        specifier: ^4.13.14
-        version: 4.13.14
+        specifier: ^4.13.16
+        version: 4.13.16
       ipaddr.js:
         specifier: 2.5.0
         version: 2.5.0
@@ -1474,8 +1474,8 @@ packages:
     resolution: {integrity: sha512-uKmdPc+DuarnR+XqZxEuWOMw7KzzKROrx3MLeJpFnMOs78S9M5eZ+X5RieS9UcSFQqbeXzbfWuX/W9Pyajinqw==}
     engines: {node: '>=4', npm: '>=3', yarn: '>=1.3.0'}
 
-  hono@4.13.14:
-    resolution: {integrity: sha512-yhRLQ21U6qa9Hsu2N7Qcbh8tE+WKEcoErjIo56LeSGiGXGp9sA7UpE86Ui9uexb61KakiGwuHMn2QdV7w6i6kQ==}
+  hono@4.13.16:
+    resolution: {integrity: sha512-AOLOEhvrV+iH92xXCnFr/5+3KjPKcI3xP63XJtX5spAnkznPdHijlIsUTpi7/9EhWqrTCekw5c5zh1K+YsVw7A==}
     engines: {node: '>=16.9.0'}
 
   html-encoding-sniffer@7.0.0:
@@ -2378,9 +2378,9 @@ snapshots:
 
   '@hexagon/base64@1.1.28': {}
 
-  '@hono/node-server@2.1.5(hono@4.13.14)':
+  '@hono/node-server@2.1.5(hono@4.13.16)':
     dependencies:
-      hono: 4.13.14
+      hono: 4.13.16
 
   '@jridgewell/resolve-uri@3.1.2': {}
 
@@ -2887,7 +2887,7 @@ snapshots:
 
   h3-js@4.5.0: {}
 
-  hono@4.13.14: {}
+  hono@4.13.16: {}
 
   html-encoding-sniffer@7.0.0(@noble/hashes@2.4.0):
     dependencies:
