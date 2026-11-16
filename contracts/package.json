@@ -16,7 +16,7 @@
     "generate": "openapi-typescript openapi.yaml --output generated/openapi.d.ts"
   },
   "devDependencies": {
-    "@redocly/cli": "^2.72.1",
+    "@redocly/cli": "^2.76.0",
     "openapi-typescript": "^7.13.0",
     "typescript": "5.9.3"
   }
